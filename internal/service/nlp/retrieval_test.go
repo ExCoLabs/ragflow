@@ -27,7 +27,7 @@ func TestRetrievalUsesRerankCandidatesCountAsCandidateSet(t *testing.T) {
 		rows[i] = map[string]interface{}{
 			"id":                  fmt.Sprintf("chunk-%02d", i),
 			"content_ltks":        "alpha",
-			"content_with_weight": "alpha",
+			"content_with_weight": fmt.Sprintf("alpha %02d", i),
 			"_score":              0.9,
 		}
 	}
