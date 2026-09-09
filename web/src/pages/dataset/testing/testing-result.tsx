@@ -17,6 +17,7 @@ import camelCase from 'lodash/camelCase';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router';
+import { MetadataFilterSummary } from './metadata-filter-summary';
 
 const similarityList: Array<{ field: keyof ITestingChunk; label: string }> = [
   { field: 'similarity', label: 'Hybrid Similarity' },
@@ -127,6 +128,12 @@ export function TestingResult({
           <FilterButton></FilterButton>
         </FilterPopover>
       </header>
+
+      {data.meta_filter && !loading && (
+        <MetadataFilterSummary
+          filter={data.meta_filter}
+        ></MetadataFilterSummary>
+      )}
 
       <>
         {data.chunks?.length > 0 && !loading && (

@@ -1,5 +1,7 @@
 package service
 
+import "ragflow/internal/common"
+
 // CheckEmbeddingRequest is the request structure for checking embedding compatibility.
 type CheckEmbeddingRequest struct {
 	EmbeddingID string `json:"embd_id" binding:"required"`
@@ -69,6 +71,9 @@ type SearchDatasetsResponse struct {
 	DocAggs []map[string]interface{} `json:"doc_aggs"`
 	Labels  *map[string]float64      `json:"labels"`
 	Total   int64                    `json:"total"`
+	// MetaFilter is what a requested metadata filter resolved to (for
+	// auto/semi_auto, the LLM's conditions). Omitted when none was requested.
+	MetaFilter *common.MetadataFilterDiagnostic `json:"meta_filter,omitempty"`
 }
 
 // SearchDatasetRequest is the request structure for searching chunks within one dataset.

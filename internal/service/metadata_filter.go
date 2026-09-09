@@ -619,11 +619,54 @@ func ApplyMetaDataFilter(
 	kbIDs []string,
 	manualValueResolver ...ManualValueResolver,
 ) ([]string, bool) {
-	if metaDataFilter == nil {
-		return baseDocIDs, false
+	return ApplyMetaDataFilterWithDiagnostics(
+		ctx, metaDataFilter, metaData, question, chatModel, baseDocIDs, kbIDs, nil, manualValueResolver...,
+	)
+}
+
+// ApplyMetaDataFilterWithDiagnostics is ApplyMetaDataFilter that also records
+// what the filter resolved to in diagnostics when diagnostics is non-nil. For
+// auto/semi_auto the conditions are the LLM's, which a caller has no other
+// way to see. Filtering behaviour is identical to ApplyMetaDataFilter.
+func ApplyMetaDataFilterWithDiagnostics(
+	ctx context.Context,
+	metaDataFilter map[string]interface{},
+	metaData common.MetaData,
+	question string,
+	chatModel *modelModule.ChatModel,
+	baseDocIDs []string,
+	kbIDs []string,
+	diagnostics *common.MetadataFilterDiagnostic,
+	manualValueResolver ...ManualValueResolver,
+) ([]string, bool) {
+	method, _ := metaDataFilter["method"].(string)
+	if method == "" {
+		method = "disabled"
+	}
+	record := func(status string, conditions []MetaFilterCondition, logic string, matched int) {
+		if diagnostics == nil {
+			return
+		}
+		if logic == "" {
+			logic = "and"
+		}
+		condMaps := make([]map[string]interface{}, 0, len(conditions))
+		for _, c := range conditions {
+			condMaps = append(condMaps, map[string]interface{}{"key": c.Key, "op": c.Op, "value": c.Value})
+		}
+		*diagnostics = common.MetadataFilterDiagnostic{
+			Method:               method,
+			Status:               status,
+			Conditions:           condMaps,
+			Logic:                logic,
+			MatchedDocumentCount: matched,
+		}
 	}
 
-	method, _ := metaDataFilter["method"].(string)
+	if metaDataFilter == nil {
+		record("disabled", nil, "", 0)
+		return baseDocIDs, false
+	}
 
 	// Helper to run metadata filter with push-down fallback
 	// runMetadataFilter executes filter conditions via push-down (ES/Infinity)
@@ -665,10 +708,12 @@ func ApplyMetaDataFilter(
 		filters, err := GenMetaFilter(ctx, chatModel, metaData, question, nil)
 		if err != nil {
 			common.Warn("Failed to generate meta filter", zap.Error(err))
+			record("not_generated", nil, "", 0)
 			return baseDocIDs, false
 		}
 		filteredIDs := runMetadataFilter(filters.Conditions, filters.Logic)
 		docIDs := constrainDocIDs(baseDocIDs, filteredIDs)
+		recordGenerated(record, filters, len(docIDs))
 		if len(docIDs) == 0 {
 			return nil, true // Return nil to indicate auto filter returned empty
 		}
@@ -707,16 +752,22 @@ func ApplyMetaDataFilter(
 				filters, err := GenMetaFilter(ctx, chatModel, filteredMeta, question, constraints)
 				if err != nil {
 					common.Warn("Failed to generate meta filter", zap.Error(err))
+					record("not_generated", nil, "", 0)
 					return baseDocIDs, false
 				}
 				filteredIDs := runMetadataFilter(filters.Conditions, filters.Logic)
 				docIDs := constrainDocIDs(baseDocIDs, filteredIDs)
+				recordGenerated(record, filters, len(docIDs))
 				if len(docIDs) == 0 {
 					return nil, true
 				}
 				return docIDs, false
 			}
 		}
+		// None of the selected keys exist in the metadata, so there was
+		// nothing to ask the LLM about.
+		record("not_generated", nil, "", 0)
+		return baseDocIDs, false
 
 	case "manual":
 		manualFilters, _ := metaDataFilter["manual"].([]interface{})
@@ -725,6 +776,7 @@ func ApplyMetaDataFilter(
 			logic = logicVal
 		}
 		if len(manualFilters) == 0 {
+			record("not_generated", nil, logic, 0)
 			return baseDocIDs, false
 		}
 
@@ -760,12 +812,32 @@ func ApplyMetaDataFilter(
 		filteredIDs := runMetadataFilter(conditions, logic)
 		docIDs := constrainDocIDs(baseDocIDs, filteredIDs)
 		if len(manualFilters) > 0 && len(docIDs) == 0 {
+			record("no_matches", conditions, logic, 0)
 			return []string{NoMatchDocIDSentinel}, false
 		}
+		record("applied", conditions, logic, len(docIDs))
 		return docIDs, false
+
+	case "disabled":
+		record("disabled", nil, "", 0)
+		return baseDocIDs, false
 	}
 
+	record("unsupported", nil, "", 0)
 	return baseDocIDs, false
+}
+
+// recordGenerated records the outcome of an LLM-generated (auto/semi_auto)
+// filter whose conditions narrowed the search to matched documents.
+func recordGenerated(record func(string, []MetaFilterCondition, string, int), filters *MetaFilterResult, matched int) {
+	switch {
+	case len(filters.Conditions) == 0:
+		record("not_generated", nil, filters.Logic, 0)
+	case matched == 0:
+		record("no_matches", filters.Conditions, filters.Logic, 0)
+	default:
+		record("applied", filters.Conditions, filters.Logic, matched)
+	}
 }
 
 func constrainDocIDs(baseDocIDs, filteredDocIDs []string) []string {
