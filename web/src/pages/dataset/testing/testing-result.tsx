@@ -3,6 +3,7 @@ import Empty from '@/components/empty/empty';
 import { FilterButton } from '@/components/list-filter-bar';
 import { FilterPopover } from '@/components/list-filter-bar/filter-popover';
 import { FilterCollection } from '@/components/list-filter-bar/interface';
+import { ReferenceDuplicates } from '@/components/reference-duplicates';
 import { Card } from '@/components/ui/card';
 import { useTranslate } from '@/hooks/common-hooks';
 import { useTestRetrieval } from '@/hooks/use-knowledge-request';
@@ -96,6 +97,10 @@ export function TestingResult({
                     <div className="mt-2.5 text-right text-xs text-text-sub-title-invert">
                       {x.document_keyword}
                     </div>
+                    <ReferenceDuplicates
+                      duplicates={x.duplicates}
+                      className="mt-1 text-right"
+                    />
                   </Card>
                 </article>
               ))}

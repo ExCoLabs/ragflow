@@ -93,9 +93,26 @@ func ChunksFormat(reference map[string]any) []map[string]any {
 			"row_id":            chunk["row_id"],
 			"doc_type":          GetValue(chunk, "doc_type_kwd", "doc_type"),
 			"document_metadata": chunk["document_metadata"],
+			"duplicates":        chunkDuplicates(chunk),
 		})
 	}
 	return out
+}
+
+// chunkDuplicates mirrors Python's `chunk.get("duplicates") or []`: the other
+// copies of the chunk's text that retrieval collapsed into it, or an empty list.
+func chunkDuplicates(chunk map[string]any) any {
+	switch d := chunk["duplicates"].(type) {
+	case []map[string]any:
+		if len(d) > 0 {
+			return d
+		}
+	case []any:
+		if len(d) > 0 {
+			return d
+		}
+	}
+	return []any{}
 }
 
 // DefaultCiteRules mirrors rag/prompts/generator.citation_prompt's

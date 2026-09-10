@@ -2612,7 +2612,15 @@ Success:
                 "similarity": 0.9669436601210759,
                 "term_similarity": 1.0,
                 "vector_similarity": 0.8898122004035864,
-                "duplicates": []
+                "duplicates": [
+                    {
+                        "chunk_id": "8ae5f2ef1a3d0c7b6f0e4d2a9c1b3e5f",
+                        "dataset_id": "c7ee74067a2c11efb21c0242ac120006",
+                        "document_id": "5c5999ec7be811ef9cab0242ac120005",
+                        "document_name": "copy of 1.txt",
+                        "similarity": 0.9012
+                    }
+                ]
             }
         ],
         "doc_aggs": [

@@ -2191,6 +2191,7 @@ func (s *ChatSessionService) chunksFormat(reference map[string]interface{}) []ma
 			"row_id":            chunk["row_id"],
 			"doc_type":          getValue(chunk, "doc_type_kwd", "doc_type"),
 			"document_metadata": chunk["document_metadata"],
+			"duplicates":        duplicatesOrEmpty(chunk["duplicates"]),
 		})
 	}
 	return out

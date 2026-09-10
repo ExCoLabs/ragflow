@@ -15,6 +15,7 @@ export default {
       yes: 'Yes',
       no: 'No',
       total: 'Total',
+      alsoFoundIn: 'Also found in {{count}} other file(s):',
       top: 'Top {{top}}',
       rename: 'Rename',
       name: 'Name',

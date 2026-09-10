@@ -5055,6 +5055,7 @@ func chunksFormat(chunksRaw []map[string]interface{}) []map[string]interface{} {
 			"row_id":            chunk["row_id"],
 			"doc_type":          getChunkValue(chunk, "doc_type_kwd", "doc_type"),
 			"document_metadata": chunk["document_metadata"],
+			"duplicates":        duplicatesOrEmpty(chunk["duplicates"]),
 		}
 		result = append(result, formatted)
 	}
@@ -5070,6 +5071,23 @@ func getChunkValue(chunk map[string]interface{}, k1, k2 string) interface{} {
 		return v
 	}
 	return chunk[k2]
+}
+
+// duplicatesOrEmpty mirrors Python's `chunk.get("duplicates") or []`: the
+// other copies of a chunk's text that retrieval collapsed into it, or an empty
+// list.
+func duplicatesOrEmpty(v interface{}) interface{} {
+	switch d := v.(type) {
+	case []map[string]interface{}:
+		if len(d) > 0 {
+			return d
+		}
+	case []interface{}:
+		if len(d) > 0 {
+			return d
+		}
+	}
+	return []interface{}{}
 }
 
 // harnessBoundDatasetNames renders the {knowledge} default for the agentic

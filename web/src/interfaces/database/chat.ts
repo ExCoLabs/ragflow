@@ -130,6 +130,15 @@ export interface Message {
   downloads?: IDocumentDownloadInfo[];
 }
 
+/** Another copy of a reference chunk's text, from a duplicated file. */
+export interface IDuplicateChunk {
+  chunk_id: string;
+  document_id: string;
+  document_name: string;
+  dataset_id: string;
+  similarity: number;
+}
+
 export interface IReferenceChunk {
   id: string;
   content: null;
@@ -143,6 +152,7 @@ export interface IReferenceChunk {
   positions: number[][];
   doc_type?: string;
   document_metadata?: Record<string, any>;
+  duplicates?: IDuplicateChunk[];
 }
 
 export interface IReference {
