@@ -699,8 +699,6 @@ RAGAnalyzer::~RAGAnalyzer() {
 void RAGAnalyzer::InitStemmer(Language language) {
     stemmer_->Init(language);
     use_lemmatizer_ = (language == STEM_LANG_ENGLISH);
-    use_stemmer_ = true;
-    fold_diacritics_ = false;
 }
 
 void RAGAnalyzer::SetLanguage(const std::string &language) {
@@ -709,13 +707,19 @@ void RAGAnalyzer::SetLanguage(const std::string &language) {
     lang_key.erase(lang_key.find_last_not_of(" \t") + 1);
     lang_key.erase(0, lang_key.find_first_not_of(" \t"));
 
-    // Slovak and Czech have no Snowball stemmer. Instead their diacritics
-    // are folded to ASCII before tokenization, and stemming/lemmatization
-    // are disabled, matching Infinity's RAG analyzer.
-    if (lang_key == "slovak" || lang_key == "czech") {
-        fold_diacritics_ = true;
-        use_stemmer_ = false;
-        use_lemmatizer_ = false;
+    // Slovak and Czech stem the token while it still carries its
+    // diacritics and fold the stem to ASCII afterwards, like Infinity's RAG
+    // analyzer. Snowball has no Slovak algorithm, so Slovak uses the
+    // light stemmer in slovak_stemmer.h. It gets its own Stemmer instance:
+    // stemmer_ keeps whichever Snowball language was last selected, so a
+    // later SetLanguage() for a language with no entry in the map below --
+    // which leaves the previous stemmer in place by design -- cannot end up
+    // stemming Latin text with Slovak rules.
+    stem_and_fold_ = (lang_key == "slovak" || lang_key == "czech");
+    split_pattern_ = stem_and_fold_ ? &regex_split_pattern_latin_ : &regex_split_pattern_;
+    if (stem_and_fold_) {
+        latin_stemmer_ = std::make_unique<Stemmer>();
+        latin_stemmer_->Init(lang_key == "slovak" ? STEM_LANG_SLOVAK : STEM_LANG_CZECH);
         return;
     }
 
@@ -933,6 +937,73 @@ static constexpr char DIACRITICS_FOLD_TABLE[0x180 - 0xC0] = {
     'U', 'u', 'U', 'u', 'W', 'w', 'Y', 'y', 'Y', 'Z', 'z', 'Z', 'z', 'Z', 'z', 0,
     // clang-format on
 };
+
+// Lowercase mapping for U+00C0-U+017F; 0 means the letter is unchanged.
+// Every entry matches Python's str.lower() except U+0130 İ, whose str.lower()
+// is two characters ("i" + U+0307) and which is mapped to a plain "i" here and
+// in Infinity's rag_tokenizer.py so the mapping stays one-to-one.
+static const uint16_t LATIN_LOWER_TABLE[192] = {
+    // clang-format off
+    // U+00C0 À Á Â Ã Ä Å Æ Ç È É Ê Ë Ì Í Î Ï
+    0x00E0, 0x00E1, 0x00E2, 0x00E3, 0x00E4, 0x00E5, 0x00E6, 0x00E7, 0x00E8, 0x00E9, 0x00EA, 0x00EB, 0x00EC, 0x00ED, 0x00EE, 0x00EF,
+    // U+00D0 Ð Ñ Ò Ó Ô Õ Ö × Ø Ù Ú Û Ü Ý Þ ß
+    0x00F0, 0x00F1, 0x00F2, 0x00F3, 0x00F4, 0x00F5, 0x00F6, 0, 0x00F8, 0x00F9, 0x00FA, 0x00FB, 0x00FC, 0x00FD, 0x00FE, 0,
+    // U+00E0 à á â ã ä å æ ç è é ê ë ì í î ï
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    // U+00F0 ð ñ ò ó ô õ ö ÷ ø ù ú û ü ý þ ÿ
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    // U+0100 Ā ā Ă ă Ą ą Ć ć Ĉ ĉ Ċ ċ Č č Ď ď
+    0x0101, 0, 0x0103, 0, 0x0105, 0, 0x0107, 0, 0x0109, 0, 0x010B, 0, 0x010D, 0, 0x010F, 0,
+    // U+0110 Đ đ Ē ē Ĕ ĕ Ė ė Ę ę Ě ě Ĝ ĝ Ğ ğ
+    0x0111, 0, 0x0113, 0, 0x0115, 0, 0x0117, 0, 0x0119, 0, 0x011B, 0, 0x011D, 0, 0x011F, 0,
+    // U+0120 Ġ ġ Ģ ģ Ĥ ĥ Ħ ħ Ĩ ĩ Ī ī Ĭ ĭ Į į
+    0x0121, 0, 0x0123, 0, 0x0125, 0, 0x0127, 0, 0x0129, 0, 0x012B, 0, 0x012D, 0, 0x012F, 0,
+    // U+0130 İ ı Ĳ ĳ Ĵ ĵ Ķ ķ ĸ Ĺ ĺ Ļ ļ Ľ ľ Ŀ
+    0x0069, 0, 0x0133, 0, 0x0135, 0, 0x0137, 0, 0, 0x013A, 0, 0x013C, 0, 0x013E, 0, 0x0140,
+    // U+0140 ŀ Ł ł Ń ń Ņ ņ Ň ň ŉ Ŋ ŋ Ō ō Ŏ ŏ
+    0, 0x0142, 0, 0x0144, 0, 0x0146, 0, 0x0148, 0, 0, 0x014B, 0, 0x014D, 0, 0x014F, 0,
+    // U+0150 Ő ő Œ œ Ŕ ŕ Ŗ ŗ Ř ř Ś ś Ŝ ŝ Ş ş
+    0x0151, 0, 0x0153, 0, 0x0155, 0, 0x0157, 0, 0x0159, 0, 0x015B, 0, 0x015D, 0, 0x015F, 0,
+    // U+0160 Š š Ţ ţ Ť ť Ŧ ŧ Ũ ũ Ū ū Ŭ ŭ Ů ů
+    0x0161, 0, 0x0163, 0, 0x0165, 0, 0x0167, 0, 0x0169, 0, 0x016B, 0, 0x016D, 0, 0x016F, 0,
+    // U+0170 Ű ű Ų ų Ŵ ŵ Ŷ ŷ Ÿ Ź ź Ż ż Ž ž ſ
+    0x0171, 0, 0x0173, 0, 0x0175, 0, 0x0177, 0, 0x00FF, 0x017A, 0, 0x017C, 0, 0x017E, 0, 0,
+    // clang-format on
+};
+
+std::string RAGAnalyzer::LowerLatin(const std::string &input) {
+    std::string output;
+    output.reserve(input.size());
+
+    size_t i = 0;
+    while (i < input.size()) {
+        unsigned char c = input[i];
+        // Only 2-byte UTF-8 sequences can encode U+00C0–U+017F.
+        if ((c & 0xE0) == 0xC0 && i + 1 < input.size()) {
+            uint32_t codepoint = ((c & 0x1F) << 6) | (static_cast<unsigned char>(input[i + 1]) & 0x3F);
+            if (codepoint >= 0xC0 && codepoint < 0x180) {
+                if (uint16_t lowered = LATIN_LOWER_TABLE[codepoint - 0xC0]; lowered != 0) {
+                    if (lowered < 0x80) {
+                        output += static_cast<char>(lowered);
+                    } else {
+                        output += static_cast<char>(0xC0 | (lowered >> 6));
+                        output += static_cast<char>(0x80 | (lowered & 0x3F));
+                    }
+                    i += 2;
+                    continue;
+                }
+            }
+            output += input[i];
+            output += input[i + 1];
+            i += 2;
+            continue;
+        }
+        output += input[i];
+        i += 1;
+    }
+
+    return output;
+}
 
 std::string RAGAnalyzer::FoldDiacritics(const std::string &input) {
     std::string output;
@@ -1437,7 +1508,7 @@ std::string RAGAnalyzer::Merge(const std::string &tks_str) const {
         std::size_t E = s + 1;
         for (std::size_t e = s + 2; e < std::min(tokens.size() + 1, s + 6); ++e) {
             std::string tk = Join(tokens, s, e, "");
-            if (re2::RE2::PartialMatch(tk, regex_split_pattern_)) {
+            if (re2::RE2::PartialMatch(tk, *split_pattern_)) {
                 if (Freq(tk) > 0) {
                     E = e;
                 }
@@ -1476,7 +1547,7 @@ void RAGAnalyzer::MergeWithPosition(const std::vector<std::string> &tokens,
         std::size_t E = s + 1;
         for (std::size_t e = s + 2; e < std::min(filtered_tokens.size() + 1, s + 6); ++e) {
             std::string tk = Join(filtered_tokens, s, e, "");
-            if (re2::RE2::PartialMatch(tk, regex_split_pattern_)) {
+            if (re2::RE2::PartialMatch(tk, *split_pattern_)) {
                 if (Freq(tk) > 0) {
                     E = e;
                 }
@@ -1497,24 +1568,27 @@ void RAGAnalyzer::MergeWithPosition(const std::vector<std::string> &tokens,
     merged_positions = std::move(res_positions);
 }
 
+std::string RAGAnalyzer::NormalizeTerm(const std::string &lowercase_term) {
+    if (stem_and_fold_) {
+        std::string stem_term = lowercase_term;
+        if (re2::RE2::FullMatch(lowercase_term, latin_word_pattern_)) {
+            latin_stemmer_->Stem(lowercase_term, stem_term);
+        }
+        return FoldDiacritics(stem_term);
+    }
+
+    std::string term_to_stem = use_lemmatizer_ ? wordnet_lemma_->Lemmatize(lowercase_term) : lowercase_term;
+    std::string stem_term;
+    stemmer_->Stem(term_to_stem, stem_term);
+    return stem_term;
+}
+
 void RAGAnalyzer::EnglishNormalize(const std::vector<std::string> &tokens, std::vector<std::string> &res) {
     for (auto &t : tokens) {
         if (re2::RE2::PartialMatch(t, pattern1_)) { //"[a-zA-Z_-]+$"
             char *lowercase_term = lowercase_string_buffer_.data();
             ToLower(t.c_str(), t.size(), lowercase_term, term_string_buffer_limit_);
-            std::string term_to_stem;
-            if (use_lemmatizer_) {
-                term_to_stem = wordnet_lemma_->Lemmatize(lowercase_term);
-            } else {
-                term_to_stem = lowercase_term;
-            }
-            std::string stem_term;
-            if (use_stemmer_) {
-                stemmer_->Stem(term_to_stem, stem_term);
-            } else {
-                stem_term = term_to_stem;
-            }
-            res.push_back(stem_term);
+            res.push_back(NormalizeTerm(lowercase_term));
         } else {
             res.push_back(t);
         }
@@ -1523,7 +1597,7 @@ void RAGAnalyzer::EnglishNormalize(const std::vector<std::string> &tokens, std::
 
 void RAGAnalyzer::SplitByLang(const std::string &line, std::vector<std::pair<std::string, bool>> &txt_lang_pairs) const {
     std::vector<std::string> arr;
-    Split(line, regex_split_pattern_, arr, true);
+    Split(line, *split_pattern_, arr, true);
 
     for (const auto &a : arr) {
         if (a.empty()) {
@@ -1855,13 +1929,13 @@ std::string PCRE2GlobalReplace(const std::string &text, const std::string &patte
 }
 
 std::string RAGAnalyzer::Tokenize(const std::string &line) {
-    // Fold diacritics to ASCII before any other processing when the
-    // language asks for it (Slovak, Czech).
-    std::string folded_line;
+    // Lowercase the accented Latin block up front when the language asks
+    // for it (Slovak, Czech); the per-token ToLower below is ASCII-only.
+    std::string lowered_line;
     const std::string *input = &line;
-    if (fold_diacritics_) {
-        folded_line = FoldDiacritics(line);
-        input = &folded_line;
+    if (stem_and_fold_) {
+        lowered_line = LowerLatin(line);
+        input = &lowered_line;
     }
 
     // Python-style simple tokenization: re.sub(r"\\W+", " ", line)
@@ -1888,19 +1962,7 @@ std::string RAGAnalyzer::Tokenize(const std::string &line) {
             for (unsigned i = 0; i < term_list.size(); ++i) {
                 char *lowercase_term = lowercase_string_buffer_.data();
                 ToLower(term_list[i].c_str(), term_list[i].size(), lowercase_term, term_string_buffer_limit_);
-                std::string term_to_stem;
-                if (use_lemmatizer_) {
-                    term_to_stem = wordnet_lemma_->Lemmatize(lowercase_term);
-                } else {
-                    term_to_stem = lowercase_term;
-                }
-                std::string stem_term;
-                if (use_stemmer_) {
-                    stemmer_->Stem(term_to_stem, stem_term);
-                } else {
-                    stem_term = term_to_stem;
-                }
-                res.push_back(stem_term);
+                res.push_back(NormalizeTerm(lowercase_term));
             }
             continue;
         }
@@ -1932,18 +1994,18 @@ std::string RAGAnalyzer::Tokenize(const std::string &line) {
 }
 
 std::pair<std::vector<std::string>, std::vector<std::pair<unsigned, unsigned>>> RAGAnalyzer::TokenizeWithPosition(const std::string &line) {
-    // Fold diacritics to ASCII before any other processing when the
-    // language asks for it (Slovak, Czech). Folding shrinks 2-byte UTF-8
-    // letters to 1-byte ASCII, so byte offsets shift; like the StrQ2B and
-    // OpenCC stages below, a position mapping recovers offsets on the
-    // original input.
-    std::string folded_line;
-    std::vector<unsigned> fold_pos_mapping;
+    // Lowercase the accented Latin block up front when the language asks
+    // for it (Slovak, Czech); the per-token ToLower below is ASCII-only.
+    // U+0130 İ shrinks from 2 bytes to 1, so byte offsets can shift; like the
+    // StrQ2B and OpenCC stages below, a position mapping recovers offsets on
+    // the original input.
+    std::string lowered_line;
+    std::vector<unsigned> lower_pos_mapping;
     const std::string *input = &line;
-    if (fold_diacritics_) {
-        folded_line = FoldDiacritics(line);
-        BuildPositionMapping(line, folded_line, fold_pos_mapping);
-        input = &folded_line;
+    if (stem_and_fold_) {
+        lowered_line = LowerLatin(line);
+        BuildPositionMapping(line, lowered_line, lower_pos_mapping);
+        input = &lowered_line;
     }
 
     // Python-style simple tokenization: re.sub(r"\W+", " ", line)
@@ -1964,7 +2026,7 @@ std::pair<std::vector<std::string>, std::vector<std::pair<unsigned, unsigned>>> 
     std::vector<unsigned> opencc_pos_mapping;
     BuildPositionMapping(str1, strline, opencc_pos_mapping);
 
-    // Combine all position mappings: strline -> str1 -> processed_line -> (folded_)line
+    // Combine all position mappings: strline -> str1 -> processed_line -> (lowered_)line
     std::vector<unsigned> final_pos_mapping;
     final_pos_mapping.resize(strline.size() + 1);
 
@@ -1991,10 +2053,10 @@ std::pair<std::vector<std::string>, std::vector<std::pair<unsigned, unsigned>>> 
         final_pos_mapping[strline.size()] = static_cast<unsigned>(input->size());
     }
 
-    // Remap folded-line offsets back to the original input.
-    if (fold_diacritics_) {
+    // Remap lowercased-line offsets back to the original input.
+    if (stem_and_fold_) {
         for (auto &pos : final_pos_mapping) {
-            pos = pos < fold_pos_mapping.size() ? fold_pos_mapping[pos] : static_cast<unsigned>(line.size());
+            pos = pos < lower_pos_mapping.size() ? lower_pos_mapping[pos] : static_cast<unsigned>(line.size());
         }
     }
 
@@ -2036,20 +2098,7 @@ std::pair<std::vector<std::string>, std::vector<std::pair<unsigned, unsigned>>> 
                         // Apply lowercase before lemmatization to match Python NLTK behavior
                         char *lowercase_term = lowercase_string_buffer_.data();
                         ToLower(term.c_str(), term.size(), lowercase_term, term_string_buffer_limit_);
-                        std::string term_to_stem;
-                        if (use_lemmatizer_) {
-                            term_to_stem = wordnet_lemma_->Lemmatize(lowercase_term);
-                        } else {
-                            term_to_stem = lowercase_term;
-                        }
-                        std::string stem_term;
-                        if (use_stemmer_) {
-                            stemmer_->Stem(term_to_stem, stem_term);
-                        } else {
-                            stem_term = term_to_stem;
-                        }
-
-                        tokens.push_back(stem_term);
+                        tokens.push_back(NormalizeTerm(lowercase_term));
 
                         // Map positions back to original string using final_pos_mapping
                         if (start_pos < final_pos_mapping.size()) {
@@ -2369,20 +2418,7 @@ void RAGAnalyzer::EnglishNormalizeWithPosition(const std::vector<std::string> &t
         if (re2::RE2::PartialMatch(token, pattern1_)) { //"[a-zA-Z_-]+$"
             char *lowercase_term = lowercase_string_buffer_.data();
             ToLower(token.c_str(), token.size(), lowercase_term, term_string_buffer_limit_);
-            std::string term_to_stem;
-            if (use_lemmatizer_) {
-                term_to_stem = wordnet_lemma_->Lemmatize(lowercase_term);
-            } else {
-                term_to_stem = lowercase_term;
-            }
-            std::string stem_term;
-            if (use_stemmer_) {
-                stemmer_->Stem(term_to_stem, stem_term);
-            } else {
-                stem_term = term_to_stem;
-            }
-
-            normalize_tokens.push_back(stem_term);
+            normalize_tokens.push_back(NormalizeTerm(lowercase_term));
             normalize_positions.emplace_back(start_pos, end_pos);
         } else {
             normalize_tokens.push_back(token);

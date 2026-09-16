@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "api.h"
+#include "slovak_stemmer.h"
+#include "stem_UTF_8_czech.h"
 #include "stem_UTF_8_danish.h"
 #include "stem_UTF_8_dutch.h"
 #include "stem_UTF_8_english.h"
@@ -66,6 +68,8 @@ StemFunc STEM_FUNCTION[STEM_LANG_EOS] = {
     {spanish_UTF_8_create_env, spanish_UTF_8_close_env, spanish_UTF_8_stem, 0},
     {swedish_UTF_8_create_env, swedish_UTF_8_close_env, swedish_UTF_8_stem, 0},
     {turkish_UTF_8_create_env, turkish_UTF_8_close_env, turkish_UTF_8_stem, 0},
+    {czech_UTF_8_create_env, czech_UTF_8_close_env, czech_UTF_8_stem, 0},
+    {0, 0, 0, 0}, // STEM_LANG_SLOVAK: handled by SlovakStem(), no Snowball env
 };
 
 Stemmer::Stemmer() {
@@ -84,6 +88,11 @@ bool Stemmer::Init(Language language) {
     }
 
     DeInit();
+    language_ = language;
+    if (language == STEM_LANG_SLOVAK) {
+        // Snowball has no Slovak algorithm; Stem() calls SlovakStem() instead.
+        return true;
+    }
 
     // create stemming function structure
     stem_function_ = static_cast<void *>(new StemFunc);
@@ -131,6 +140,11 @@ void Stemmer::DeInit(void) {
 }
 
 bool Stemmer::Stem(const std::string &term, std::string &resultWord) {
+    if (language_ == STEM_LANG_SLOVAK) {
+        resultWord = SlovakStem(term);
+        return true;
+    }
+
     if (!stem_function_) {
         return false;
     }

@@ -106,9 +106,22 @@ private:
     // decomposition is one ASCII letter plus combining marks to that base
     // letter, preserving case (Š→S, ď→d). Letters without such a
     // decomposition (æ, œ, ß, ø, ł, …) pass through unchanged. Applied to
-    // the whole input before tokenization when SetLanguage selected a
-    // diacritics-folding language (Slovak, Czech).
+    // each token after stemming when SetLanguage selected a stem-and-fold
+    // language (Slovak, Czech).
     static std::string FoldDiacritics(const std::string& input);
+
+    // Lowercase the same Latin-1 Supplement / Latin Extended-A block
+    // (Š→š). Applied to the whole input of a stem-and-fold language, because
+    // the per-token ToLower only knows ASCII while the stemmer needs
+    // lowercase accented letters. Mirrors lower_latin() in Infinity's
+    // rag_tokenizer.py, including its one deviation from str.lower(): U+0130 İ
+    // lowercases to a plain "i" so that the mapping stays one-to-one.
+    static std::string LowerLatin(const std::string& input);
+
+    // Lemmatize (English only) and stem one already-lowercased term; a
+    // stem-and-fold language stems the accented term and folds the stem
+    // afterwards. Mirrors _normalize_token() in Infinity's rag_tokenizer.py.
+    std::string NormalizeTerm(const std::string& lowercase_term);
 
     static void BuildPositionMapping(const std::string& original, const std::string& converted,
                                      std::vector<unsigned>& pos_mapping);
@@ -163,15 +176,15 @@ public:
 
     std::unique_ptr<Stemmer> stemmer_;
 
+    std::unique_ptr<Stemmer> latin_stemmer_; // Slovak/Czech; see SetLanguage()
+
     OpenCC* opencc_{nullptr};
 
     mutable std::vector<char> lowercase_string_buffer_;
 
     bool use_lemmatizer_{true};
 
-    bool use_stemmer_{true}; // Disabled for languages without a Snowball stemmer (Slovak, Czech)
-
-    bool fold_diacritics_{false}; // Fold Latin diacritics to ASCII before tokenization (Slovak, Czech)
+    bool stem_and_fold_{false}; // Stem the accented token, then fold its stem to ASCII (Slovak, Czech)
 
     bool fine_grained_{false};
 
@@ -190,6 +203,22 @@ public:
     static inline re2::RE2 regex_split_pattern_{
         R"#(([ ,\.<>/?;:'\[\]\\`!@#$%^&*\(\)\{\}\|_+=《》，。？、；‘’：“”【】~！￥%……（）——-]+|[a-zA-Z0-9,\.-]+))#"
     };
+
+    // The letter run alternative above keeps a word whole, so it cuts an
+    // accented word at the accent ('škola' -> 'š', 'kola'). A stem-and-fold
+    // language splits on this variant instead, which also admits the block
+    // FoldDiacritics covers. Mirrors SPLIT_CHAR_LATIN in Infinity's
+    // rag_tokenizer.py.
+    static inline re2::RE2 regex_split_pattern_latin_{
+        R"#(([ ,\.<>/?;:'\[\]\\`!@#$%^&*\(\)\{\}\|_+=《》，。？、；‘’：“”【】~！￥%……（）——-]+|[a-zA-Z0-9\x{00C0}-\x{017F},\.-]+))#"
+    };
+
+    // Letters a stem-and-fold token may be built from; mirrors
+    // _LATIN_WORD_PATTERN in Infinity's rag_tokenizer.py.
+    static inline re2::RE2 latin_word_pattern_{R"#([a-zA-Z_\x{00C0}-\x{017F}-]+)#"};
+
+    // Points at whichever of the two split patterns SetLanguage selected.
+    const re2::RE2* split_pattern_{&regex_split_pattern_};
 
     static inline re2::RE2 blank_pattern_{"( )"};
 

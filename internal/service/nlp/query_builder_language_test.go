@@ -27,8 +27,8 @@ import (
 )
 
 // TestQueryBuilder_Question_FoldingLanguage verifies that a Slovak query is
-// tokenized by the analyzer with diacritics folded to ASCII, so every emitted
-// keyword and the query expression match the folded index tokens.
+// tokenized by the analyzer stemmed and folded to ASCII, so every emitted
+// keyword and the query expression match the index tokens.
 func TestQueryBuilder_Question_FoldingLanguage(t *testing.T) {
 	// Folding happens inside the analyzer, so the real dictionaries must be
 	// loaded (manual tier, like the analyzer-level tests in internal/tokenizer).
@@ -59,8 +59,12 @@ func TestQueryBuilder_Question_FoldingLanguage(t *testing.T) {
 			t.Errorf("Question(Slovak) keyword contains diacritics: %q", k)
 		}
 	}
-	if !strings.Contains(expr.MatchingText, "danove") {
-		t.Errorf("Question(Slovak) query missing folded token 'danove': %q", expr.MatchingText)
+	// "daňové" and "živnostníkov" are stemmed while they still carry their
+	// diacritics, then folded.
+	for _, want := range []string{"(dan^", "(zivnostnik^"} {
+		if !strings.Contains(expr.MatchingText, want) {
+			t.Errorf("Question(Slovak) query missing stemmed, folded term %q: %q", want, expr.MatchingText)
+		}
 	}
 
 	// original_query must stay untouched for highlighting.
