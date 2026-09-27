@@ -46,6 +46,7 @@ type SearchDatasetsRequest struct {
 	DocumentIDs              []string               `json:"document_ids,omitempty"`
 	DocIDs                   []string               `json:"doc_ids,omitempty"`
 	UseKG                    *bool                  `json:"use_kg,omitempty"`
+	TOCEnhance               *bool                  `json:"toc_enhance,omitempty"`
 	KNNTopK                  *int                   `json:"knn_top_k,omitempty"`
 	TopK                     *int                   `json:"top_k,omitempty"` // Legacy alias for knn_top_k.
 	KNNNumCandidates         *int                   `json:"knn_num_candidates,omitempty"`
@@ -54,6 +55,7 @@ type SearchDatasetsRequest struct {
 	MetadataCondition        map[string]interface{} `json:"metadata_condition,omitempty"`
 	MetadataFilter           map[string]interface{} `json:"meta_data_filter,omitempty"`
 	RerankID                 *string                `json:"rerank_id,omitempty"`
+	ChatID                   *string                `json:"chat_id,omitempty"` // Chat model ID for the LLM-assisted steps.
 	Keyword                  *bool                  `json:"keyword,omitempty"`
 	Highlight                *bool                  `json:"highlight,omitempty"`
 	SimilarityThreshold      *float64               `json:"similarity_threshold,omitempty"`
@@ -81,6 +83,7 @@ type SearchDatasetRequest struct {
 	DocumentIDs              []string               `json:"document_ids,omitempty"`
 	DocIDs                   []string               `json:"doc_ids,omitempty"`
 	UseKG                    *bool                  `json:"use_kg,omitempty"`
+	TOCEnhance               *bool                  `json:"toc_enhance,omitempty"`
 	KNNTopK                  *int                   `json:"knn_top_k,omitempty"`
 	TopK                     *int                   `json:"top_k,omitempty"` // Legacy alias for knn_top_k.
 	KNNNumCandidates         *int                   `json:"knn_num_candidates,omitempty"`
@@ -89,6 +92,7 @@ type SearchDatasetRequest struct {
 	MetadataCondition        map[string]interface{} `json:"metadata_condition,omitempty"`
 	MetadataFilter           map[string]interface{} `json:"meta_data_filter,omitempty"`
 	RerankID                 *string                `json:"rerank_id,omitempty"`
+	ChatID                   *string                `json:"chat_id,omitempty"` // Chat model ID for the LLM-assisted steps.
 	Keyword                  *bool                  `json:"keyword,omitempty"`
 	SimilarityThreshold      *float64               `json:"similarity_threshold,omitempty"`
 	KeywordsSimilarityWeight *float64               `json:"keywords_similarity_weight,omitempty"`
@@ -111,6 +115,7 @@ func (req *SearchDatasetRequest) ToSearchDatasetsRequest(datasetID string) *Sear
 		DocumentIDs:              req.DocumentIDs,
 		DocIDs:                   req.DocIDs,
 		UseKG:                    req.UseKG,
+		TOCEnhance:               req.TOCEnhance,
 		KNNTopK:                  req.KNNTopK,
 		TopK:                     req.TopK,
 		KNNNumCandidates:         req.KNNNumCandidates,
@@ -119,6 +124,7 @@ func (req *SearchDatasetRequest) ToSearchDatasetsRequest(datasetID string) *Sear
 		MetadataCondition:        req.MetadataCondition,
 		MetadataFilter:           req.MetadataFilter,
 		RerankID:                 req.RerankID,
+		ChatID:                   req.ChatID,
 		Keyword:                  req.Keyword,
 		SimilarityThreshold:      req.SimilarityThreshold,
 		KeywordsSimilarityWeight: req.KeywordsSimilarityWeight,

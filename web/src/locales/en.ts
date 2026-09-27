@@ -398,6 +398,8 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
       dataFlowRequired: 'Data flow is required',
     },
     knowledgeDetails: {
+      chatSettingsApplied:
+        'Using the saved retrieval settings of chat "{{name}}".',
       continueUpload: 'Continue upload',
       reselectParser: 'Reselect parse method',
       goAddModel: 'Go add model',
@@ -1043,6 +1045,9 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       delete: 'Delete',
     },
     chat: {
+      testRetrieval: 'Test retrieval',
+      testRetrievalTip:
+        'Open retrieval testing with the saved settings of this chat.',
       chatSupport: 'Chat Support',
       replyInstantly: 'We typically reply instantly',
       typeYourMessage: 'Type your message...',

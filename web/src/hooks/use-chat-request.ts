@@ -269,9 +269,7 @@ export const usePatchChat = () => {
   return { data, loading, patchChat: mutateAsync };
 };
 
-export const useFetchChat = () => {
-  const { id } = useParams();
-
+export const useFetchChatById = (id?: string) => {
   const {
     data,
     isFetching: loading,
@@ -289,6 +287,11 @@ export const useFetchChat = () => {
   });
 
   return { data, loading, refetch };
+};
+
+export const useFetchChat = () => {
+  const { id } = useParams();
+  return useFetchChatById(id);
 };
 
 //#region Session

@@ -22,6 +22,7 @@ import {
   similarityThresholdSchema,
   keywordsSimilarityWeightSchema,
 } from '@/components/similarity-slider';
+import { SwitchFormField } from '@/components/switch-form-field';
 import { TopSelectFormItem } from '@/components/top-select';
 import { ButtonLoading } from '@/components/ui/button';
 import {
@@ -37,10 +38,11 @@ import { useTestRetrieval } from '@/hooks/use-knowledge-request';
 import { ITestRetrievalRequestBody } from '@/interfaces/request/knowledge';
 import { trim } from 'lodash';
 import { Send } from 'lucide-react';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router';
 import { useOwnerTenantId } from '../contexts/knowledge-base-context';
+import { useChatRetrievalSettings } from './use-chat-retrieval-settings';
 
 type TestingFormProps = Pick<
   ReturnType<typeof useTestRetrieval>,
@@ -56,6 +58,7 @@ export default function TestingForm({
   const { id } = useParams();
   const ownerTenantId = useOwnerTenantId();
   const knowledgeBaseId = id;
+  const chatSettings = useChatRetrievalSettings();
 
   const formSchema = z
     .object({
@@ -68,22 +71,39 @@ export default function TestingForm({
       ...MetadataFilterSchema,
       page_size: z.number().int().min(1).max(100),
       ...rerankCandidatesCountSchema,
+      keyword: z.boolean().optional(),
     })
     .refine((values) => values.rerank_candidates_count >= values.page_size, {
       message: t('chat.rerankCandidatesCountValidation'),
       path: ['rerank_candidates_count'],
     });
 
-  const form = useForm<z.infer<typeof formSchema>>({
-    resolver: zodResolver(formSchema),
-    defaultValues: {
+  const defaultValues = useMemo(
+    () => ({
       ...initialSimilarityThresholdValue,
       ...initialKeywordsSimilarityWeightValue,
       dataset_ids: [knowledgeBaseId],
       page_size: 10,
       rerank_candidates_count: 64,
-    },
+      keyword: false,
+    }),
+    [knowledgeBaseId],
+  );
+
+  const form = useForm<z.infer<typeof formSchema>>({
+    resolver: zodResolver(formSchema),
+    defaultValues,
   });
+
+  // Swap the whole setting set when a chat's settings arrive or go away, so
+  // no chat-only value (chat model, knowledge graph, TOC) outlives its chat.
+  useEffect(() => {
+    form.reset({
+      ...defaultValues,
+      ...chatSettings?.values,
+      question: form.getValues('question'),
+    });
+  }, [chatSettings, defaultValues, form]);
 
   const question = form.watch('question');
 
@@ -105,6 +125,13 @@ export default function TestingForm({
       >
         <div className="px-5 h-0 flex-1">
           <FormContainer className="p-5 h-full overflow-auto">
+            {chatSettings && (
+              <p className="text-sm text-text-secondary">
+                {t('knowledgeDetails.chatSettingsApplied', {
+                  name: chatSettings.chatName,
+                })}
+              </p>
+            )}
             <SimilaritySliderFormField
               isTooltipShown={true}
             ></SimilaritySliderFormField>
@@ -115,6 +142,11 @@ export default function TestingForm({
             <MetadataFilter prefix=""></MetadataFilter>
             <RerankCandidatesCountFormField></RerankCandidatesCountFormField>
             <TopSelectFormItem></TopSelectFormItem>
+            <SwitchFormField
+              name="keyword"
+              label={t('chat.keyword')}
+              tooltip={t('chat.keywordTip')}
+            ></SwitchFormField>
           </FormContainer>
         </div>
 

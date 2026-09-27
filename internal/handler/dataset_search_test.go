@@ -167,7 +167,7 @@ func TestDatasetsHandlerSearchDatasetsSuccess(t *testing.T) {
 	h := &DatasetsHandler{searchDatasetsService: fake}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/datasets/search", strings.NewReader(`{"question":"  hello  ","dataset_ids":["ds-1"],"document_ids":["doc-1"],"page_size":9,"metadata_condition":{"logic":"and","conditions":[]},"top_k":7,"include_knowledge_compilation":false}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/datasets/search", strings.NewReader(`{"question":"  hello  ","dataset_ids":["ds-1"],"document_ids":["doc-1"],"page_size":9,"metadata_condition":{"logic":"and","conditions":[]},"top_k":7,"include_knowledge_compilation":false,"chat_id":"glm-4@ZHIPU","toc_enhance":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = req
@@ -186,6 +186,9 @@ func TestDatasetsHandlerSearchDatasetsSuccess(t *testing.T) {
 	}
 	if fake.req.TopK == nil || *fake.req.TopK != 7 {
 		t.Fatalf("legacy top_k alias=%v want 7", fake.req.TopK)
+	}
+	if fake.req.ChatID == nil || *fake.req.ChatID != "glm-4@ZHIPU" || fake.req.TOCEnhance == nil || !*fake.req.TOCEnhance {
+		t.Fatalf("chat_id=%v toc_enhance=%v want glm-4@ZHIPU and true", fake.req.ChatID, fake.req.TOCEnhance)
 	}
 	if fake.req.PageSize == nil || *fake.req.PageSize != 9 || len(fake.req.DocumentIDs) != 1 || fake.req.MetadataCondition["logic"] != "and" {
 		t.Fatalf("public request fields = %#v", fake.req)

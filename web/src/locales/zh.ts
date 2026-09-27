@@ -357,6 +357,7 @@ export default {
       dataFlowRequired: '数据流必填',
     },
     knowledgeDetails: {
+      chatSettingsApplied: '正在使用助理“{{name}}”已保存的检索设置。',
       continueUpload: '继续上传',
       reselectParser: '重新选择解析方法',
       goAddModel: '前往添加模型',
@@ -942,6 +943,8 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
       delete: '删除',
     },
     chat: {
+      testRetrieval: '检索测试',
+      testRetrievalTip: '使用该助理已保存的设置打开检索测试。',
       chatSupport: '聊天支持',
       replyInstantly: '我们通常会即时回复',
       typeYourMessage: '输入消息...',
