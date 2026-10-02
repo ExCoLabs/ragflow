@@ -25,6 +25,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { FieldErrors, useForm, useFormState, useWatch } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import { z } from 'zod';
+import { ChunkMetadataSection } from './components/chunk-metadata-section';
 import LinkDataSource, {
   IDataSourceNodeProps,
 } from './components/link-data-source';
@@ -241,6 +242,12 @@ export default function DatasetSetting() {
                       fixedFileFormats
                     />
                   )}
+
+                  <Divider />
+                  <div className="text-base font-medium text-text-primary">
+                    {t('knowledgeConfiguration.chunkMetadata')}
+                  </div>
+                  <ChunkMetadataSection />
 
                   <Divider />
                   <LinkDataSource

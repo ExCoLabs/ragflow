@@ -46,6 +46,37 @@ type MetaFilterCondition struct {
 	Key   string      `json:"key"`
 	Value interface{} `json:"value"`
 	Op    string      `json:"op"`
+	// Strength is "hard" (a requirement: filter) or "soft" (a preference:
+	// boost). The model only emits it when asked (MetaFilterPromptOptions.AllowSoft).
+	Strength string `json:"strength,omitempty"`
+}
+
+// MetaFilterPromptOptions are the optional parts of the meta_filter.md prompt.
+type MetaFilterPromptOptions struct {
+	// AllowSoft asks the model to tag each condition "hard" or "soft", so one
+	// call serves both the metadata filter and the metadata boost.
+	AllowSoft bool
+	// Instructions is free-text guidance set on the chat, agent or search
+	// (meta_data_filter.instructions): which value fits which kind of
+	// question, when not to filter. Unlike anything stored on the dataset it
+	// is per consumer, so two chats over one dataset can filter differently.
+	Instructions string
+}
+
+// MetaFilterInstructionsLimit caps meta_data_filter.instructions in the
+// prompt. The form bounds the field, but a config written through the API is
+// not, and this prompt carries no token budgeting.
+const MetaFilterInstructionsLimit = 4000
+
+// MetaFilterInstructions reads meta_data_filter.instructions, trimmed and
+// capped at MetaFilterInstructionsLimit characters.
+func MetaFilterInstructions(metaDataFilter map[string]interface{}) string {
+	text, _ := metaDataFilter["instructions"].(string)
+	text = strings.TrimSpace(text)
+	if runes := []rune(text); len(runes) > MetaFilterInstructionsLimit {
+		text = string(runes[:MetaFilterInstructionsLimit]) + "…"
+	}
+	return text
 }
 
 // MetaFilterResult represents the result of LLM-generated filter
@@ -130,41 +161,84 @@ func getMetaFilterTemplate() (string, error) {
 }
 
 // metaFilterIfBlock matches one {% if name %}...{% endif %} block of
-// meta_filter.md, together with the newline after each tag so a dropped or
-// unwrapped block leaves no stray blank line (Jinja's trim_blocks).
+// meta_filter.md. Blocks do not nest within the same name; a block nested in
+// another (allow_soft inside instructions) is resolved first.
 func metaFilterIfBlock(name string) *regexp.Regexp {
-	return regexp.MustCompile(`(?s)\{%\s*if\s+` + name + `\s*%\}\n?(.*?)\{%\s*endif\s*%\}\n?`)
+	return regexp.MustCompile(`(?s)\{%\s*if\s+` + regexp.QuoteMeta(name) + `\s*%\}(.*?)\{%\s*endif\s*%\}`)
 }
 
-var (
-	metaFilterConstraintsBlock  = metaFilterIfBlock("constraints")
-	metaFilterDescriptionsBlock = metaFilterIfBlock("metadata_descriptions")
-)
+// metaFilterTemplateBlocks lists the conditional blocks of meta_filter.md,
+// inner blocks first: allow_soft also appears inline inside the instructions
+// block, and a non-greedy match of the outer block would otherwise stop at the
+// inner {% endif %}.
+var metaFilterTemplateBlocks = []struct {
+	name string
+	re   *regexp.Regexp
+}{
+	{"allow_soft", metaFilterIfBlock("allow_soft")},
+	{"constraints", metaFilterIfBlock("constraints")},
+	{"metadata_descriptions", metaFilterIfBlock("metadata_descriptions")},
+	{"instructions", metaFilterIfBlock("instructions")},
+}
+
+// renderTemplateIf keeps (unwraps) or drops every block re matches.
+//
+// A tag that starts its line also takes the newline after it, so a block
+// written on lines of its own leaves no stray blank line (Jinja's
+// trim_blocks); an inline tag ("operators{% if allow_soft %} and
+// strength{% endif %}.") takes nothing, so the surrounding text keeps its
+// line breaks.
+func renderTemplateIf(tmpl string, re *regexp.Regexp, keep bool) string {
+	atLineStart := func(i int) bool { return i == 0 || tmpl[i-1] == '\n' }
+	skipNewline := func(i int) int {
+		if i < len(tmpl) && tmpl[i] == '\n' {
+			return i + 1
+		}
+		return i
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range re.FindAllStringSubmatchIndex(tmpl, -1) {
+		start, end, bodyStart, bodyEnd := m[0], m[1], m[2], m[3]
+		if atLineStart(start) {
+			bodyStart = skipNewline(bodyStart)
+		}
+		if atLineStart(bodyEnd) {
+			end = skipNewline(end)
+		}
+		b.WriteString(tmpl[last:start])
+		if keep && bodyStart <= bodyEnd {
+			b.WriteString(tmpl[bodyStart:bodyEnd])
+		}
+		last = end
+	}
+	b.WriteString(tmpl[last:])
+	return b.String()
+}
 
 // renderMetaFilterTemplate renders the Jinja2-like template from meta_filter.md
-func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints, descriptions string) (string, error) {
+func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints, descriptions string, opts MetaFilterPromptOptions) (string, error) {
 	templateContent, err := getMetaFilterTemplate()
 	if err != nil {
 		return "", err
 	}
 
 	// Resolve the conditional blocks before substituting any value, so text
-	// coming from the question or a dataset owner's description is never
-	// parsed as template syntax.
-	result := templateContent
-	for _, block := range []struct {
-		re   *regexp.Regexp
-		keep bool
-	}{
-		{metaFilterConstraintsBlock, constraints != ""},
-		{metaFilterDescriptionsBlock, descriptions != ""},
-	} {
-		if block.keep {
-			result = block.re.ReplaceAllString(result, "$1")
-		} else {
-			result = block.re.ReplaceAllString(result, "")
-		}
+	// coming from the question, a dataset owner's description or the
+	// consumer's instructions is never parsed as template syntax.
+	keep := map[string]bool{
+		"allow_soft":            opts.AllowSoft,
+		"constraints":           constraints != "",
+		"metadata_descriptions": descriptions != "",
+		"instructions":          opts.Instructions != "",
 	}
+	result := templateContent
+	for _, block := range metaFilterTemplateBlocks {
+		result = renderTemplateIf(result, block.re, keep[block.name])
+	}
+	// Clean up any extra newlines from removed blocks, before the values go
+	// in so a value's own blank lines survive.
+	result = regexp.MustCompile(`\n{3,}`).ReplaceAllString(result, "\n\n")
 
 	// A single pass: a substituted value is not scanned for further placeholders.
 	result = strings.NewReplacer(
@@ -173,17 +247,15 @@ func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints, 
 		"{{ user_question }}", question,
 		"{{ constraints }}", constraints,
 		"{{ metadata_descriptions }}", descriptions,
+		"{{ instructions }}", opts.Instructions,
 	).Replace(result)
-
-	// Clean up any extra newlines from removed blocks
-	result = regexp.MustCompile(`\n{3,}`).ReplaceAllString(result, "\n\n")
 
 	return strings.TrimSpace(result), nil
 }
 
 // genMetaFilterPrompt builds the prompt for LLM-based metadata filter generation
-func genMetaFilterPrompt(metaDataJSON, question, constraintsJSON, descriptionsJSON, currentDate string) string {
-	prompt, err := renderMetaFilterTemplate(currentDate, metaDataJSON, question, constraintsJSON, descriptionsJSON)
+func genMetaFilterPrompt(metaDataJSON, question, constraintsJSON, descriptionsJSON, currentDate string, opts MetaFilterPromptOptions) string {
+	prompt, err := renderMetaFilterTemplate(currentDate, metaDataJSON, question, constraintsJSON, descriptionsJSON, opts)
 	if err != nil {
 		common.Warn("Failed to render meta filter template, using fallback", zap.Error(err))
 		// Fallback to empty prompt
@@ -241,7 +313,10 @@ func offeredMetaKeyDescriptions(offeredKeys map[string][]string, descriptions ma
 // spaces whose values are codes the model cannot interpret on sight ("SP",
 // "DRP"). They come from the datasets' own metadata config; see
 // loadMetaKeyDescriptions.
-func GenMetaFilter(ctx context.Context, chatModel *modelModule.ChatModel, valueSpace common.MetaValueSpace, question string, constraints map[string]string, descriptions map[string]string) (*MetaFilterResult, error) {
+//
+// opts optionally carries the remaining prompt parts (soft conditions, the
+// consumer's instructions); only the first is used.
+func GenMetaFilter(ctx context.Context, chatModel *modelModule.ChatModel, valueSpace common.MetaValueSpace, question string, constraints map[string]string, descriptions map[string]string, opts ...MetaFilterPromptOptions) (*MetaFilterResult, error) {
 	if chatModel == nil {
 		return nil, fmt.Errorf("chat model is nil")
 	}
@@ -259,8 +334,12 @@ func GenMetaFilter(ctx context.Context, chatModel *modelModule.ChatModel, valueS
 
 	// Build the prompt
 	currentDate := time.Now().Format("2006-01-02")
+	var promptOpts MetaFilterPromptOptions
+	if len(opts) > 0 {
+		promptOpts = opts[0]
+	}
 	descriptionsJSON := offeredMetaKeyDescriptions(valueSpace, descriptions)
-	systemPrompt := genMetaFilterPrompt(string(metaDataJSON), question, constraintsJSON, descriptionsJSON, currentDate)
+	systemPrompt := genMetaFilterPrompt(string(metaDataJSON), question, constraintsJSON, descriptionsJSON, currentDate, promptOpts)
 
 	// Build user message
 	userMessage := "Generate filters:"
@@ -803,25 +882,7 @@ func ApplyMetaDataFilterWithDiagnostics(
 	if method == "" {
 		method = "disabled"
 	}
-	record := func(status string, conditions []MetaFilterCondition, logic string, matched int) {
-		if diagnostics == nil {
-			return
-		}
-		if logic == "" {
-			logic = "and"
-		}
-		condMaps := make([]map[string]interface{}, 0, len(conditions))
-		for _, c := range conditions {
-			condMaps = append(condMaps, map[string]interface{}{"key": c.Key, "op": c.Op, "value": c.Value})
-		}
-		*diagnostics = common.MetadataFilterDiagnostic{
-			Method:               method,
-			Status:               status,
-			Conditions:           condMaps,
-			Logic:                logic,
-			MatchedDocumentCount: matched,
-		}
-	}
+	record := metaFilterRecorder(diagnostics, method)
 
 	if metaDataFilter == nil {
 		record("disabled", nil, "", 0)
@@ -849,29 +910,11 @@ func ApplyMetaDataFilterWithDiagnostics(
 		valueSpaceOK   bool
 	)
 	getValueSpace := func() (common.MetaValueSpace, bool) {
-		if valueSpaceRead {
-			return valueSpace, valueSpaceOK
+		if !valueSpaceRead {
+			valueSpaceRead = true
+			valueSpace, valueSpaceOK = resolveMetaValueSpace(ctx, kbIDs, metaData)
 		}
-		valueSpaceRead = true
-		valueSpaceOK = true
-		if len(kbIDs) > 0 {
-			space, err := metaValueSpaceLoader(ctx, kbIDs)
-			switch {
-			case errors.Is(err, types.ErrMetaValueSpaceIncomplete):
-				common.Warn("Metadata value space came back incomplete; skipping metadata filtering",
-					zap.Strings("kb_ids", kbIDs), zap.Error(err))
-				valueSpaceOK = false
-				return nil, false
-			case err != nil:
-				common.Warn("Metadata value-space lookup failed; falling back to the flattened scan", zap.Error(err))
-			default:
-				valueSpace = space
-			}
-		}
-		if len(valueSpace) == 0 {
-			valueSpace = metaData.ValueSpace()
-		}
-		return valueSpace, true
+		return valueSpace, valueSpaceOK
 	}
 
 	// Helper to run metadata filter with push-down fallback
@@ -916,7 +959,7 @@ func ApplyMetaDataFilterWithDiagnostics(
 			record("not_generated", nil, "", 0)
 			return nil
 		}
-		filters, err := GenMetaFilter(ctx, chatModel, space, question, nil, loadMetaKeyDescriptions(ctx, kbIDs))
+		filters, err := GenMetaFilter(ctx, chatModel, space, question, nil, loadMetaKeyDescriptions(ctx, kbIDs), MetaFilterPromptOptions{Instructions: MetaFilterInstructions(metaDataFilter)})
 		if err != nil {
 			common.Warn("Failed to generate meta filter", zap.Error(err))
 			record("not_generated", nil, "", 0)
@@ -967,7 +1010,7 @@ func ApplyMetaDataFilterWithDiagnostics(
 			}
 
 			if len(filteredSpace) > 0 {
-				filters, err := GenMetaFilter(ctx, chatModel, filteredSpace, question, constraints, loadMetaKeyDescriptions(ctx, kbIDs))
+				filters, err := GenMetaFilter(ctx, chatModel, filteredSpace, question, constraints, loadMetaKeyDescriptions(ctx, kbIDs), MetaFilterPromptOptions{Instructions: MetaFilterInstructions(metaDataFilter)})
 				if err != nil {
 					common.Warn("Failed to generate meta filter", zap.Error(err))
 					record("not_generated", nil, "", 0)
@@ -1044,6 +1087,53 @@ func ApplyMetaDataFilterWithDiagnostics(
 
 	record("unsupported", nil, "", 0)
 	return baseDocIDs
+}
+
+// resolveMetaValueSpace reads the value space the filter generator is shown:
+// the aggregation over kbIDs, or the values of metaData when there are no
+// kbIDs or the aggregation failed outright. ok=false means the aggregation
+// came back incomplete, and no filter may be generated from it.
+func resolveMetaValueSpace(ctx context.Context, kbIDs []string, metaData common.MetaData) (common.MetaValueSpace, bool) {
+	var valueSpace common.MetaValueSpace
+	if len(kbIDs) > 0 {
+		space, err := metaValueSpaceLoader(ctx, kbIDs)
+		switch {
+		case errors.Is(err, types.ErrMetaValueSpaceIncomplete):
+			common.Warn("Metadata value space came back incomplete; skipping metadata filtering",
+				zap.Strings("kb_ids", kbIDs), zap.Error(err))
+			return nil, false
+		case err != nil:
+			common.Warn("Metadata value-space lookup failed; falling back to the flattened scan", zap.Error(err))
+		default:
+			valueSpace = space
+		}
+	}
+	if len(valueSpace) == 0 {
+		valueSpace = metaData.ValueSpace()
+	}
+	return valueSpace, true
+}
+
+// metaFilterRecorder returns the function that records a metadata filter
+// outcome into diagnostics (a no-op when diagnostics is nil). It is the one
+// recording path behind every diagnostic: retrieval test (meta_filter on the
+// response), chat and agent references (metadata_filters).
+func metaFilterRecorder(diagnostics *common.MetadataFilterDiagnostic, method string) func(status string, conditions []MetaFilterCondition, logic string, matched int) {
+	return func(status string, conditions []MetaFilterCondition, logic string, matched int) {
+		if diagnostics == nil {
+			return
+		}
+		if logic == "" {
+			logic = "and"
+		}
+		*diagnostics = common.MetadataFilterDiagnostic{
+			Method:               method,
+			Status:               status,
+			Conditions:           metaConditionMaps(conditions),
+			Logic:                logic,
+			MatchedDocumentCount: matched,
+		}
+	}
 }
 
 // recordGenerated records the outcome of an LLM-generated (auto/semi_auto)

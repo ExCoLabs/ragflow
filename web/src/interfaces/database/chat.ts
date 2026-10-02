@@ -94,6 +94,17 @@ export interface IDialog {
 interface MetaDataFilter {
   manual: Manual[];
   method: string;
+  semi_auto?: Array<string | { key: string; op?: string }>;
+  boost?: MetaDataBoost;
+  instructions?: string;
+}
+
+export interface MetaDataBoost {
+  method?: string;
+  manual?: Array<Manual & { weight?: number }>;
+  semi_auto?: Array<string | { key: string; op?: string; weight?: number }>;
+  auto_weight?: number;
+  max_total?: number;
 }
 
 interface Manual {

@@ -208,8 +208,7 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	// If meta_data_filter method is auto/semi_auto, get chat model
 	var chatModelForFilter *modelModule.ChatModel
 	if metadataFilter != nil {
-		method, _ := metadataFilter["method"].(string)
-		if method == "auto" || method == "semi_auto" {
+		if service.MetaFilterNeedsLLM(metadataFilter) {
 			if chatID != "" {
 				target, err := modelSolver.ResolveModelConfig(ctx, tenantIDs[0], entity.ModelTypeChat, chatID)
 				if err != nil {
@@ -239,6 +238,11 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	docIDs := make([]string, len(documentIDs))
 	copy(docIDs, documentIDs)
 	var metaFilterDiagnostic *common.MetadataFilterDiagnostic
+	// Chunk-level metadata: active only when every dataset opted in and was
+	// backfilled on an engine that carries the fields; otherwise the doc-id
+	// path below is used unchanged.
+	chunkMetaConfig := service.ChunkMetadataConfigForKBs(kbRecords)
+	var chunkMeta *common.ChunkMetaScope
 	if len(metadataFilter) > 0 {
 		metadataSvc := service.NewMetadataService()
 		flattedMeta, err := metadataSvc.GetFlattedMetaByKBs(ctx, datasetIDs)
@@ -247,13 +251,27 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 			flattedMeta = make(common.MetaData)
 		}
 		diagnostic := &common.MetadataFilterDiagnostic{}
+		scope := service.ApplyMetaDataScopeWithDiagnostics(ctx, metadataFilter, flattedMeta, question, chatModelForFilter, documentIDs, datasetIDs, chunkMetaConfig, diagnostic)
 		// nil means the metadata filter produced no scope at all, so the
 		// request keeps the document scope it came with.
-		if filteredDocIDs := service.ApplyMetaDataFilterWithDiagnostics(ctx, metadataFilter, flattedMeta, question, chatModelForFilter, documentIDs, datasetIDs, diagnostic); filteredDocIDs != nil {
-			docIDs = filteredDocIDs
+		if scope.DocIDs != nil {
+			docIDs = scope.DocIDs
 		}
+		chunkMeta = scope.ChunkMeta
 		if diagnostic.Status != "disabled" {
 			metaFilterDiagnostic = diagnostic
+		}
+	}
+	if req.MetadataBoost != nil {
+		switch req.MetadataBoost.(type) {
+		case []interface{}, map[string]interface{}:
+		default:
+			return nil, fmt.Errorf("`metadata_boost` should be a list of {key, op, value, weight} or {manual: [...], max_total}")
+		}
+		if boost := service.MetadataBoostToChunkMeta(req.MetadataBoost, chunkMetaConfig); boost != nil {
+			chunkMeta = common.MergeChunkMetaScopes(chunkMeta, boost)
+		} else if !chunkMetaConfig.Active() {
+			common.Info("metadata_boost ignored: chunk metadata is not active on every dataset of this request")
 		}
 	}
 
@@ -322,6 +340,7 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 		RankFeature:            &labels,
 		EmbeddingModel:         embeddingModel,
 		Highlight:              req.Highlight,
+		ChunkMeta:              chunkMeta,
 	}
 	if req.IncludeCompiledChunks != nil && !*req.IncludeCompiledChunks {
 		retrievalReq.Filter = map[string]interface{}{"must_not": map[string]interface{}{"exists": "compile_kwd"}}

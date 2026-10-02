@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 
+	"ragflow/internal/common"
 	"ragflow/internal/engine"
 	"ragflow/internal/entity"
 	modelModule "ragflow/internal/entity/models"
@@ -90,6 +91,45 @@ func (e *Enhancer) FilterDocuments(
 		return baseDocIDs, nil
 	}
 	return docIDs, nil
+}
+
+// ScopeDocuments is FilterDocuments that also resolves the filter and the
+// metadata boost on the chunk metadata fields when every dataset carries them
+// (service.ApplyMetaDataScope).
+func (e *Enhancer) ScopeDocuments(
+	ctx context.Context,
+	filter map[string]any,
+	query string,
+	chatModel *modelModule.ChatModel,
+	baseDocIDs []string,
+	kbs []*entity.Knowledgebase,
+) ([]string, *common.ChunkMetaScope, error) {
+	if e == nil || e.metadataSvc == nil {
+		return nil, nil, fmt.Errorf("metadata service is not configured")
+	}
+	kbIDs := make([]string, 0, len(kbs))
+	for _, kb := range kbs {
+		kbIDs = append(kbIDs, kb.ID)
+	}
+	metadata, err := e.metadataSvc.GetFlattedMetaByKBs(ctx, kbIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	scope := service.ApplyMetaDataScope(
+		ctx,
+		filter,
+		metadata,
+		query,
+		chatModel,
+		baseDocIDs,
+		kbIDs,
+		service.ChunkMetadataConfigForKBs(kbs),
+	)
+	// nil: no metadata narrowing, keep the caller's scope (see FilterDocuments).
+	if scope.DocIDs == nil {
+		return baseDocIDs, scope.ChunkMeta, nil
+	}
+	return scope.DocIDs, scope.ChunkMeta, nil
 }
 
 // LabelQuestion returns tag-based rank features for NLP reranking.

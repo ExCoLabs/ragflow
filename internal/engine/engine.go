@@ -93,6 +93,29 @@ type DocEngine interface {
 	FilterDocIdsByMetaPushdown(ctx context.Context, sqlDB *gorm.DB, kbIDs []string, conditions []map[string]interface{}, logic string) []string
 }
 
+// ChunkMetadataStore is implemented by engines that can carry document
+// metadata on chunks (common.ChunkMetadataFields): filters and boosts on those
+// fields ride on types.SearchRequest.ChunkMeta. Engines without it (fixed chunk
+// schemas) keep resolving metadata filters to document ids.
+type ChunkMetadataStore interface {
+	// UpdateChunkMetadata sets and removes chunk metadata fields on every
+	// chunk of docIDs.
+	UpdateChunkMetadata(ctx context.Context, indexName, datasetID string, docIDs []string, setFields map[string]interface{}, removeFields []string, refresh bool) error
+	// RefreshChunkIndex makes preceding no-refresh updates searchable.
+	RefreshChunkIndex(ctx context.Context, indexName string) error
+	// ScanDocMetadata calls fn with every document's metadata of a dataset.
+	ScanDocMetadata(ctx context.Context, tenantID, datasetID string, fn func(docID string, meta map[string]interface{}) error) error
+}
+
+// AsChunkMetadataStore returns the engine's chunk metadata support, if any.
+func AsChunkMetadataStore(docEngine DocEngine) (ChunkMetadataStore, bool) {
+	if docEngine == nil {
+		return nil, false
+	}
+	store, ok := docEngine.(ChunkMetadataStore)
+	return store, ok
+}
+
 // Type returns the engine type (helper method for runtime type checking)
 // This is a workaround since we can't import elasticsearch or infinity packages directly
 func Type(docEngine DocEngine) EngineType {

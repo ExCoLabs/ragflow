@@ -220,6 +220,9 @@ type RetrieveRequest struct {
 	// MetaDataFilter restricts retrieval to chunks whose metadata matches
 	// Nil means no filtering.
 	MetaDataFilter map[string]any
+	// ChunkMeta is the session's resolved filter/boost on document metadata
+	// stored on chunks (service.ApplyMetaDataScope). Nil changes nothing.
+	ChunkMeta *common.ChunkMetaScope
 	// RankFeature: `rank_feature` argument
 	// (agentic_rag.py:retrieve): question-type tags produced by
 	// label_question(question, self.kbs) that the retriever uses to boost
@@ -407,6 +410,9 @@ type SearchDeps struct {
 	// MetaDataFilter restricts retrieval to matching chunk metadata. Nil means no
 	// filtering.
 	MetaDataFilter map[string]any
+	// ChunkMeta is the session-wide filter/boost on chunk metadata fields,
+	// resolved by the caller from the chat's meta_data_filter.
+	ChunkMeta *common.ChunkMetaScope
 	// DocScope is the session-wide document restriction. It is a CEILING applied by
 	// scopedDocIDs before any search: an explicit caller scope is intersected with it.
 	// Empty means "search everything".
@@ -788,6 +794,7 @@ func runSearch(ctx context.Context, deps SearchDeps, p SearchParams, opts search
 			KeywordsSimilarityWeight: &opts.keywordsSimilarityWeight,
 			TenantID:                 deps.TenantID,
 			MetaDataFilter:           deps.MetaDataFilter,
+			ChunkMeta:                deps.ChunkMeta,
 			RankFeature:              rankFeature,
 			ExcludeCompiled:          opts.excludeCompiled,
 		})

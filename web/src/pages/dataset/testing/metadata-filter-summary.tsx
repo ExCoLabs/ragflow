@@ -44,9 +44,11 @@ export function MetadataFilterSummary({
             <span className="text-text-sub-title-invert">
               {isIgnored(filter)
                 ? t('knowledgeDetails.metadataFilterIgnored')
-                : t('knowledgeDetails.metadataFilterDocumentCount', {
-                    count: filter.matched_document_count,
-                  })}
+                : filter.applied_on === 'chunk_fields'
+                  ? t('knowledgeDetails.metadataFilterOnChunkFields')
+                  : t('knowledgeDetails.metadataFilterDocumentCount', {
+                      count: filter.matched_document_count,
+                    })}
             </span>
           )}
         </div>

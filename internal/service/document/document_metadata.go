@@ -58,6 +58,7 @@ func (s *DocumentService) SetDocumentMetadata(ctx context.Context, docID string,
 	if err = s.docEngine.UpdateMetadata(ctx, docID, doc.KbID, meta, tenantID); err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
+	s.syncChunkMetadata(ctx, doc, meta)
 
 	return nil
 }
@@ -81,6 +82,7 @@ func (s *DocumentService) DeleteDocumentMetadata(ctx context.Context, docID stri
 	if err != nil {
 		return fmt.Errorf("failed to delete metadata: %w", err)
 	}
+	s.clearChunkMetadata(ctx, doc, keys)
 
 	return nil
 }
@@ -110,6 +112,7 @@ func (s *DocumentService) DeleteDocumentAllMetadata(ctx context.Context, docID s
 	if err != nil {
 		return fmt.Errorf("failed to delete document metadata: %w", err)
 	}
+	s.clearChunkMetadata(ctx, doc, nil)
 
 	return nil
 }

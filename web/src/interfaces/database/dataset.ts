@@ -227,6 +227,11 @@ export interface IRetrievalMetaFilter {
   conditions: IRetrievalMetaFilterCondition[];
   /** Documents the filter narrowed the search to. */
   matched_document_count: number;
+  /**
+   * `chunk_fields`: the conditions ran on the document metadata stored on
+   * chunks, so no document count is known.
+   */
+  applied_on?: 'chunk_fields';
 }
 
 export interface INextTestingResult {

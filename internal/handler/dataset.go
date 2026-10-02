@@ -508,6 +508,56 @@ func (h *DatasetsHandler) UpdateMetadataConfig(c *gin.Context) {
 	common.SuccessNoMessage(c, result)
 }
 
+// GetChunkMetadata handles GET /api/v1/datasets/:dataset_id/chunk_metadata.
+func (h *DatasetsHandler) GetChunkMetadata(c *gin.Context) {
+	user, errorCode, errorMessage := GetUser(c)
+	if errorCode != common.CodeSuccess {
+		common.ErrorWithCode(c, errorCode, errorMessage)
+		return
+	}
+	result, code, err := h.datasetsService.GetChunkMetadata(c.Request.Context(), c.Param("dataset_id"), user.ID)
+	if err != nil {
+		common.ErrorWithCode(c, code, err.Error())
+		return
+	}
+	common.SuccessNoMessage(c, result)
+}
+
+// UpdateChunkMetadata handles PUT /api/v1/datasets/:dataset_id/chunk_metadata.
+func (h *DatasetsHandler) UpdateChunkMetadata(c *gin.Context) {
+	user, errorCode, errorMessage := GetUser(c)
+	if errorCode != common.CodeSuccess {
+		common.ErrorWithCode(c, errorCode, errorMessage)
+		return
+	}
+	var req dataset.ChunkMetadataConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ResponseWithCodeData(c, common.CodeDataError, nil, err.Error())
+		return
+	}
+	result, code, err := h.datasetsService.UpdateChunkMetadata(c.Request.Context(), c.Param("dataset_id"), user.ID, &req)
+	if err != nil {
+		common.ErrorWithCode(c, code, err.Error())
+		return
+	}
+	common.SuccessNoMessage(c, result)
+}
+
+// RunChunkMetadataBackfill handles POST /api/v1/datasets/:dataset_id/chunk_metadata/backfill.
+func (h *DatasetsHandler) RunChunkMetadataBackfill(c *gin.Context) {
+	user, errorCode, errorMessage := GetUser(c)
+	if errorCode != common.CodeSuccess {
+		common.ErrorWithCode(c, errorCode, errorMessage)
+		return
+	}
+	result, code, err := h.datasetsService.RunChunkMetadataBackfill(c.Request.Context(), c.Param("dataset_id"), user.ID)
+	if err != nil {
+		common.ErrorWithCode(c, code, err.Error())
+		return
+	}
+	common.SuccessNoMessage(c, result)
+}
+
 // GetIngestionSummary handles GET /api/v1/datasets/:dataset_id/ingestions/summary.
 func (h *DatasetsHandler) GetIngestionSummary(c *gin.Context) {
 	user, errorCode, errorMessage := GetUser(c)

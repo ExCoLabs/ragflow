@@ -256,8 +256,7 @@ func (s *ChunkService) RetrievalTest(ctx context.Context, req *service.Retrieval
 
 	// If meta_data_filter method is auto/semi_auto, get chat model
 	if filter != nil {
-		method, _ := filter["method"].(string)
-		if method == "auto" || method == "semi_auto" {
+		if service.MetaFilterNeedsLLM(filter) {
 			if chatID != "" {
 				// Use chat_id from search_config (it's actually the model name)
 				target, getErr := modelSolver.ResolveModelConfig(ctx, tenantIDs[0], entity.ModelTypeChat, chatID)
@@ -302,6 +301,7 @@ func (s *ChunkService) RetrievalTest(ctx context.Context, req *service.Retrieval
 	// Apply meta_data_filter to get filtered doc_ids (filter by metadata before retrieval)
 	docIDs := make([]string, len(req.DocIDs))
 	copy(docIDs, req.DocIDs)
+	var chunkMeta *common.ChunkMetaScope
 	if filter != nil {
 		// Get flattened metadata
 		metadataSvc := service.NewMetadataService()
@@ -310,12 +310,16 @@ func (s *ChunkService) RetrievalTest(ctx context.Context, req *service.Retrieval
 			common.Warn("Failed to get flatted metadata", zap.Error(err))
 		} else {
 			common.Info("metadata filter conditions", zap.Any("filter", filter))
+			// Chunk-level metadata applies when every dataset opted in and
+			// was backfilled; otherwise this is the doc-id path unchanged.
+			scope := service.ApplyMetaDataScope(ctx, filter, flattedMeta, req.Question, chatModelForFilter, req.DocIDs, []string(req.Datasets), service.ChunkMetadataConfigForKBs(kbRecords))
 			// nil means no metadata narrowing: search the caller's scope
 			// unfiltered rather than scoping to nothing.
-			if filteredDocIDs := service.ApplyMetaDataFilter(ctx, filter, flattedMeta, req.Question, chatModelForFilter, req.DocIDs, []string(req.Datasets)); filteredDocIDs != nil {
-				docIDs = filteredDocIDs
+			if scope.DocIDs != nil {
+				docIDs = scope.DocIDs
 			}
-			common.Info("ApplyMetaDataFilter result", zap.Strings("docIDs", docIDs))
+			chunkMeta = scope.ChunkMeta
+			common.Info("ApplyMetaDataScope result", zap.Strings("docIDs", docIDs), zap.Bool("chunkMeta", chunkMeta != nil))
 		}
 	}
 
@@ -441,6 +445,7 @@ func (s *ChunkService) RetrievalTest(ctx context.Context, req *service.Retrieval
 		RankFeature:            &labels,
 		EmbeddingModel:         embeddingModel,
 		Highlight:              req.Highlight,
+		ChunkMeta:              chunkMeta,
 	}
 
 	// Call RetrievalService to perform retrieval

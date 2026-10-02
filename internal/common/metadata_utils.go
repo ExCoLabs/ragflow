@@ -76,6 +76,10 @@ type MetadataFilterDiagnostic struct {
 	Conditions           []map[string]interface{} `json:"conditions"`
 	Logic                string                   `json:"logic"`
 	MatchedDocumentCount int                      `json:"matched_document_count"`
+	// AppliedOn is "chunk_fields" when the conditions ran as a filter on the
+	// document metadata stored on chunks (no document id list, so
+	// MatchedDocumentCount is not known); empty for the document id path.
+	AppliedOn string `json:"applied_on,omitempty"`
 }
 
 // operatorMapping translates Python-style operators to internal symbols.
