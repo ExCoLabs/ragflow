@@ -621,6 +621,25 @@ export default {
       imageContextWindowTip:
         '抓取图像上下方的 N 个 token，为该 Chunk 提供更丰富的背景上下文。',
       autoMetadata: '自动元数据',
+      chunkMetadata: '分块元数据',
+      chunkMetadataEnabled: '将元数据写入分块',
+      chunkMetadataTip:
+        '把所选文档元数据字段复制到本数据集的每个分块。元数据过滤将直接在搜索引擎中执行（不再依赖文档 ID 列表，超过 10000 个匹配文档的数据集也能正常工作），并可在聊天、智能体、搜索和检索测试中使用元数据加权。',
+      chunkMetadataFields: '字段',
+      chunkMetadataFieldsTip:
+        '要复制的元数据键（最多 32 个）。未列出的键仍可用于过滤，但只能走较慢的文档 ID 路径。',
+      chunkMetadataStatus: '状态',
+      chunkMetadataReady: '已就绪',
+      chunkMetadataNotReady: '需要回填',
+      chunkMetadataBackfill: '回填已有分块',
+      chunkMetadataBackfillQueued: '回填已开始，完成后数据集即为就绪。',
+      chunkMetadataBackfillRunning: '回填进行中：{{done}}/{{total}} 组',
+      chunkMetadataBackfillFailed: '上次回填失败：{{error}}',
+      chunkMetadataSave: '保存分块元数据',
+      chunkMetadataSaved: '分块元数据设置已保存。',
+      chunkMetadataSaveFirst: '开始回填前请先保存分块元数据设置。',
+      chunkMetadataUnsupported:
+        '当前文档引擎不支持分块元数据，元数据过滤仍使用文档 ID。',
       mineruOptions: 'MinerU 选项',
       mineruParseMethod: '解析方法',
       mineruParseMethodTip:
@@ -1173,6 +1192,21 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
         '元数据过滤是使用元数据属性（例如标签、类别或访问权限）来优化和控制系统内相关信息检索的过程。',
       conditions: '条件',
       metadataKeys: '可选过滤项',
+      metadataBoost: '元数据加权',
+      metadataBoostTip:
+        '基于元数据的偏好：匹配的分块得分更高，但不排除其他分块，例如“优先最新的报告”或“优先问题中提到的部门”。需要所选数据集均已启用并回填分块元数据，否则忽略。手动：固定偏好；半自动：模型为所列键填入取值；自动：模型将推导出的每个条件标记为要求或偏好。除“禁用”外，固定偏好在所有模式下都生效。',
+      boostConditions: '偏好取值',
+      boostKeys: '模型选择的键（取值来自问题）',
+      boostFixedConditions: '固定偏好（始终生效）',
+      boostWeight: '权重',
+      boostOpMax: '最新 / 最大',
+      boostOpMin: '最早 / 最小',
+      boostAutoWeight: '推导偏好的权重',
+      boostAutoWeightTip:
+        '分块匹配模型从问题中推导出的偏好时增加的分数（0–1；相似度本身为 0–1，通常 0.05–0.2）。默认 0.15。',
+      boostMaxTotal: '加权总上限',
+      boostMaxTotalTip:
+        '每个分块所有加权之和的上限，避免元数据偏好单独压过相关性。默认 0.3。',
       addCondition: '增加条件',
       meta: {
         disabled: '禁用',

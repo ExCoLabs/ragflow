@@ -38,3 +38,15 @@ if (typeof globalThis.fetch === 'undefined') {
   (globalThis as Record<string, unknown>).fetch = () =>
     Promise.reject(new Error('fetch is not available in tests'));
 }
+
+// jsdom lacks both; cmdk (inside SelectWithSearch) calls them on mount
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}
+if (typeof Element.prototype.scrollIntoView !== 'function') {
+  Element.prototype.scrollIntoView = () => {};
+}

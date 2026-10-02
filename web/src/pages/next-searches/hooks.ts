@@ -221,6 +221,7 @@ export interface ISearchAppDetailProps {
     meta_data_filter?: {
       method: string;
       manual: { key: string; op: string; value: string }[];
+      boost?: Record<string, any>;
     };
     reference_metadata?: {
       include?: boolean;

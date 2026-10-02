@@ -684,6 +684,28 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
       imageContextWindowTip:
         'Captures N tokens of text above and below an image to provide richer background context.',
       autoMetadata: 'Auto metadata',
+      chunkMetadata: 'Chunk metadata',
+      chunkMetadataEnabled: 'Store metadata in chunks',
+      chunkMetadataTip:
+        'Copies the selected document metadata fields into every chunk of this dataset. Metadata filters then apply directly in the search engine (no per-document ID list, so datasets with more than 10 000 matching documents work) and metadata boosts become available in chats, agents, search and retrieval testing.',
+      chunkMetadataFields: 'Fields',
+      chunkMetadataFieldsTip:
+        'Which metadata keys to copy (at most 32). Keys not listed here can still be used in filters, but only through the slower document-ID path.',
+      chunkMetadataStatus: 'Status',
+      chunkMetadataReady: 'Ready',
+      chunkMetadataNotReady: 'Backfill required',
+      chunkMetadataBackfill: 'Backfill existing chunks',
+      chunkMetadataBackfillQueued:
+        'Backfill started. The dataset becomes ready once it finishes.',
+      chunkMetadataBackfillRunning:
+        'Backfill running: {{done}}/{{total}} groups',
+      chunkMetadataBackfillFailed: 'Last backfill failed: {{error}}',
+      chunkMetadataSave: 'Save chunk metadata',
+      chunkMetadataSaved: 'Chunk metadata settings saved.',
+      chunkMetadataSaveFirst:
+        'Save the chunk metadata settings before starting a backfill.',
+      chunkMetadataUnsupported:
+        'The document engine does not support chunk metadata; metadata filters keep using document IDs.',
       mineruOptions: 'MinerU options',
       mineruParseMethod: 'Parse method',
       mineruParseMethodTip:
@@ -1291,6 +1313,21 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
         'Metadata filtering is the process of using metadata attributes (such as tags, categories, or access permissions) to refine and control the retrieval of relevant information within a system.',
       conditions: 'Conditions',
       metadataKeys: 'Filterable items',
+      metadataBoost: 'Metadata boost',
+      metadataBoostTip:
+        'Preferences on metadata that rank matching chunks higher without excluding the others, for example "prefer the newest report" or "prefer the department named in the question". Requires chunk metadata to be enabled and backfilled on every selected dataset; otherwise it is ignored. Manual: fixed preferences only. Semi-automatic: the model fills in values for the listed keys. Automatic: the model marks each condition it derives as a requirement or a preference. Fixed preferences apply in every mode except Disabled.',
+      boostConditions: 'Preferred values',
+      boostKeys: 'Model-chosen keys (value taken from the question)',
+      boostFixedConditions: 'Fixed preferences (always applied)',
+      boostWeight: 'Weight',
+      boostOpMax: 'newest / highest',
+      boostOpMin: 'oldest / lowest',
+      boostAutoWeight: 'Weight of inferred preferences',
+      boostAutoWeightTip:
+        'Score added to a chunk that matches a preference the model derived from the question (0–1; the similarity itself is 0–1, so 0.05–0.2 is the useful range). Default 0.15.',
+      boostMaxTotal: 'Maximum total boost',
+      boostMaxTotalTip:
+        'Cap on the sum of all boosts per chunk, so metadata preferences can never outrank relevance on their own. Default 0.3.',
       addCondition: 'Add condition',
       meta: {
         disabled: 'Disabled',
