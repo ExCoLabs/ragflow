@@ -191,6 +191,18 @@ describe('TestingResult', () => {
       ).not.toBeInTheDocument();
     });
 
+    it('shows no document count for a filter run on chunk metadata', () => {
+      renderResult(
+        [chunk()],
+        metaFilter({ applied_on: 'chunk_fields', matched_document_count: 0 }),
+      );
+
+      expect(
+        screen.getByText('Applied on chunk metadata fields'),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Narrowed to/)).not.toBeInTheDocument();
+    });
+
     it('stays out of the way when no metadata filter ran', () => {
       renderResult([chunk()]);
 
