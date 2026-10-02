@@ -82,6 +82,9 @@ type RetrievalRequest struct {
 	// ChunkMeta filters and boosts on document metadata stored on chunks
 	// (service.ApplyMetaDataScope). Nil leaves retrieval unchanged.
 	ChunkMeta *common.ChunkMetaScope
+	// Language is the dataset language ("" = English); diacritic-folding
+	// languages (Slovak, Czech) fold the query so its tokens match index tokens.
+	Language string
 }
 
 // RetrievalResult result from retrieval search
@@ -188,6 +191,7 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		VectorOnly:             req.VectorOnly,
 		Filter:                 req.Filter,
 		ChunkMeta:              req.ChunkMeta,
+		Language:               req.Language,
 	}
 	searchResult, err := s.Search(ctx, searchReq)
 	if err != nil {
@@ -547,6 +551,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 			"content_ltks",
 			qb,
 			*req.RankFeature,
+			req.Language,
 		)
 	}
 
@@ -577,6 +582,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 			"content_ltks",
 			qb,
 			*req.RankFeature,
+			req.Language,
 		)
 		return sim, tsim, vsim, nil
 	}
@@ -633,6 +639,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 			"content_ltks",
 			qb,
 			*req.RankFeature,
+			req.Language,
 		)
 		return sim, tsim, vsim, nil
 	}
@@ -649,6 +656,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 		"content_ltks",
 		qb,
 		*req.RankFeature,
+		req.Language,
 	)
 	return sim, tsim, vsim, nil
 }
@@ -677,6 +685,8 @@ type RetrievalSearchRequest struct {
 	AllowDenseFallback     *bool
 	// ChunkMeta is RetrievalRequest.ChunkMeta.
 	ChunkMeta *common.ChunkMetaScope
+	// Language is the dataset language ("" = English).
+	Language string
 }
 
 // addMetaBoostScores adds the metadata boost of each candidate to its fused
@@ -844,7 +854,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		// Non-empty question
 
 		// Compute keywords via QueryBuilder
-		matchText, keywords := GetQueryBuilder().Question(req.Question, "", minMatch(req.VectorSimilarityWeight, 0.3))
+		matchText, keywords := GetQueryBuilder().Question(req.Question, "", minMatch(req.VectorSimilarityWeight, 0.3), req.Language)
 		for _, k := range keywords {
 			kwds[k] = struct{}{}
 		}
@@ -951,7 +961,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 					// and lower vector similarity threshold (0.17 vs default 0.1-0.2).
 					// This provides a second chance for queries that were too strict
 					// on the first attempt.
-					matchText, _ := GetQueryBuilder().Question(req.Question, "qa", minMatch(req.VectorSimilarityWeight, 0.1))
+					matchText, _ := GetQueryBuilder().Question(req.Question, "qa", minMatch(req.VectorSimilarityWeight, 0.1), req.Language)
 					matchDense = cloneDenseExpr(denseTemplate)
 					matchDense.ExtraOptions["similarity"] = 0.17
 					if req.VectorOnly || matchText == nil {
@@ -983,9 +993,10 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		}
 
 		// Build kwds from keywords with fine-grained tokenization
+		tok := tokenizer.New(req.Language)
 		for _, k := range keywords {
 			kwds[k] = struct{}{}
-			fgToken, _ := tokenizer.FineGrainedTokenize(k)
+			fgToken, _ := tok.FineGrainedTokenize(k)
 			for kk := range strings.FieldsSeq(fgToken) {
 				if len(kk) < 2 {
 					continue

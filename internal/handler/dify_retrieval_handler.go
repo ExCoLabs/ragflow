@@ -288,6 +288,7 @@ func (h *DifyRetrievalHandler) Retrieval(c *gin.Context) {
 		SimilarityThreshold: scoreThreshold,
 		EmbeddingModel:      embModel,
 		ChunkMeta:           chunkMeta,
+		Language:            entity.KnowledgebasesLanguage(kbs),
 	}
 	if rankFeature != nil {
 		sr.RankFeature = &rankFeature

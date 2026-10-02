@@ -325,6 +325,7 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	preparedReq.DocScope = docIDs
 	preparedReq.DatasetIDs = append([]string(nil), datasets.kbIDs...)
 	nlpReq := nlpRequestFromRetrieval(preparedReq, datasets.tenantIDs, topN, embeddingModel, preparedReq.ExcludeCompiled)
+	nlpReq.Language = entity.KnowledgebasesLanguage(datasets.kbs)
 	nlpReq.RerankModel = rerankModel
 	nlpReq.ChunkMeta = chunkMeta
 	if rankFeature != nil {
