@@ -139,10 +139,15 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, tenantID 
 	}
 
 	if req.ParserConfig != nil {
-		if err = validateDatasetParserConfig(req.ParserConfig); err != nil {
-			return nil, common.CodeArgumentError, err
+		dropped, err := ValidateParserConfig(req.ParserConfig)
+		if len(dropped) > 0 {
+			common.Warn("dropping unscoped (flat) parser_config keys; keys must be component-scoped (contain ':')",
+				zap.Strings("keys", dropped),
+				zap.String("dataset_id", datasetID),
+				zap.String("tenant_id", tenantID),
+			)
 		}
-		if err = validateDatasetParserConfigSize(req.ParserConfig); err != nil {
+		if err != nil {
 			return nil, common.CodeArgumentError, err
 		}
 		if err = pipelinepkg.NormalizeParserConfigPages(req.ParserConfig); err != nil {
@@ -223,9 +228,9 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, tenantID 
 				return errors.New(message)
 			}
 			if effectiveEmbdID != "" && tenantEmbdID == "" {
-				resolvedID, err := service.NewModelProviderService().ResolveModelID(ctx, tenantID, entity.ModelTypeEmbedding, effectiveEmbdID)
+				target, err := service.NewModelSolver().ResolveModelConfig(ctx, tenantID, entity.ModelTypeEmbedding, effectiveEmbdID)
 				if err == nil {
-					tenantEmbdID = resolvedID
+					tenantEmbdID = target.ModelID
 				}
 			}
 			updates["embd_id"] = effectiveEmbdID
@@ -247,7 +252,7 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, tenantID 
 			}
 			if dslJSON != nil {
 				parserConfig := pipelinepkg.BuildParserConfig(dslJSON, map[string]interface{}(req.ParserConfig))
-				updates["parser_config"] = preserveDatasetParserConfigMetadata(parserConfig, lockedKB.ParserConfig, req.ParserConfig)
+				updates["parser_config"] = preserveDatasetParserConfigState(parserConfig, lockedKB.ParserConfig, req.ParserConfig)
 			}
 		}
 		if pagerankRequested && requestedPagerank != lockedKB.Pagerank {
@@ -268,7 +273,7 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, tenantID 
 					common.Warn("failed to resolve component params defaults on parser_id switch",
 						zap.String("parserID", parserID), zap.Error(cpErr))
 				} else if resolved != nil {
-					updates["parser_config"] = preserveDatasetParserConfigMetadata(resolved, lockedKB.ParserConfig, req.ParserConfig)
+					updates["parser_config"] = preserveDatasetParserConfigState(resolved, lockedKB.ParserConfig, req.ParserConfig)
 				}
 			}
 		}
@@ -279,7 +284,7 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, tenantID 
 		}
 
 		pipelineChanged := pipelineID != nil && (lockedKB.PipelineID == nil || *pipelineID != *lockedKB.PipelineID)
-		if pipelineChanged {
+		if _, ok := updates["parser_config"]; pipelineChanged && !ok {
 			cfgParserID := lockedKB.ParserID
 			if parserIDProvided {
 				cfgParserID = parserID
@@ -288,7 +293,7 @@ func (d *DatasetService) UpdateDataset(ctx context.Context, datasetID, tenantID 
 				common.Warn("failed to resolve component params defaults on pipeline change",
 					zap.String("parserID", cfgParserID), zap.Error(cpErr))
 			} else if cpDefaults != nil {
-				updates["parser_config"] = preserveDatasetParserConfigMetadata(cpDefaults, lockedKB.ParserConfig, req.ParserConfig)
+				updates["parser_config"] = preserveDatasetParserConfigState(cpDefaults, lockedKB.ParserConfig, req.ParserConfig)
 			}
 		}
 
