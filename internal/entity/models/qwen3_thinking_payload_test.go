@@ -139,6 +139,65 @@ func TestVllmCompatibleQwen3ThinkingPayload(t *testing.T) {
 	}
 }
 
+func TestVllmCompatibleQwen3ChatTemplateKwargsOptOut(t *testing.T) {
+	withSSRFBypass(t)
+
+	drivers := []struct {
+		name string
+		new  func(string) ModelDriver
+	}{
+		{name: "vllm", new: func(baseURL string) ModelDriver {
+			return NewVllmModel(map[string]string{"default": baseURL}, URLSuffix{Chat: "chat/completions"})
+		}},
+		{name: "openai-compatible", new: func(baseURL string) ModelDriver {
+			return NewOpenAIAPICompatibleModel(map[string]string{"default": baseURL}, URLSuffix{Chat: "chat/completions"})
+		}},
+	}
+	cases := []struct {
+		name         string
+		env          string
+		thinking     *bool
+		wantTemplate bool
+	}{
+		{name: "explicit default keeps injection", env: "1", wantTemplate: true},
+		{name: "opt-out default", env: "0"},
+		{name: "opt-out explicit enabled", env: "0", thinking: boolPointer(true)},
+	}
+
+	for _, driverCase := range drivers {
+		for _, stream := range []bool{false, true} {
+			for _, testCase := range cases {
+				name := driverCase.name + "/" + testCase.name
+				if stream {
+					name = driverCase.name + "/stream/" + testCase.name
+				}
+				t.Run(name, func(t *testing.T) {
+					t.Setenv(qwen3ChatTemplateKwargsEnv, testCase.env)
+					requestBody := make(chan map[string]interface{}, 1)
+					server := newThinkingPayloadServer(t, requestBody)
+					defer server.Close()
+
+					var config *ChatConfig
+					if testCase.thinking != nil {
+						config = &ChatConfig{Thinking: testCase.thinking}
+					}
+					runThinkingPayloadRequest(t, driverCase.new(server.URL), "Qwen3.6-27B", stream, config)
+
+					body := <-requestBody
+					if _, exists := body["chat_template_kwargs"]; exists != testCase.wantTemplate {
+						t.Errorf("chat_template_kwargs present=%v, want %v (%#v)", exists, testCase.wantTemplate, body["chat_template_kwargs"])
+					}
+					for _, field := range []string{"thinking", "enable_thinking"} {
+						if _, exists := body[field]; exists {
+							t.Errorf("unexpected root-level %s in request: %#v", field, body[field])
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestVllmCompatibleNonQwenThinkingPayloadUnchanged(t *testing.T) {
 	withSSRFBypass(t)
 
