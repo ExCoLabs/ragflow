@@ -341,6 +341,10 @@ func TestPublishClaimHits(t *testing.T) {
 	if len(kb.Chunks) != 2 {
 		t.Fatalf("pool = %d entries, want 2", len(kb.Chunks))
 	}
+	// The claims' document is published with them, or a citation of a claim opens nothing.
+	if len(kb.DocAggs) != 1 || kb.DocAggs[0]["doc_id"] != "doc-1" {
+		t.Errorf("doc_aggs = %v, want the claims' document listed once", kb.DocAggs)
+	}
 	a := kb.Chunks[0]
 	if a["chunk_id"] != claimHitID(&ClaimHit{DocID: "doc-1", Name: "Claim A"}) {
 		t.Errorf("chunk_id = %v, want the shared claim id scheme", a["chunk_id"])

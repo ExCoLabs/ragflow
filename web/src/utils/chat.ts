@@ -25,6 +25,7 @@ import { v4 as uuid } from 'uuid';
 import {
   citationMarkerReg,
   normalizeCitationDigits,
+  normalizeCitationMarkers,
   parseCitationIndex,
 } from './citation-utils';
 
@@ -242,13 +243,9 @@ export function setChatVariableEnabledFieldValuePage() {
   return variableCheckBoxFieldMap;
 }
 
-const oldReg = /(#{2}[0-9\u0660-\u0669\u06F0-\u06F9]+\${2})/g;
 export const currentReg = citationMarkerReg;
-export { normalizeCitationDigits, parseCitationIndex };
-
-// To be compatible with the old index matching mode
-export const replaceTextByOldReg = (text: string) => {
-  return text?.replace(oldReg, (substring: string) => {
-    return `[ID:${substring.slice(2, -2)}]`;
-  });
+export {
+  normalizeCitationDigits,
+  normalizeCitationMarkers,
+  parseCitationIndex,
 };

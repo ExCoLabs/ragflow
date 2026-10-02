@@ -1393,11 +1393,9 @@ func (s *ChatSessionService) ChatCompletions(
 			if result.Final {
 				failed := strings.Contains(result.Answer, "**ERROR**")
 				if session != nil && !failed {
-					// Store with <think>thinking content</think>
-					content := fullAnswer.String()
-					if content == "" {
-						content = result.Answer
-					}
+					// Store with <think>thinking content</think>, followed by the
+					// final (decorated) answer rather than the streamed one.
+					content := finalAssistantContent(fullAnswer.String(), result.Answer)
 					s.appendAssistantToSession(session, content, messageID)
 					if ctx.Err() == nil {
 						s.updateSessionMessages(ctx, session, s.getSessionMessagesAsSlice(session), reference)
@@ -1799,6 +1797,29 @@ func (s *ChatSessionService) appendAssistantToSession(session *entity.ChatSessio
 		messages[lastIdx]["id"] = messageID
 	}
 	session.Message, _ = json.Marshal(messages)
+}
+
+// finalAssistantContent is the assistant message stored when a streamed completion
+// ends: the reasoning block that was streamed, followed by the final event's answer.
+//
+// The final answer is not the streamed text. Decoration repairs citation markers,
+// drops the ones that name no evidence and inserts the ones the model left out, so
+// storing the streamed deltas persisted the model's raw markers — literal
+// "【ID:1】" text once the conversation is reopened — while the live view showed the
+// repaired answer. The web client merges the two the same way (mergeAnswerChunk): a
+// final answer that carries its own think block replaces everything, and an empty
+// one keeps what was streamed.
+func finalAssistantContent(streamed, final string) string {
+	if final == "" {
+		return streamed
+	}
+	if strings.Contains(final, "<think>") || strings.Contains(final, "</think>") {
+		return final
+	}
+	if end := strings.LastIndex(streamed, "</think>"); end >= 0 {
+		return streamed[:end+len("</think>")] + final
+	}
+	return final
 }
 
 // compactSessionAssistant replaces the assistant content in the in-memory

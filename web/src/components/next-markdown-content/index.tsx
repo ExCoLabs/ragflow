@@ -42,10 +42,10 @@ import 'katex/dist/katex.min.css'; // `rehype-katex` does not import the CSS for
 import {
   currentReg,
   escapeUnmatchedAngleBrackets,
+  normalizeCitationMarkers,
   parseCitationIndex,
   preprocessLaTeX,
   replaceRetrievingToSection,
-  replaceTextByOldReg,
   replaceThinkToSection,
   unescapeAngleBrackets,
 } from '@/utils/chat';
@@ -214,7 +214,7 @@ function MarkdownContent({
     if (text === '') {
       text = t('chat.searching');
     }
-    const nextText = replaceTextByOldReg(text);
+    const nextText = normalizeCitationMarkers(text);
     const thinkSummary = loading
       ? `${t('chat.thinking')}...`
       : t('chat.thought');
