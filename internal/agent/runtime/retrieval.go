@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"sync"
 
+	"ragflow/internal/common"
+
 	"gorm.io/gorm"
 )
 
@@ -78,7 +80,10 @@ type RetrievalRequest struct {
 	CrossLanguages           []string
 	TOCEnhance               bool
 	MetaDataFilter           map[string]any
-	RetrievalFrom            string
+	// ChunkMeta is a filter/boost on document metadata stored on chunks that
+	// the caller already resolved (common.ChunkMetaScope). Nil changes nothing.
+	ChunkMeta     *common.ChunkMetaScope
+	RetrievalFrom string
 	// DocScope restricts retrieval to a set of document ids (the doc_id list
 	// routed by the dataset_navigation_by_tree tool). Empty = no doc filter.
 	DocScope []string

@@ -53,6 +53,7 @@ type SearchDatasetsRequest struct {
 	SearchID                 *string                `json:"search_id,omitempty"`
 	MetadataCondition        map[string]interface{} `json:"metadata_condition,omitempty"`
 	MetadataFilter           map[string]interface{} `json:"meta_data_filter,omitempty"`
+	MetadataBoost            interface{}            `json:"metadata_boost,omitempty"` // list of {key, op, value, weight} or {"manual": [...], "max_total"}
 	RerankID                 *string                `json:"rerank_id,omitempty"`
 	Keyword                  *bool                  `json:"keyword,omitempty"`
 	Highlight                *bool                  `json:"highlight,omitempty"`
@@ -88,6 +89,7 @@ type SearchDatasetRequest struct {
 	SearchID                 *string                `json:"search_id,omitempty"`
 	MetadataCondition        map[string]interface{} `json:"metadata_condition,omitempty"`
 	MetadataFilter           map[string]interface{} `json:"meta_data_filter,omitempty"`
+	MetadataBoost            interface{}            `json:"metadata_boost,omitempty"` // list of {key, op, value, weight} or {"manual": [...], "max_total"}
 	RerankID                 *string                `json:"rerank_id,omitempty"`
 	Keyword                  *bool                  `json:"keyword,omitempty"`
 	SimilarityThreshold      *float64               `json:"similarity_threshold,omitempty"`
@@ -118,6 +120,7 @@ func (req *SearchDatasetRequest) ToSearchDatasetsRequest(datasetID string) *Sear
 		SearchID:                 req.SearchID,
 		MetadataCondition:        req.MetadataCondition,
 		MetadataFilter:           req.MetadataFilter,
+		MetadataBoost:            req.MetadataBoost,
 		RerankID:                 req.RerankID,
 		Keyword:                  req.Keyword,
 		SimilarityThreshold:      req.SimilarityThreshold,

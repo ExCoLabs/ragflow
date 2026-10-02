@@ -2042,6 +2042,7 @@ func (r *RuntimeRetriever) Retrieve(ctx context.Context, req RetrieveRequest) ([
 		KeywordsSimilarityWeight: req.KeywordsSimilarityWeight,
 		TenantID:                 req.TenantID,
 		MetaDataFilter:           req.MetaDataFilter,
+		ChunkMeta:                req.ChunkMeta,
 		RankFeature:              &req.RankFeature,
 		// Python hybrid_search always excludes compile_kwd rows from the base
 		// retrieval; use_compiled controls a separate expansion step.

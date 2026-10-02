@@ -615,7 +615,10 @@ func (s *ChatPipelineService) AsyncChat(
 
 		// meta_data_filter — use LLM to map the question to metadata
 		// criteria, then filter docIDs to matching
-		// documents only.
+		// documents only. When the datasets carry document metadata on their
+		// chunks, the filter and the metadata boost apply on those fields
+		// instead (chunkMetaScope).
+		var chunkMetaScope *common.ChunkMetaScope
 		if chat.MetaDataFilter != nil && len(*chat.MetaDataFilter) > 0 && len(kbs) > 0 {
 			kbIDs := kbIDStrings(kbs)
 			if metaQ := questions[len(questions)-1]; metaQ != "" {
@@ -625,7 +628,7 @@ func (s *ChatPipelineService) AsyncChat(
 					flattedMeta, mErr = s.MetadataSvc.GetFlattedMetaByKBs(ctx, kbIDs)
 				}
 				if mErr == nil {
-					if filtered, _ := ApplyMetaDataFilter(
+					scope := ApplyMetaDataScope(
 						ctx,
 						*chat.MetaDataFilter,
 						flattedMeta,
@@ -633,7 +636,10 @@ func (s *ChatPipelineService) AsyncChat(
 						chatModel,
 						docIDs,
 						kbIDs,
-					); filtered != nil {
+						ChunkMetadataConfigForKBs(kbs),
+					)
+					chunkMetaScope = scope.ChunkMeta
+					if filtered := scope.DocIDs; filtered != nil {
 						common.Debug("meta_data_filter applied",
 							zap.Int("filtered_count", len(filtered)),
 							zap.Int("pre_filter_count", len(docIDs)))
@@ -842,6 +848,7 @@ func (s *ChatPipelineService) AsyncChat(
 					SimilarityThreshold:    chat.SimilarityThreshold,
 					VectorSimilarityWeight: chat.VectorSimilarityWeight,
 					RerankCandidatesCount:  int(chat.RerankCandidatesCount),
+					ChunkMeta:              chunkMetaScope,
 				}, webSearch, sink, thinkSink, harnessSystemPrompt, history)
 				// The harness streams think-then-answer inside ONE compose call.
 				// Close the block here, once that call (and its trailing
@@ -907,6 +914,7 @@ func (s *ChatPipelineService) AsyncChat(
 							RerankModel:            rerankModel,
 							EmbeddingModel:         embModel,
 							Aggs:                   func() *bool { v := true; return &v }(),
+							ChunkMeta:              chunkMetaScope,
 						}
 
 						result, retErr := retrievalSvc.Retrieval(ctx, req)
@@ -5102,6 +5110,9 @@ type HarnessRetrieval struct {
 	SimilarityThreshold    float64
 	VectorSimilarityWeight float64
 	RerankCandidatesCount  int
+	// ChunkMeta is the chat's meta_data_filter resolved on the chunk metadata
+	// fields (filter and boost); every agentic retrieval carries it.
+	ChunkMeta *common.ChunkMetaScope
 }
 
 // HarnessRequest carries the minimal inputs the chat pipeline hands to the

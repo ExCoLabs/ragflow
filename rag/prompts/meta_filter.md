@@ -28,6 +28,12 @@ You are a metadata filtering condition generator. Analyze the user's question an
    - Example Constraints: `{"price": ">", "author": "="}`
    - If a key is not in `constraints`, choose the most appropriate operator.
 
+{% if allow_soft %}
+4b. **Requirement vs. preference**:
+   - Add `"strength": "hard"` to a condition the user states as a requirement (explicit filter words: "only", "from department X", "in 2024", "not …").
+   - Add `"strength": "soft"` to a condition that is a preference or your own inference ("preferably", "ideally", a category or period implied by the wording rather than named). Soft conditions rank matching documents higher but never exclude the others, so prefer "soft" whenever you are not sure the user meant to restrict the search.
+   - Negative operators ("≠", "not in", "not contains") are always hard.
+{% endif %}
 5. **Processing Steps**:
    a) Identify ALL filterable attributes in the query (both explicit and implicit)
    b) For dates:
@@ -114,7 +120,12 @@ You are a metadata filtering condition generator. Analyze the user's question an
               "≥",
               "≤"
             ]
-          }
+          }{% if allow_soft %},
+          "strength": {
+            "type": "string",
+            "description": "hard = the user requires it (filter); soft = a preference or inference (rank higher, do not exclude).",
+            "enum": ["hard", "soft"]
+          }{% endif %}
         },
         "required": [
           "key",

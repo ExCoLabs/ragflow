@@ -381,6 +381,9 @@ func (r *Router) Setup(engine *gin.Engine) {
 				// Metadata Config
 				datasets.GET("/:dataset_id/metadata/config", r.datasetsHandler.GetMetadataConfig)
 				datasets.PUT("/:dataset_id/metadata/config", r.datasetsHandler.UpdateMetadataConfig)
+				datasets.GET("/:dataset_id/chunk_metadata", r.datasetsHandler.GetChunkMetadata)
+				datasets.PUT("/:dataset_id/chunk_metadata", r.datasetsHandler.UpdateChunkMetadata)
+				datasets.POST("/:dataset_id/chunk_metadata/backfill", r.datasetsHandler.RunChunkMetadataBackfill)
 
 				// Dataset documents
 				datasets.GET("/:dataset_id/documents", r.documentHandler.ListDocuments)

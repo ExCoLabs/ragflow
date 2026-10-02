@@ -41,6 +41,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"ragflow/internal/agent/chat"
+	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
 	"ragflow/internal/entity/models"
@@ -255,6 +256,9 @@ type RAGTools struct {
 	DocScope []string
 	// MetaDataFilter restricts retrieval by chunk metadata.
 	MetaDataFilter map[string]any
+	// ChunkMeta is the caller's resolved filter/boost on document metadata
+	// stored on chunks; every retrieval of the session carries it.
+	ChunkMeta *common.ChunkMetaScope
 	// KBs is the full set of Knowledgebase objects (carrying parser_config / tenant_id)
 	// the agentic tools run over. They arrive already resolved from the caller (this
 	// package stays DB-free) and are fed to the Tagger for the question-type tag boost.
@@ -991,6 +995,7 @@ func searchDepsFor(ctx context.Context, deps RAGTools, req runtime.RunRequest, d
 		RerankCandidatesCount:    deps.RerankCandidatesCount,
 		TopK:                     deps.TopK,
 		MetaDataFilter:           deps.MetaDataFilter,
+		ChunkMeta:                deps.ChunkMeta,
 		// rank_feature (Python retrieve:668): RAGTools carries the KB objects
 		// and a tagger, mirroring rank_feature=label_question(question, self.kbs).
 		KBs:    deps.KBs,

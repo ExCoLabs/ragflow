@@ -327,6 +327,7 @@ func (s *PipelineExecutor) processOutput(ctx context.Context, pipelineOutput map
 		return nil, err
 	}
 	indexChunks := append(chunks, parentChunks...)
+	s.stampChunkMetadata(ctx, indexChunks)
 	if err := s.indexWriter.Write(ctx, indexChunks); err != nil {
 		if cleanupErr := s.compensateFailedIndexWrite(ctx, indexChunks); cleanupErr != nil {
 			return nil, fmt.Errorf("write chunks: %w; compensate partial index write: %v", err, cleanupErr)

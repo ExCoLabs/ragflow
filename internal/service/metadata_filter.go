@@ -42,6 +42,16 @@ type MetaFilterCondition struct {
 	Key   string      `json:"key"`
 	Value interface{} `json:"value"`
 	Op    string      `json:"op"`
+	// Strength is "hard" (a requirement: filter) or "soft" (a preference:
+	// boost). The model only emits it when asked (MetaFilterPromptOptions.AllowSoft).
+	Strength string `json:"strength,omitempty"`
+}
+
+// MetaFilterPromptOptions are the optional parts of the meta_filter.md prompt.
+type MetaFilterPromptOptions struct {
+	// AllowSoft asks the model to tag each condition "hard" or "soft", so one
+	// call serves both the metadata filter and the metadata boost.
+	AllowSoft bool
 }
 
 // MetaFilterResult represents the result of LLM-generated filter
@@ -125,8 +135,18 @@ func getMetaFilterTemplate() (string, error) {
 	return templateContent, nil
 }
 
+// renderTemplateIf keeps or drops the {% if name %}...{% endif %} blocks of a
+// prompt template.
+func renderTemplateIf(tmpl, name string, keep bool) string {
+	re := regexp.MustCompile(`(?s)\{%\s*if\s+` + regexp.QuoteMeta(name) + `\s*%\}(.*?)\{%\s*endif\s*%\}`)
+	if keep {
+		return re.ReplaceAllString(tmpl, "$1")
+	}
+	return re.ReplaceAllString(tmpl, "")
+}
+
 // renderMetaFilterTemplate renders the Jinja2-like template from meta_filter.md
-func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints string) (string, error) {
+func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints string, opts MetaFilterPromptOptions) (string, error) {
 	templateContent, err := getMetaFilterTemplate()
 	if err != nil {
 		return "", err
@@ -136,6 +156,7 @@ func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints s
 	result := strings.ReplaceAll(templateContent, "{{ current_date }}", currentDate)
 	result = strings.ReplaceAll(result, "{{ metadata_keys }}", metadataKeys)
 	result = strings.ReplaceAll(result, "{{ user_question }}", question)
+	result = strings.ReplaceAll(result, "{{ constraints }}", constraints)
 
 	// Handle {% if constraints %}...{% endif %}
 	constraintRegex := regexp.MustCompile(`(?s)\{%\s*if\s+constraints\s*%\}(.+?)\{%\s*endif\s*%\}`)
@@ -147,6 +168,8 @@ func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints s
 		result = constraintRegex.ReplaceAllString(result, "")
 	}
 
+	result = renderTemplateIf(result, "allow_soft", opts.AllowSoft)
+
 	// Clean up any extra newlines from removed blocks
 	result = regexp.MustCompile(`\n{3,}`).ReplaceAllString(result, "\n\n")
 
@@ -154,8 +177,8 @@ func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints s
 }
 
 // genMetaFilterPrompt builds the prompt for LLM-based metadata filter generation
-func genMetaFilterPrompt(metaDataJSON, question, constraintsJSON, currentDate string) string {
-	prompt, err := renderMetaFilterTemplate(currentDate, metaDataJSON, question, constraintsJSON)
+func genMetaFilterPrompt(metaDataJSON, question, constraintsJSON, currentDate string, opts MetaFilterPromptOptions) string {
+	prompt, err := renderMetaFilterTemplate(currentDate, metaDataJSON, question, constraintsJSON, opts)
 	if err != nil {
 		common.Warn("Failed to render meta filter template, using fallback", zap.Error(err))
 		// Fallback to empty prompt
@@ -165,7 +188,7 @@ func genMetaFilterPrompt(metaDataJSON, question, constraintsJSON, currentDate st
 }
 
 // GenMetaFilter generates filter conditions using LLM based on metadata and question.
-func GenMetaFilter(ctx context.Context, chatModel *modelModule.ChatModel, metaData common.MetaData, question string, constraints map[string]string) (*MetaFilterResult, error) {
+func GenMetaFilter(ctx context.Context, chatModel *modelModule.ChatModel, metaData common.MetaData, question string, constraints map[string]string, opts ...MetaFilterPromptOptions) (*MetaFilterResult, error) {
 	if chatModel == nil {
 		return nil, fmt.Errorf("chat model is nil")
 	}
@@ -193,7 +216,11 @@ func GenMetaFilter(ctx context.Context, chatModel *modelModule.ChatModel, metaDa
 
 	// Build the prompt
 	currentDate := time.Now().Format("2006-01-02")
-	systemPrompt := genMetaFilterPrompt(string(metaDataJSON), question, constraintsJSON, currentDate)
+	var promptOpts MetaFilterPromptOptions
+	if len(opts) > 0 {
+		promptOpts = opts[0]
+	}
+	systemPrompt := genMetaFilterPrompt(string(metaDataJSON), question, constraintsJSON, currentDate, promptOpts)
 
 	// Build user message
 	userMessage := "Generate filters:"

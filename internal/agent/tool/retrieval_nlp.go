@@ -81,6 +81,21 @@ import (
 
 var retrievalUserPrefixPattern = regexp.MustCompile(`(?i)^user[:：\s]*`)
 
+// metadataScopeResolver is the optional enhancer surface that resolves
+// meta_data_filter to a doc scope plus a filter/boost on the chunk metadata
+// fields (service.ApplyMetaDataScope). Enhancers without it only narrow the
+// doc scope (FilterDocuments).
+type metadataScopeResolver interface {
+	ScopeDocuments(
+		ctx context.Context,
+		filter map[string]any,
+		query string,
+		chatModel *modelModule.ChatModel,
+		baseDocIDs []string,
+		kbs []*entity.Knowledgebase,
+	) ([]string, *common.ChunkMetaScope, error)
+}
+
 // NLPRetrievalAdapter wraps *nlp.RetrievalService behind the
 // agent-tool RetrievalService interface. The adapter is safe to
 // share across goroutines — the wrapped service is stateless
@@ -234,13 +249,22 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	}
 	query := req.Query
 	docIDs := compactStrings(req.DocScope)
+	chunkMeta := req.ChunkMeta
 	if len(req.MetaDataFilter) > 0 {
 		if a.enhancer == nil {
 			return nil, fmt.Errorf("retrieval: metadata filter service is not configured")
 		}
-		docIDs, err = a.enhancer.FilterDocuments(
-			ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbIDs,
-		)
+		if scoper, ok := a.enhancer.(metadataScopeResolver); ok {
+			var filterMeta *common.ChunkMetaScope
+			docIDs, filterMeta, err = scoper.ScopeDocuments(
+				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbs,
+			)
+			chunkMeta = common.MergeChunkMetaScopes(filterMeta, chunkMeta)
+		} else {
+			docIDs, err = a.enhancer.FilterDocuments(
+				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbIDs,
+			)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("retrieval: filter documents: %w", err)
 		}
@@ -283,6 +307,7 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	preparedReq.DatasetIDs = append([]string(nil), datasets.kbIDs...)
 	nlpReq := nlpRequestFromRetrieval(preparedReq, datasets.tenantIDs, topN, embeddingModel, preparedReq.ExcludeCompiled)
 	nlpReq.RerankModel = rerankModel
+	nlpReq.ChunkMeta = chunkMeta
 	if rankFeature != nil {
 		nlpReq.RankFeature = &rankFeature
 	}
@@ -533,6 +558,11 @@ func (a *NLPRetrievalAdapter) resolveChatModel(
 ) (*modelModule.ChatModel, error) {
 	method, _ := req.MetaDataFilter["method"].(string)
 	needsChatModel := req.TOCEnhance || method == "auto" || method == "semi_auto"
+	if boost, ok := req.MetaDataFilter["boost"].(map[string]any); ok {
+		// The metadata boost has its own LLM modes (service.MetaFilterNeedsLLM).
+		boostMethod, _ := boost["method"].(string)
+		needsChatModel = needsChatModel || boostMethod == "auto" || boostMethod == "semi_auto"
+	}
 	if !needsChatModel {
 		return nil, nil
 	}

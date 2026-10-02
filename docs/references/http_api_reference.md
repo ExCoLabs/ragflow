@@ -2312,6 +2312,144 @@ Failure:
 
 ---
 
+### Configure chunk metadata
+
+**PUT** `/api/v1/datasets/{dataset_id}/chunk_metadata`
+
+Copies the listed document metadata keys onto every chunk of the dataset, so that metadata filters and metadata boosts apply on the chunks directly.
+
+By default a metadata filter is resolved to a list of document IDs, which is capped by the document engine's result window (10 000 on Elasticsearch) and slow for large matches. With chunk metadata enabled and backfilled, each listed key is stored on the chunks as `meta_<key>_kwd` (plus a typed twin `_int`, `_flt` or `_dt` for numbers and `YYYY-MM-DD` dates), and a filter or boost becomes one clause on the chunk query: exact, uncapped, and as fast as the dataset filter itself. New and re-parsed documents get the fields when they are indexed, and editing a document's metadata updates its chunks. Chunks that already exist get them from [Backfill chunk metadata](#backfill-chunk-metadata). Supported on Elasticsearch; other engines keep the document-ID path.
+
+In the web UI the same settings live under **Dataset → Configuration → Chunk metadata**.
+
+#### Request
+
+- Method: PUT
+- URL: `/api/v1/datasets/{dataset_id}/chunk_metadata`
+- Headers:
+  - `'Content-Type: application/json'`
+  - `'Authorization: Bearer <YOUR_API_KEY>'`
+- Body:
+  - `"enabled"`: `boolean`
+  - `"fields"`: `list[string]`
+
+##### Request example
+
+```bash
+curl --request PUT \
+     --url http://{address}/api/v1/datasets/{dataset_id}/chunk_metadata \
+     --header 'Content-Type: application/json' \
+     --header 'Authorization: Bearer <YOUR_API_KEY>' \
+     --data '{"enabled": true, "fields": ["department", "doc_type", "published_date"]}'
+```
+
+##### Request parameters
+
+- `"enabled"`: (*Body parameter*), `boolean`
+  Whether to copy metadata onto chunks. Omit to keep the current value.
+- `"fields"`: (*Body parameter*), `list[string]`
+  The metadata keys to copy (at most 32, each matching `[A-Za-z][A-Za-z0-9_]*`). Omit to keep the current list.
+
+The configuration is stored in `parser_config.chunk_metadata` as `{"enabled", "fields", "ready"}`. `ready` is set by the backfill and cannot be set through the API; changing `fields` or disabling the feature resets it.
+
+#### Response
+
+Same as [Get chunk metadata](#get-chunk-metadata).
+
+---
+
+### Get chunk metadata
+
+**GET** `/api/v1/datasets/{dataset_id}/chunk_metadata`
+
+Returns whether the document engine supports chunk metadata, the dataset's configuration, whether filters and boosts are active (`enabled`, `ready` and supported), and the progress of the last backfill started on this server.
+
+#### Response
+
+```json
+{
+  "code": 0,
+  "data": {
+    "supported": true,
+    "config": {"enabled": true, "fields": ["department", "doc_type"], "ready": true},
+    "active": true,
+    "backfill": {"running": false, "documents": 1200, "groups": 37, "groups_done": 37, "started_at": "2026-10-02T09:00:00Z"}
+  }
+}
+```
+
+---
+
+### Backfill chunk metadata
+
+**POST** `/api/v1/datasets/{dataset_id}/chunk_metadata/backfill`
+
+Writes the listed metadata keys onto every existing chunk of the dataset and, when done, marks the dataset ready (`parser_config.chunk_metadata.ready = true`). Documents that share the same metadata are written together, so a dataset is covered in one request per distinct combination of values rather than one per document. The backfill runs in the background; follow it with [Get chunk metadata](#get-chunk-metadata). If the configuration changes while it runs, `ready` is not set and the backfill has to be started again.
+
+#### Request example
+
+```bash
+curl --request POST \
+     --url http://{address}/api/v1/datasets/{dataset_id}/chunk_metadata/backfill \
+     --header 'Authorization: Bearer <YOUR_API_KEY>'
+```
+
+#### Response
+
+Success:
+
+```json
+{
+  "code": 0,
+  "data": {"fields": ["department", "doc_type"], "running": true}
+}
+```
+
+Failure:
+
+```json
+{
+  "code": 102,
+  "message": "parser_config.chunk_metadata must be enabled with at least one field"
+}
+```
+
+---
+
+### Metadata boost
+
+`meta_data_filter` accepts a `boost` object next to `method`/`manual`/`semi_auto`. The boost is configured the same way as the filter and independently of it: each has its own `method`. In the web UI it appears as **Metadata boost** below the metadata filter wherever the filter is offered (chat settings, search settings, agent Retrieval component and tool, dataset retrieval testing):
+
+```json
+{
+  "meta_data_filter": {
+    "method": "semi_auto",
+    "semi_auto": [{"key": "department", "op": "="}],
+    "boost": {
+      "method": "semi_auto",
+      "semi_auto": [{"key": "doc_type", "op": "in", "weight": 0.2}, {"key": "region"}],
+      "manual": [
+        {"key": "status", "op": "=", "value": "approved", "weight": 0.15},
+        {"key": "published_date", "op": "max", "weight": 0.1}
+      ],
+      "auto_weight": 0.15,
+      "max_total": 0.3
+    }
+  }
+}
+```
+
+- `method: "manual"`: only the fixed preferences in `manual` (`=`, `in`, `>`, `<`, `≥`, `≤`, `contains`, `max`, `min`; `max`/`min` prefer the highest/lowest, for dates the newest/oldest, value among the candidates).
+- `method: "semi_auto"`: the keys in `semi_auto` are offered to the LLM, which fills in the values from the question; `op` and `weight` may be pinned per key (otherwise the model picks the operator and `auto_weight` applies). A condition on a boost key is always a boost, never a filter.
+- `method: "auto"`: the whole value space is offered; the model tags each condition `"strength": "hard"` (a requirement, applied as a filter when the filter's own method allows it) or `"soft"` (a preference, applied as a boost of `auto_weight`).
+- `method: "off"` (or no `boost`): no boost, including the fixed preferences.
+- `manual` preferences apply in every boost mode except `off`. A key listed in both the filter's and the boost's `semi_auto` belongs to the filter.
+- The filter and the boost share one LLM call. `max_total` caps the sum of boosts per chunk; the fused similarity is in `[0, 1]`, so weights of 0.05–0.2 are the useful range.
+
+The same `meta_data_filter` object (with `boost`) works wherever metadata filters are accepted: chat assistants (including reasoning mode), search apps, the agent Retrieval component, `POST /api/v1/retrieval` and `POST /api/v1/datasets/{dataset_id}/search`. Boosts require chunk metadata to be active on every dataset of the request; otherwise they are ignored and the filter works exactly as before. With chunk metadata active, filter conditions on the listed keys are applied on the chunk fields, except `≠` and `not in`, which keep the document-ID path.
+
+---
+
 ### Retrieve a metadata summary from a dataset
 
 **GET** `/api/v1/datasets/{dataset_id}/metadata/summary`
@@ -2483,6 +2621,7 @@ Retrieves chunks from specified datasets.
   - `"highlight"`: `boolean`
   - `"cross_languages"`: `list[string]`
   - `"metadata_condition"`: `object`
+  - `"metadata_boost"`: `list[object]` or `object`
   - `"use_kg"`: `boolean`
   - `"include_knowledge_compilation"`: `boolean`
 
@@ -2548,6 +2687,8 @@ curl --request POST \
   The number of initial retrieval candidates to rank. It must be at least `"page"` multiplied by `"page_size"`. Defaults to `64`.
 - `"include_knowledge_compilation"`: (*Body parameter*), `boolean`
   Whether to include knowledge-compilation chunks in the results. Defaults to `true`.
+- `"metadata_boost"`: (*Body parameter*), `list[object]` or `object`
+  Metadata preferences that raise the score of matching chunks without excluding the others. Each entry has `"key"`, `"op"` (`=`, `in`, `>`, `<`, `≥`, `≤`, `contains`, `max`, `min`), `"value"` (not used by `max`/`min`) and `"weight"` (0–1, added to the fused similarity). The object form is `{"manual": [...], "max_total": 0.3}`; `"max_total"` caps the sum of boosts per chunk. Requires every dataset in `"dataset_ids"` to have chunk metadata enabled and backfilled (see [Configure chunk metadata](#configure-chunk-metadata)); otherwise the parameter is ignored. With chunk metadata active, `"metadata_condition"` is also applied on the chunk fields directly, so it is no longer limited by the document result window.
 - `"use_kg"`: (*Body parameter*), `boolean`
   Whether to search chunks related to the generated knowledge graph for multi-hop queries. Defaults to `False`. Before enabling this, ensure you have successfully constructed a knowledge graph for the specified datasets. See [here](../guides/knowledge_compilation/built_in_templates_and_dedicated_configuration.md#graph) for details.
 - `"rerank_id"`: (*Body parameter*), `string`

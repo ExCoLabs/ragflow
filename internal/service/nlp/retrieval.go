@@ -73,6 +73,9 @@ type RetrievalRequest struct {
 	// bridge a wording gap the query's own words cannot cross; the scoring pass
 	// then uses the engine's kNN score directly instead of re-scoring tokens.
 	VectorOnly bool
+	// ChunkMeta filters and boosts on document metadata stored on chunks
+	// (service.ApplyMetaDataScope). Nil leaves retrieval unchanged.
+	ChunkMeta *common.ChunkMetaScope
 }
 
 // RetrievalResult result from retrieval search
@@ -178,6 +181,7 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		AllowDenseFallback:     req.AllowDenseFallback,
 		VectorOnly:             req.VectorOnly,
 		Filter:                 req.Filter,
+		ChunkMeta:              req.ChunkMeta,
 	}
 	searchResult, err := s.Search(ctx, searchReq)
 	if err != nil {
@@ -198,6 +202,11 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 	}
 	if len(sim) == 0 {
 		return &RetrievalResult{Chunks: []map[string]interface{}{}, DocAggs: []map[string]interface{}{}, Total: 0}, nil
+	}
+	// Metadata preferences are added after text/vector similarity, and after
+	// the rerank model when there is one, so they survive every ranking stage.
+	if req.ChunkMeta != nil && len(req.ChunkMeta.Boosts) > 0 {
+		addMetaBoostScores(sim, req.ChunkMeta, searchResult)
 	}
 
 	// Sort indices (positions into search results) by score descending
@@ -596,6 +605,22 @@ type RetrievalSearchRequest struct {
 	EmbeddingModel         *models.EmbeddingModel
 	VectorSimilarityWeight *float64
 	AllowDenseFallback     *bool
+	// ChunkMeta is RetrievalRequest.ChunkMeta.
+	ChunkMeta *common.ChunkMetaScope
+}
+
+// addMetaBoostScores adds the metadata boost of each candidate to its fused
+// similarity (common.MetaBoostScores).
+func addMetaBoostScores(sim []float64, scope *common.ChunkMetaScope, searchResult *RetrievalSearchResult) {
+	chunks := make([]map[string]interface{}, len(sim))
+	for i := range sim {
+		if i < len(searchResult.IDs) {
+			chunks[i] = searchResult.Field[searchResult.IDs[i]]
+		}
+	}
+	for i, boost := range common.MetaBoostScores(scope.Boosts, chunks, scope.BoostMaxTotal) {
+		sim[i] += boost
+	}
 }
 
 func buildInfinityFusionExpr(topn int, vectorSimilarityWeight *float64) *types.FusionExpr {
@@ -707,6 +732,14 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		"content_with_weight", "doc_type_kwd", "mom_id", "row_id()",
 		"_score",
 	}
+	// The boost scorer reads the chunk metadata fields back from each hit.
+	if req.ChunkMeta != nil {
+		for _, f := range common.MetaBoostFieldNames(req.ChunkMeta.Boosts) {
+			if !slices.Contains(src, f) {
+				src = append(src, f)
+			}
+		}
+	}
 
 	kwds := make(map[string]struct{})
 
@@ -718,6 +751,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		Limit:        limit,
 		Filter:       filters,
 		SelectFields: src,
+		ChunkMeta:    req.ChunkMeta,
 	}
 
 	// queryVector tracks the query vector for reranking
@@ -806,6 +840,10 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 			// If result is empty, retry with relaxed conditions
 			if engineResult.Total == 0 {
 				_, hasDocIDFilter := filters["doc_id"]
+				// A chunk metadata filter scopes the search the same way.
+				if req.ChunkMeta != nil && req.ChunkMeta.Filter != nil {
+					hasDocIDFilter = true
+				}
 				if req.VectorOnly || matchText == nil {
 					if *req.AllowDenseFallback {
 						common.Debug("Retrieval dense-only fallback after empty initial search")

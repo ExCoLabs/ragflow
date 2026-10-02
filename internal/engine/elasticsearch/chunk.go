@@ -1198,6 +1198,12 @@ func (e *Engine) Search(ctx context.Context, req *types.SearchRequest) (*types.S
 
 	// Build bool query from condition
 	boolQuery := buildBoolQueryFromCondition(req.Filter, req.KbIDs, isSkillIndex, isMemoryIndex)
+	if !isSkillIndex && !isMemoryIndex && !req.ChunkMeta.IsEmpty() {
+		var err error
+		if boolQuery, err = applyChunkMetaScope(boolQuery, req.ChunkMeta); err != nil {
+			return nil, fmt.Errorf("chunk metadata filter: %w", err)
+		}
+	}
 
 	// Extract vector_similarity_weight from FusionExpr
 	var matchText *types.MatchTextExpr

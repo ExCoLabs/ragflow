@@ -53,6 +53,11 @@ type SearchRequest struct {
 	// Sorting and ranking
 	OrderBy     *OrderByExpr       // Order by expression (asc/desc on fields)
 	RankFeature map[string]float64 // Rank features for learning to rank
+
+	// ChunkMeta filters and boosts on document metadata copied onto chunks
+	// (see common.ChunkMetaScope). Only engines that implement
+	// engine.ChunkMetadataStore act on it; callers set it only for those.
+	ChunkMeta *common.ChunkMetaScope
 }
 
 // SearchResult unified search result for all engines

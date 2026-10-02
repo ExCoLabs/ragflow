@@ -242,23 +242,38 @@ func (h *DifyRetrievalHandler) Retrieval(c *gin.Context) {
 	}
 	embModel := modelModule.NewEmbeddingModel(target.Driver, &target.ModelName, target.APIConfig, target.MaxTokens)
 
-	// Metadata filter
-	metas, metaErr := h.metadataSvc.GetFlattedMetaByKBs(ctx, []string{req.KnowledgeID})
+	// Metadata filter. With document metadata stored on the dataset's chunks
+	// and every condition expressible on them, it is applied on the chunk
+	// fields directly: exact, and not capped by the engine's result window.
+	kbs := []*entity.Knowledgebase{kb}
 	docIDs := make([]string, 0)
-	if metaErr == nil && req.MetadataCondition != nil {
+	var chunkMeta *common.ChunkMetaScope
+	if req.MetadataCondition != nil {
 		logic := req.MetadataCondition.Logic
 		if logic == "" {
 			logic = "and"
 		}
-		filteredIDs := service.ApplyMetaFilter(metas, req.MetadataCondition.toMetaFilterConditions(), logic)
-		docIDs = append(docIDs, filteredIDs...)
-	}
-	if len(docIDs) == 0 && req.MetadataCondition != nil {
-		docIDs = []string{service.NoMatchDocIDSentinel}
+		conditions := req.MetadataCondition.toMetaFilterConditions()
+		if cfg := service.ChunkMetadataConfigForKBs(kbs); cfg.Active() {
+			maps := make([]map[string]interface{}, 0, len(conditions))
+			for _, c := range conditions {
+				maps = append(maps, map[string]interface{}{"key": c.Key, "op": c.Op, "value": c.Value})
+			}
+			if common.IsChunkFilterable(maps, cfg.Fields) {
+				chunkMeta = &common.ChunkMetaScope{Filter: common.NewChunkMetaFilter(maps, logic)}
+			}
+		}
+		if chunkMeta == nil {
+			if metas, metaErr := h.metadataSvc.GetFlattedMetaByKBs(ctx, []string{req.KnowledgeID}); metaErr == nil {
+				docIDs = append(docIDs, service.ApplyMetaFilter(metas, conditions, logic)...)
+			}
+			if len(docIDs) == 0 {
+				docIDs = []string{service.NoMatchDocIDSentinel}
+			}
+		}
 	}
 
 	// Label question for rank features
-	kbs := []*entity.Knowledgebase{kb}
 	rankFeature := h.metadataSvc.LabelQuestion(ctx, req.Query, kbs)
 
 	// Chunk retrieval
@@ -272,6 +287,7 @@ func (h *DifyRetrievalHandler) Retrieval(c *gin.Context) {
 		KNNTopK:             topK,
 		SimilarityThreshold: scoreThreshold,
 		EmbeddingModel:      embModel,
+		ChunkMeta:           chunkMeta,
 	}
 	if rankFeature != nil {
 		sr.RankFeature = &rankFeature
