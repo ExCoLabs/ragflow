@@ -394,6 +394,47 @@ func TestMCPToolAdapter_InvokableRunDispatchesCallTool(t *testing.T) {
 	}
 }
 
+// TestMCPToolAdapter_InvokableRunReturnsAllTextContent: a tool that
+// returns one text content item per record must hand every item to the
+// agent, newline-joined, not just the first one. Non-text items are
+// skipped without hiding the text items that follow them.
+func TestMCPToolAdapter_InvokableRunReturnsAllTextContent(t *testing.T) {
+	ctx := t.Context()
+	defer mcpLoopbackOverride(t)()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "initialize":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{}}`))
+		case "tools/call":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"content":[` +
+				`{"type":"image","data":"aGk=","mimeType":"image/png"},` +
+				`{"type":"text","text":"{\"id\":\"item-1\"}"},` +
+				`{"type":"text","text":"{\"id\":\"item-2\"}"},` +
+				`{"type":"text","text":"{\"id\":\"item-3\"}"}` +
+				`],"isError":false}}`))
+		default:
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer srv.Close()
+
+	a := NewMCPToolAdapterFull(mcpclient.Tool{Name: "list_items"}, srv.URL, nil, 2*time.Second, srv.Client())
+	out, err := a.InvokableRun(ctx, `{}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	want := `{"id":"item-1"}` + "\n" + `{"id":"item-2"}` + "\n" + `{"id":"item-3"}`
+	if out != want {
+		t.Errorf("out=%q, want %q", out, want)
+	}
+}
+
 // TestMCPToolAdapter_InvokableRunIsError: a tools/call response
 // with isError=true surfaces as a Go error.
 func TestMCPToolAdapter_InvokableRunIsError(t *testing.T) {
