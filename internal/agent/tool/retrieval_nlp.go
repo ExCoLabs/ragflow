@@ -93,6 +93,7 @@ type metadataScopeResolver interface {
 		chatModel *modelModule.ChatModel,
 		baseDocIDs []string,
 		kbs []*entity.Knowledgebase,
+		diagnostics *common.MetadataFilterDiagnostic,
 	) ([]string, *common.ChunkMetaScope, error)
 }
 
@@ -147,6 +148,7 @@ type retrievalEnhancer interface {
 		chatModel *modelModule.ChatModel,
 		baseDocIDs []string,
 		kbIDs []string,
+		diagnostics *common.MetadataFilterDiagnostic,
 	) ([]string, error)
 	LabelQuestion(
 		ctx context.Context,
@@ -276,12 +278,12 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		if scoper, ok := a.enhancer.(metadataScopeResolver); ok {
 			var filterMeta *common.ChunkMetaScope
 			docIDs, filterMeta, err = scoper.ScopeDocuments(
-				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbs,
+				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbs, req.Diagnostics,
 			)
 			chunkMeta = common.MergeChunkMetaScopes(filterMeta, chunkMeta)
 		} else {
 			docIDs, err = a.enhancer.FilterDocuments(
-				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbIDs,
+				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbIDs, req.Diagnostics,
 			)
 		}
 		if err != nil {

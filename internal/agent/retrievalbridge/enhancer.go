@@ -57,6 +57,8 @@ func (e *Enhancer) CrossLanguages(
 
 // FilterDocuments applies auto, semi-auto, or manual metadata filtering and
 // constrains the result by any document scope supplied by upstream tools.
+// When diagnostics is non-nil, the runtime outcome is recorded for reporting
+// in agent references.
 func (e *Enhancer) FilterDocuments(
 	ctx context.Context,
 	filter map[string]any,
@@ -64,6 +66,7 @@ func (e *Enhancer) FilterDocuments(
 	chatModel *modelModule.ChatModel,
 	baseDocIDs []string,
 	kbIDs []string,
+	diagnostics *common.MetadataFilterDiagnostic,
 ) ([]string, error) {
 	if e == nil || e.metadataSvc == nil {
 		return nil, fmt.Errorf("metadata service is not configured")
@@ -72,7 +75,7 @@ func (e *Enhancer) FilterDocuments(
 	if err != nil {
 		return nil, err
 	}
-	docIDs := service.ApplyMetaDataFilter(
+	docIDs := service.ApplyMetaDataFilterWithDiagnostics(
 		ctx,
 		filter,
 		metadata,
@@ -80,6 +83,7 @@ func (e *Enhancer) FilterDocuments(
 		chatModel,
 		baseDocIDs,
 		kbIDs,
+		diagnostics,
 	)
 	// nil means the metadata could not narrow the search -- an auto/semi_auto
 	// filter that produced no conditions, or one refused because the value space
@@ -95,7 +99,7 @@ func (e *Enhancer) FilterDocuments(
 
 // ScopeDocuments is FilterDocuments that also resolves the filter and the
 // metadata boost on the chunk metadata fields when every dataset carries them
-// (service.ApplyMetaDataScope).
+// (service.ApplyMetaDataScope). diagnostics is recorded as in FilterDocuments.
 func (e *Enhancer) ScopeDocuments(
 	ctx context.Context,
 	filter map[string]any,
@@ -103,6 +107,7 @@ func (e *Enhancer) ScopeDocuments(
 	chatModel *modelModule.ChatModel,
 	baseDocIDs []string,
 	kbs []*entity.Knowledgebase,
+	diagnostics *common.MetadataFilterDiagnostic,
 ) ([]string, *common.ChunkMetaScope, error) {
 	if e == nil || e.metadataSvc == nil {
 		return nil, nil, fmt.Errorf("metadata service is not configured")
@@ -115,7 +120,7 @@ func (e *Enhancer) ScopeDocuments(
 	if err != nil {
 		return nil, nil, err
 	}
-	scope := service.ApplyMetaDataScope(
+	scope := service.ApplyMetaDataScopeWithDiagnostics(
 		ctx,
 		filter,
 		metadata,
@@ -124,6 +129,7 @@ func (e *Enhancer) ScopeDocuments(
 		baseDocIDs,
 		kbIDs,
 		service.ChunkMetadataConfigForKBs(kbs),
+		diagnostics,
 	)
 	// nil: no metadata narrowing, keep the caller's scope (see FilterDocuments).
 	if scope.DocIDs == nil {

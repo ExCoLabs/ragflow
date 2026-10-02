@@ -67,9 +67,11 @@ type MetaFilterInput struct {
 }
 
 // MetadataFilterDiagnostic captures the runtime outcome of a metadata-filter
-// pass: the method, whether it was applied, generated nothing, matched nothing
-// or was unsupported, the conditions it ran (for auto/semi_auto the LLM's) and
-// how many documents they matched.
+// pass: the method, whether it was applied, disabled, generated nothing,
+// matched nothing or was unsupported, the conditions it ran (for
+// auto/semi_auto the LLM's) and how many documents they matched. The
+// retrieval test reports it as meta_filter, agent references as one entry of
+// metadata_filters.
 type MetadataFilterDiagnostic struct {
 	Method               string                   `json:"method"`
 	Status               string                   `json:"status"`

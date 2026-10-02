@@ -27,6 +27,7 @@ package retrievalbridge
 import (
 	"testing"
 
+	"ragflow/internal/common"
 	modelModule "ragflow/internal/entity/models"
 	"ragflow/internal/service"
 )
@@ -45,11 +46,16 @@ func newFilterChatModel() *modelModule.ChatModel {
 func TestFilterDocumentsKeepsBaseScopeWhenTheFilterCannotNarrow(t *testing.T) {
 	base := []string{"doc-1", "doc-2"}
 
+	var diagnostic common.MetadataFilterDiagnostic
 	got, err := NewEnhancer(nil, nil).FilterDocuments(
-		t.Context(), map[string]any{"method": "auto"}, "who wrote it?", newFilterChatModel(), base, nil,
+		t.Context(), map[string]any{"method": "auto"}, "who wrote it?", newFilterChatModel(), base, nil, &diagnostic,
 	)
 	if err != nil {
 		t.Fatalf("FilterDocuments: %v", err)
+	}
+	// The agent reference reports the same outcome the retrieval test does.
+	if diagnostic.Method != "auto" || diagnostic.Status != "not_generated" {
+		t.Fatalf("diagnostic = %+v, want auto/not_generated", diagnostic)
 	}
 
 	for _, id := range got {
@@ -77,7 +83,7 @@ func TestFilterDocumentsReturnsTheSentinelForManualNoMatch(t *testing.T) {
 	}
 
 	got, err := NewEnhancer(nil, nil).FilterDocuments(
-		t.Context(), filter, "", nil, []string{"doc-1"}, nil,
+		t.Context(), filter, "", nil, []string{"doc-1"}, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("FilterDocuments: %v", err)
