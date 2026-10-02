@@ -200,13 +200,14 @@ func NewAgenticState(question, keywords string, maxLoops int, messages []schema.
 	if maxLoops <= 0 {
 		maxLoops = 3
 	}
+	// EmptyResult starts false: nothing has been searched yet. formalizeAnswerNode sets it
+	// from the evidence pool before the answer is composed.
 	return &AgenticState{
-		Question:    question,
-		Keywords:    keywords,
-		MaxLoops:    maxLoops,
-		Messages:    messages,
-		KB:          &runtime.Kbinfos{},
-		EmptyResult: true,
+		Question: question,
+		Keywords: keywords,
+		MaxLoops: maxLoops,
+		Messages: messages,
+		KB:       &runtime.Kbinfos{},
 	}
 }
 
@@ -316,12 +317,12 @@ func BuildLowGraph(ctx context.Context, deps RAGTools, req runtime.RunRequest, s
 	addNode("formalize_answer", func(c context.Context, r *runtime.RunRequest) (*runtime.RunRequest, error) {
 		if deps.Finalize != nil {
 			// The state at this node: partial_answer=False (formalize_question) and
-			// empty_result=True (direct search) — the values the compose prompt reads from the
-			// state. The question
-			// is the one formalize_question wrote into this same RunRequest
-			// the low
-			// graph's compose must use the formalized question too.
-			deps.Finalize(c, false, true, r.Question)
+			// empty_result set by direct search only when it found nothing — the values the
+			// compose prompt reads from the state. A literal true here returned the
+			// configured empty_response on every run, whatever the search found. The
+			// question is the one formalize_question wrote into this same RunRequest; the
+			// low graph's compose must use the formalized question too.
+			deps.Finalize(c, false, len(kb.Chunks) == 0, r.Question)
 		}
 		return r, nil
 	})
@@ -858,11 +859,11 @@ func formalizeAnswerNode(ctx context.Context, deps RAGTools, st *AgenticState, l
 	step(ctx, logger, "Finalize", "%s", finalizeSummary(st.PartialAnswer, st.EmptyResult, chunkCount(st.KB)))
 	// formalize_answer — the node itself composes and streams the answer
 	// (_compose_answer_from_evidence); it does not just flag the state.
-	// Composition uses THIS node's state values: partial_answer was set right above and
-	// empty_result is still the True formalize_question wrote (never reset anywhere in the
-	// graph), so the compose prompt carries the no-evidence hedge on every round and, when
-	// INSUFFICIENT, the partial preamble. Forwarding the state beats the caller's response
-	// flags, which are only copied after the graph returns.
+	// Composition uses THIS node's state values: partial_answer and empty_result were both
+	// set right above, so the compose prompt carries the partial preamble when INSUFFICIENT
+	// and the no-evidence branch (empty_response, or the hedge) only when the pool is
+	// empty. Forwarding the state beats the caller's response flags, which are only copied
+	// after the graph returns.
 	if deps.Finalize != nil {
 		// question = state["question"] (Python :834): the FORMALIZED question
 		// the formalize_question node wrote — composing from the outer tool
@@ -871,7 +872,7 @@ func formalizeAnswerNode(ctx context.Context, deps RAGTools, st *AgenticState, l
 		//
 		// Marked first: this node has just told the reader the verdict and the
 		// evidence, so the compose that follows suppresses its own kickoff step.
-		deps.Finalize(markFinalizeAnnounced(ctx), st.PartialAnswer, true, st.Question)
+		deps.Finalize(markFinalizeAnnounced(ctx), st.PartialAnswer, st.EmptyResult, st.Question)
 	}
 }
 

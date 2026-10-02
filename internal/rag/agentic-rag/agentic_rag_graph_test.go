@@ -2383,6 +2383,77 @@ func TestRunUnknownModeReturnsComposedAnswer(t *testing.T) {
 	}
 }
 
+// TestRunLowEmptyResponseNotReturnedWhenEvidenceFound pins the other half of the short
+// circuit: a configured empty_response is for runs that found nothing. The low graph's
+// last node used to hand the compose a hard-coded empty_result=true, so a chat with an
+// empty_response configured got that canned text back for every question, however much
+// evidence the direct search gathered, and the answer model was never called.
+func TestRunLowEmptyResponseNotReturnedWhenEvidenceFound(t *testing.T) {
+	const emptyResponse = "I don't have enough information."
+	mdl := &fakeModel{replies: []*runtime.ModelReply{
+		{Content: `{"entity": ["Culdcept"], "aliases": [], "fact_type": [], "qualifiers": []}`},
+		{Content: `{"entity": ["Culdcept"], "aliases": [], "fact_type": [], "qualifiers": []}`},
+		{Content: "Culdcept was created by OmiyaSoft [ID:0]."},
+	}}
+	var buf bytes.Buffer
+	resp := Rag(context.Background(), RAGTools{
+		Retriever:     &corpusRetriever{},
+		Model:         mdl,
+		EmptyResponse: emptyResponse,
+		Logger:        log.New(&buf, "", 0),
+	}, runtime.RunRequest{
+		Question:     "Who created Culdcept?",
+		ThinkingMode: "low",
+		DatasetIDs:   []string{"kb1"},
+	})
+	if resp.EmptyResult || len(resp.Chunks) == 0 {
+		t.Fatalf("expected evidence (chunks=%d, empty=%v)", len(resp.Chunks), resp.EmptyResult)
+	}
+	if resp.Answer == emptyResponse {
+		t.Errorf("answer = configured empty response although %d chunk(s) were found", len(resp.Chunks))
+	}
+	if !strings.Contains(resp.Answer, "OmiyaSoft") {
+		t.Errorf("answer = %q, want the composed answer", resp.Answer)
+	}
+	if got := buf.String(); strings.Contains(got, "No supporting evidence was found") {
+		t.Errorf("no-evidence short circuit taken with evidence in the pool; log:\n%s", got)
+	}
+}
+
+// TestAgenticFinalizeForwardsEmptyResultFromPool is the agentic graph's counterpart: the
+// state was seeded empty_result=true and the formalize_answer node forwarded a literal
+// true, so the compose took the no-evidence branch (empty_response, or the no-evidence
+// hedge in the prompt) on every run. The flag must follow the evidence pool.
+func TestAgenticFinalizeForwardsEmptyResultFromPool(t *testing.T) {
+	if NewAgenticState("q", "", 3, nil).EmptyResult {
+		t.Error("a fresh state has searched nothing; it must not start out as an empty result")
+	}
+	cases := []struct {
+		name   string
+		chunks []map[string]any
+		want   bool
+	}{
+		{name: "evidence", chunks: []map[string]any{{"chunk_id": "c1", "content_with_weight": "x"}}, want: false},
+		{name: "no evidence", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []bool
+			st := NewAgenticState("q", "", 3, nil)
+			st.KB = &runtime.Kbinfos{Chunks: tc.chunks}
+			deps := RAGTools{Finalize: func(_ context.Context, _, empty bool, _ string) {
+				got = append(got, empty)
+			}}
+
+			formalizeAnswerNode(context.Background(), deps, st, log.New(&bytes.Buffer{}, "", 0))
+
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("Finalize empty_result = %v, want [%v]", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunEmptyResponseShortCircuits(t *testing.T) {
 	mdl := &fakeModel{}
 	var buf bytes.Buffer

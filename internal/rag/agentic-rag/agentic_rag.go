@@ -1364,7 +1364,7 @@ func Rag(ctx context.Context, deps RAGTools, req runtime.RunRequest) *RunRespons
 //
 // partialAnswer / emptyResult are the compose prompt inputs read off the graph state:
 // `partial_answer` drives the partial-information preamble, `empty_result` is the
-// always-true-in-graph term of `no_evidence = abstain or empty_result or not chunks`.
+// state term of `no_evidence = abstain or empty_result or not chunks`.
 // question is the graph state's FORMALIZED question the last node forwarded; empty falls
 // back to req.Question — only the post-graph fallback composes after a run that never
 // formalized.
@@ -2085,7 +2085,7 @@ func (s *outerReactSession) ToolCall(name string, arguments map[string]interface
 		inner.KB = kb
 
 		// Composition happens INSIDE the graph, from the formalize_answer node's state:
-		// partial_answer from the node, empty_result always true there, and question =
+		// partial_answer and empty_result from the node, and question =
 		// state["question"], the FORMALIZED multi-hop question. Wire the per-call Finalize
 		// so the graph's last node composes itself; the guarded direct call below only fires
 		// when the graph never reached that node.
