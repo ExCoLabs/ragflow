@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -89,7 +90,16 @@ func (p *EmailParser) parseEmail(ctx context.Context, filename string, data []by
 	ext := strings.ToLower(filepath.Ext(filename))
 
 	var content map[string]any
-	if ext == ".msg" {
+	// Route by content as well as by name: an Outlook message stored or
+	// attached under another name (e.g. ".eml") must still be decoded as
+	// OLE2, otherwise the RFC 5322 reader would index its binary property
+	// streams as text. Conversely, a ".msg" without the OLE2 signature is
+	// rejected up front instead of being handed to the CFB decoder.
+	isOLE := bytes.HasPrefix(data, oleSignature)
+	if ext == ".msg" || isOLE {
+		if !isOLE {
+			return ParseResult{Err: fmt.Errorf("email: .msg: %w", errInvalidMSGSignature)}
+		}
 		var (
 			msg map[string]any
 			err error
@@ -597,12 +607,8 @@ func parseMSG(data []byte, fields []string) (map[string]any, error) {
 	if target["body"] {
 		// Mirror Python: prefer the plain body, fall back to the HTML body
 		// when the plain body is empty. The .msg branch emits only "text"
-		// (never "text_html"), matching the Python _email .msg contract exactly.
-		text := msg.Body
-		if strings.TrimSpace(text) == "" && len(msg.BodyHTML) > 0 {
-			text = string(msg.BodyHTML)
-		}
-		content["text"] = text
+		// (never "text_html"), matching the Python _email .msg contract.
+		content["text"] = msgBodyText(msg)
 	}
 
 	if target["attachments"] {
@@ -616,6 +622,86 @@ func parseMSG(data []byte, fields []string) (map[string]any, error) {
 	return content, nil
 }
 
+// oleSignature is the OLE2/CFB header every Outlook .msg file starts with.
+var oleSignature = []byte{0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1}
+
+// errInvalidMSGSignature rejects a ".msg" whose bytes are not an OLE2
+// compound file, so it is never indexed as raw bytes.
+var errInvalidMSGSignature = errors.New("invalid Outlook MSG signature")
+
+// msgBodyText returns the readable body of an Outlook message: the plain
+// body when it carries text, otherwise the visible text of the HTML body.
+//
+// gomsg decodes the plain body (PidTagBody) itself, but hands the HTML body
+// (PidTagBodyHtml, a binary property) back as raw bytes in the message's
+// internet codepage. Using those bytes verbatim indexed tag soup and, for a
+// non-UTF-8 codepage such as windows-1250, mojibake in place of diacritics.
+// The HTML is therefore decoded under the declared codepage (falling back to
+// the <meta> charset / detection in DecodeToUTF8 when none is declared) and
+// flattened to visible text like an .eml HTML part in text output.
+func msgBodyText(msg *gomsg.Message) string {
+	if strings.TrimSpace(msg.Body) != "" || len(msg.BodyHTML) == 0 {
+		return msg.Body
+	}
+	return htmlBodyToText(decodeMsgHTML(msg.BodyHTML, msgInternetCodepage(msg)))
+}
+
+// msgInternetCodepage returns PidTagInternetCodepage, the codepage the HTML
+// body bytes are stored in (MS-OXCMSG 2.2.1.36), or 0 when absent.
+func msgInternetCodepage(msg *gomsg.Message) int32 {
+	if msg.Properties == nil {
+		return 0
+	}
+	cp, _ := msg.Properties.GetInt32(gomsg.PidTagInternetCodepage)
+	return cp
+}
+
+// decodeMsgHTML converts an Outlook HTML body to UTF-8 using its Windows
+// codepage. An unknown or missing codepage leaves the choice to
+// DecodeToUTF8's HTML prescan (meta charset, UTF-8 validity, detection).
+func decodeMsgHTML(body []byte, codepage int32) string {
+	hint := windowsCodepageCharset(codepage)
+	if hint == "" {
+		hint = "text/html"
+	}
+	decoded, _ := DecodeToUTF8(body, hint)
+	return string(decoded)
+}
+
+// windowsCodepageCharset maps a Windows codepage identifier to the charset
+// label DecodeToUTF8 understands, or "" when the codepage is not mapped.
+func windowsCodepageCharset(codepage int32) string {
+	switch {
+	case codepage == 65001:
+		return "utf-8"
+	case codepage == 874 || (codepage >= 1250 && codepage <= 1258):
+		return fmt.Sprintf("windows-%d", codepage)
+	case codepage >= 28591 && codepage <= 28599, codepage == 28603, codepage == 28605:
+		return fmt.Sprintf("iso-8859-%d", codepage-28590)
+	}
+	switch codepage {
+	case 20866:
+		return "koi8-r"
+	case 21866:
+		return "koi8-u"
+	case 932:
+		return "shift_jis"
+	case 936:
+		return "gbk"
+	case 949:
+		return "euc-kr"
+	case 950:
+		return "big5"
+	case 54936:
+		return "gb18030"
+	case 51932:
+		return "euc-jp"
+	case 50220:
+		return "iso-2022-jp"
+	}
+	return ""
+}
+
 // msgAttachments flattens a gomsg.Message's attachments into the
 // {filename, payload} shape rechunkEmailAttachments consumes. Embedded .msg
 // attachments expose no raw bytes via gomsg, but gomsg does parse the embedded
@@ -627,11 +713,7 @@ func msgAttachments(msg *gomsg.Message) []map[string]any {
 	for _, a := range msg.Attachments {
 		if a.IsEmbeddedMessage() {
 			if em := a.EmbeddedMessage(); em != nil {
-				body := em.Body
-				if strings.TrimSpace(body) == "" {
-					body = string(em.BodyHTML)
-				}
-				if body != "" {
+				if body := msgBodyText(em); strings.TrimSpace(body) != "" {
 					out = append(out, map[string]any{
 						"filename": a.DisplayName() + ".txt",
 						"payload":  body,

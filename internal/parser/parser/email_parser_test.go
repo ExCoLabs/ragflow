@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/textproto"
@@ -27,6 +28,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AkmalOt/gomsg"
+	"golang.org/x/text/encoding/charmap"
 )
 
 func mustParseEML(t *testing.T, reader io.Reader, fields []string) map[string]any {
@@ -408,6 +412,153 @@ func TestEmailParser_MsgTextOutputExcludesMetadata(t *testing.T) {
 	for _, leaked := range []string{"metadata", "message_id", "in_reply_to"} {
 		if strings.Contains(result.Text, leaked) {
 			t.Errorf("text output must not contain %q, got %q", leaked, result.Text)
+		}
+	}
+}
+
+// TestEmailParser_MsgDetectedBySignature verifies an Outlook message is
+// decoded as OLE2 even when its name does not end in ".msg" (e.g. stored as
+// ".eml" or attached without an extension), instead of the RFC 5322 reader
+// indexing its binary property streams.
+func TestEmailParser_MsgDetectedBySignature(t *testing.T) {
+	data, err := os.ReadFile("testdata/sample.msg")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	for _, name := range []string{"sample.eml", "sample", "SAMPLE.MSG"} {
+		t.Run(name, func(t *testing.T) {
+			p := NewEmailParser()
+			p.ConfigureFromSetup(map[string]any{"output_format": "text"})
+			result := p.ParseWithResult(t.Context(), name, data)
+			if result.Err != nil {
+				t.Fatalf("unexpected error: %v", result.Err)
+			}
+			if !strings.Contains(result.Text, "subject:asdf") {
+				t.Errorf("text output missing subject, got %q", result.Text)
+			}
+			if !strings.Contains(result.Text, "from:<christoph@freiraum.xyz>") {
+				t.Errorf("text output missing from, got %q", result.Text)
+			}
+			if strings.Contains(result.Text, "__substg1.0_") || strings.ContainsRune(result.Text, '\ufffd') {
+				t.Errorf("text output leaks OLE2 bytes: %q", result.Text)
+			}
+		})
+	}
+}
+
+// TestEmailParser_InvalidMsgRejected verifies a ".msg" that is not an OLE2
+// compound file, or an OLE2 header followed by garbage, fails the parse
+// instead of being indexed as raw bytes.
+func TestEmailParser_InvalidMsgRejected(t *testing.T) {
+	ole := []byte{0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1}
+	cases := []struct {
+		name      string
+		filename  string
+		data      []byte
+		signature bool
+	}{
+		{"rfc822 named msg", "mail.msg", []byte("Subject: hi\r\n\r\nbody\r\n"), true},
+		{"empty msg", "mail.msg", nil, true},
+		{"pdf named msg", "mail.msg", []byte("%PDF-1.4\n\x00\xff"), true},
+		{"truncated ole msg", "mail.msg", append(append([]byte{}, ole...), "binary content must never become searchable text"...), false},
+		{"truncated ole eml", "mail.eml", append(append([]byte{}, ole...), "binary content must never become searchable text"...), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewEmailParser()
+			p.ConfigureFromSetup(map[string]any{"output_format": "text"})
+			result := p.ParseWithResult(t.Context(), tc.filename, tc.data)
+			if result.Err == nil {
+				t.Fatalf("expected error, got text %q", result.Text)
+			}
+			if got := errors.Is(result.Err, errInvalidMSGSignature); got != tc.signature {
+				t.Errorf("errors.Is(err, errInvalidMSGSignature) = %v, want %v (err: %v)", got, tc.signature, result.Err)
+			}
+			if result.Text != "" || len(result.JSON) != 0 {
+				t.Errorf("failed parse must not produce output, got text %q json %v", result.Text, result.JSON)
+			}
+		})
+	}
+}
+
+// TestMsgBodyText verifies the .msg body selection: the plain body wins when
+// it has text; otherwise the HTML body is decoded under its codepage and
+// flattened to visible text rather than indexed as markup.
+func TestMsgBodyText(t *testing.T) {
+	const slovak = "Žiadosť o zmenu projektu: štvrtok"
+	cp1250, err := charmap.Windows1250.NewEncoder().String(
+		`<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1250"><style>p{}</style></head>` +
+			`<body><p>` + slovak + `</p><p>Ďakujem</p></body></html>`)
+	if err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		msg  *gomsg.Message
+		want string
+	}{
+		{"plain preferred", &gomsg.Message{Body: "Dohodnutý termín", BodyHTML: []byte("<p>ignored</p>")}, "Dohodnutý termín"},
+		{"plain without html", &gomsg.Message{Body: " \r\n"}, " \r\n"},
+		{"html fallback", &gomsg.Message{Body: " \r\n", BodyHTML: []byte("<p>" + slovak + "</p>")}, slovak},
+		{"html fallback non-utf8", &gomsg.Message{BodyHTML: []byte(cp1250)}, slovak + "\nĎakujem"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := msgBodyText(tc.msg); got != tc.want {
+				t.Errorf("msgBodyText = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecodeMsgHTML_Codepage verifies the HTML body bytes are decoded under
+// PidTagInternetCodepage even when the markup declares no charset, and that a
+// missing codepage leaves UTF-8 HTML untouched.
+func TestDecodeMsgHTML_Codepage(t *testing.T) {
+	const text = "<p>Žiadosť v HTML – Ďakujem</p>"
+	cp1250, err := charmap.Windows1250.NewEncoder().String(text)
+	if err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+	cases := []struct {
+		name     string
+		body     []byte
+		codepage int32
+	}{
+		{"windows-1250", []byte(cp1250), 1250},
+		{"utf-8 codepage", []byte(text), 65001},
+		{"no codepage utf-8", []byte(text), 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := decodeMsgHTML(tc.body, tc.codepage); got != text {
+				t.Errorf("decodeMsgHTML = %q, want %q", got, text)
+			}
+		})
+	}
+}
+
+func TestWindowsCodepageCharset(t *testing.T) {
+	cases := map[int32]string{
+		65001: "utf-8",
+		1250:  "windows-1250",
+		1252:  "windows-1252",
+		874:   "windows-874",
+		28592: "iso-8859-2",
+		28603: "iso-8859-13",
+		28605: "iso-8859-15",
+		20866: "koi8-r",
+		936:   "gbk",
+		0:     "",
+		12345: "",
+	}
+	for cp, want := range cases {
+		if got := windowsCodepageCharset(cp); got != want {
+			t.Errorf("windowsCodepageCharset(%d) = %q, want %q", cp, got, want)
+		}
+		if want != "" && !isRecognizedCharset(want) {
+			t.Errorf("charset %q for codepage %d is not recognized by DecodeToUTF8", want, cp)
 		}
 	}
 }
