@@ -3,6 +3,7 @@ import Empty from '@/components/empty/empty';
 import { FilterButton } from '@/components/list-filter-bar';
 import { FilterPopover } from '@/components/list-filter-bar/filter-popover';
 import { FilterCollection } from '@/components/list-filter-bar/interface';
+import { ReferenceDuplicates } from '@/components/reference-duplicates';
 import { Card } from '@/components/ui/card';
 import { useTranslate } from '@/hooks/common-hooks';
 import { buildChunkParsedResultPath } from '@/hooks/logic-hooks/navigate-hooks';
@@ -77,6 +78,10 @@ function ChunkResultCard({ item, knowledgeBaseId }: ChunkResultCardProps) {
             {item.document_keyword}
           </Link>
         </div>
+        <ReferenceDuplicates
+          duplicates={item.duplicates}
+          className="mt-1 text-right"
+        />
       </Card>
     </article>
   );

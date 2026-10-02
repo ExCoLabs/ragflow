@@ -1493,6 +1493,35 @@ func TestChunksFormat_PreservesAlreadyNormalizedFields(t *testing.T) {
 	}
 }
 
+// TestChunksFormat_CarriesDuplicates pins Python's `chunk.get("duplicates") or []`
+// in every reference formatter: the copies retrieval collapsed into a chunk
+// pass through unchanged, and a chunk without any gets an empty list.
+func TestChunksFormat_CarriesDuplicates(t *testing.T) {
+	dups := []map[string]interface{}{{"chunk_id": "c1-copy", "document_name": "copy.pdf"}}
+	raw := []map[string]interface{}{
+		{"chunk_id": "c1", "content_with_weight": "text", "duplicates": dups},
+		{"chunk_id": "c2", "content_with_weight": "other"},
+	}
+	check := func(name string, got []interface{}) {
+		t.Helper()
+		if d, ok := got[0].([]map[string]interface{}); !ok || len(d) != 1 || d[0]["chunk_id"] != "c1-copy" {
+			t.Fatalf("%s: duplicates = %#v, want the collapsed copy", name, got[0])
+		}
+		if d, ok := got[1].([]interface{}); !ok || d == nil || len(d) != 0 {
+			t.Fatalf("%s: duplicates = %#v, want empty list", name, got[1])
+		}
+	}
+
+	session := (&ChatSessionService{}).chunksFormat(map[string]interface{}{"chunks": raw})
+	check("ChatSessionService.chunksFormat", []interface{}{session[0]["duplicates"], session[1]["duplicates"]})
+	pipeline := chunksFormat(raw)
+	check("chunksFormat", []interface{}{pipeline[0]["duplicates"], pipeline[1]["duplicates"]})
+	openai := formatChunks(raw)
+	check("formatChunks", []interface{}{openai[0].Duplicates, openai[1].Duplicates})
+	ask := ChunksFormat(NewSourcedChunks(raw))
+	check("ChunksFormat", []interface{}{ask[0]["duplicates"], ask[1]["duplicates"]})
+}
+
 func TestChunksFormat_EmptyReference(t *testing.T) {
 	svc := &ChatSessionService{}
 

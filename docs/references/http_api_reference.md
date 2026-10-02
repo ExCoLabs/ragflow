@@ -2545,7 +2545,7 @@ curl --request POST \
 - `"knn_num_candidates"`: (*Body parameter*), `integer`
   The number of approximate nearest-neighbor candidates considered for vector search. It must be greater than or equal to `"knn_top_k"`. Defaults to the greater of `2048` and `"knn_top_k"`. This parameter currently applies only to Elasticsearch.
 - `"rerank_candidates_count"`: (*Body parameter*), `integer`
-  The number of initial retrieval candidates to rank. It must be at least `"page"` multiplied by `"page_size"`. Defaults to `64`.
+  The number of initial retrieval candidates to rank. It must be at least `"page"` multiplied by `"page_size"`. Defaults to `64`. Candidates with identical text (for example from duplicate files) are returned once, as the highest ranked copy; the other copies are listed in that chunk's `"duplicates"` and do not count towards `"total"` or the page, so raise this value when a dataset holds many duplicates.
 - `"include_knowledge_compilation"`: (*Body parameter*), `boolean`
   Whether to include knowledge-compilation chunks in the results. Defaults to `true`.
 - `"use_kg"`: (*Body parameter*), `boolean`
@@ -2611,7 +2611,16 @@ Success:
                 ],
                 "similarity": 0.9669436601210759,
                 "term_similarity": 1.0,
-                "vector_similarity": 0.8898122004035864
+                "vector_similarity": 0.8898122004035864,
+                "duplicates": [
+                    {
+                        "chunk_id": "8ae5f2ef1a3d0c7b6f0e4d2a9c1b3e5f",
+                        "dataset_id": "c7ee74067a2c11efb21c0242ac120006",
+                        "document_id": "5c5999ec7be811ef9cab0242ac120005",
+                        "document_name": "copy of 1.txt",
+                        "similarity": 0.9012
+                    }
+                ]
             }
         ],
         "doc_aggs": [

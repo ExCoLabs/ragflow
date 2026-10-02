@@ -66,6 +66,7 @@ func TestChunksFormat(t *testing.T) {
 				"doc_type_kwd":      "pdf",
 				"similarity":        0.9,
 				"document_metadata": map[string]any{"page": "1"},
+				"duplicates":        []any{map[string]any{"chunk_id": "dup", "document_name": "copy.txt"}},
 			},
 			// Second chunk exercises the primary-name fallback path only where
 			// the canonical primary name is absent.
@@ -97,6 +98,7 @@ func TestChunksFormat(t *testing.T) {
 		"row_id":            nil,
 		"doc_type":          "pdf",
 		"document_metadata": map[string]any{"page": "1"},
+		"duplicates":        []any{map[string]any{"chunk_id": "dup", "document_name": "copy.txt"}},
 	}
 	if !reflect.DeepEqual(first, wantFirst) {
 		t.Errorf("first chunk = %#v, want %#v", first, wantFirst)
@@ -118,6 +120,7 @@ func TestChunksFormat(t *testing.T) {
 		"row_id":            nil,
 		"doc_type":          nil,
 		"document_metadata": nil,
+		"duplicates":        []any{},
 	}
 	if !reflect.DeepEqual(second, wantSecond) {
 		t.Errorf("second chunk = %#v, want %#v", second, wantSecond)

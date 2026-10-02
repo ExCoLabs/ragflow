@@ -73,6 +73,12 @@ type RetrievalRequest struct {
 	// bridge a wording gap the query's own words cannot cross; the scoring pass
 	// then uses the engine's kNN score directly instead of re-scoring tokens.
 	VectorOnly bool
+	// CollapseDuplicates returns chunks whose text is identical (after
+	// whitespace normalization) once, as the highest ranked copy. The other
+	// copies are listed under that chunk's "duplicates" but do not count
+	// towards Total, the page, or DocAggs, so duplicate files cannot crowd out
+	// distinct content. nil means true.
+	CollapseDuplicates *bool
 }
 
 // RetrievalResult result from retrieval search
@@ -242,6 +248,12 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		return &RetrievalResult{Chunks: []map[string]interface{}{}, DocAggs: []map[string]interface{}{}, Total: 0}, nil
 	}
 
+	collapseDuplicates := req.CollapseDuplicates == nil || *req.CollapseDuplicates
+	var duplicatesOf map[int][]int
+	if collapseDuplicates {
+		validIdx, duplicatesOf = collapseDuplicateChunks(searchResult, validIdx)
+	}
+
 	// Calculate pagination
 	// begin and end define which of validIdx to return as the page
 	begin := (req.Page - 1) * pageSize
@@ -370,6 +382,24 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 			resultChunk["vector"] = zeroVector
 		}
 
+		if collapseDuplicates {
+			// Presentation-only, so it already uses the public field names and
+			// passes through chunksFormat and the REST key mapping.
+			duplicates := make([]map[string]interface{}, 0, len(duplicatesOf[i]))
+			for _, j := range duplicatesOf[i] {
+				dupID := searchResult.IDs[j]
+				dup := searchResult.Field[dupID]
+				duplicates = append(duplicates, map[string]interface{}{
+					"chunk_id":      dupID,
+					"document_id":   stringField(dup, "doc_id"),
+					"document_name": stringField(dup, "docnm_kwd"),
+					"dataset_id":    stringField(dup, "kb_id"),
+					"similarity":    sim[j],
+				})
+			}
+			resultChunk["duplicates"] = duplicates
+		}
+
 		if searchResult.Highlight != nil {
 			if highlightText, ok := searchResult.Highlight[chunkID]; ok {
 				resultChunk["highlight"] = highlightText
@@ -445,6 +475,42 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		DocAggs: docAggs,
 		Total:   total,
 	}, nil
+}
+
+// collapseDuplicateChunks keeps the first (best ranked) chunk of every distinct
+// text. idx is ordered by rank; it returns the kept indices in that order and,
+// for each kept index, the indices of the chunks it stands for. Text is
+// compared after collapsing whitespace; chunks without text are never merged
+// with each other.
+func collapseDuplicateChunks(searchResult *RetrievalSearchResult, idx []int) ([]int, map[int][]int) {
+	kept := make([]int, 0, len(idx))
+	duplicatesOf := make(map[int][]int)
+	firstByText := make(map[string]int)
+	for _, i := range idx {
+		text := ""
+		if i >= 0 && i < len(searchResult.IDs) {
+			if v := searchResult.Field[searchResult.IDs[i]]["content_with_weight"]; v != nil {
+				text = strings.Join(strings.Fields(fmt.Sprint(v)), " ")
+			}
+		}
+		if text == "" {
+			kept = append(kept, i)
+			continue
+		}
+		if first, ok := firstByText[text]; ok {
+			duplicatesOf[first] = append(duplicatesOf[first], i)
+			continue
+		}
+		firstByText[text] = i
+		kept = append(kept, i)
+	}
+	return kept, duplicatesOf
+}
+
+// stringField returns chunk[key] when it is a string, otherwise "".
+func stringField(chunk map[string]interface{}, key string) string {
+	v, _ := chunk[key].(string)
+	return v
 }
 
 func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *RetrievalRequest, searchResult *RetrievalSearchResult) ([]float64, []float64, []float64, error) {

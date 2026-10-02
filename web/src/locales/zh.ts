@@ -15,6 +15,7 @@ export default {
       yes: '是',
       no: '否',
       total: '总共',
+      alsoFoundIn: '还出现在 {{count}} 个其他文件中：',
       top: '前 {{top}} 条',
       rename: '重命名',
       name: '名称',
