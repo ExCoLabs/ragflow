@@ -465,7 +465,7 @@ const (
 //
 // emptyResult is the state's empty_result term of
 // `no_evidence = abstain or empty_result or not chunks` — the graph compose
-// path forwards the state's value (always True there; see formalizeAnswerNode).
+// path forwards the state's value (set from the evidence pool; see formalizeAnswerNode).
 func ComposeAnswerStream(ctx context.Context, deps AnswerDeps, model runtime.StreamingSessionModel, kb *runtime.Kbinfos, question string, partial, emptyResult bool, onDelta func(delta string, isThink bool) error) (AnswerResult, error) {
 	logger := deps.Logger
 	if logger == nil {
