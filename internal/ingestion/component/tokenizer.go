@@ -367,7 +367,7 @@ func (c *TokenizerComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map
 		zap.String("component", "Tokenizer"),
 		zap.Int("input_chunks", len(chunks)),
 	)
-	titleStem := titleExtRE.ReplaceAllString(name, "")
+	titleStem := TitleStem(name)
 
 	// chunk_order_int is the position of the chunk in the (post-filter) reading
 	// sequence. It is set unconditionally on every surviving chunk so that all
@@ -765,13 +765,9 @@ func tokenizeChunks(chunks []schema.ChunkDoc, titleStem string, language string)
 	tok := tokenizer.New(language)
 	for i := range chunks {
 		ck := &chunks[i]
-		titleTk, err := tok.Tokenize(titleStem)
+		titleTk, titleSmTk, err := TokenizeTitle(tok, titleStem)
 		if err != nil {
-			return fmt.Errorf("tokenizer: title tokenize: %w", err)
-		}
-		titleSmTk, err := tok.FineGrainedTokenize(titleTk)
-		if err != nil {
-			return fmt.Errorf("tokenizer: title fine-grain: %w", err)
+			return err
 		}
 		ck.TitleTks = titleTk
 		ck.TitleSmTks = titleSmTk
@@ -820,42 +816,57 @@ func tokenizeChunks(chunks []schema.ChunkDoc, titleStem string, language string)
 		// the real Text. Python's truthy check (tokenizer.py:155) treats
 		// "   " as present and blanks out content_ltks; Go is more sensible.
 		if s := strings.TrimSpace(ck.Summary); s != "" {
-			st, err := tok.Tokenize(s)
-			if err != nil {
-				return fmt.Errorf("tokenizer: summary tokenize: %w", err)
+			if ck.ContentLtks, ck.ContentSmLtks, err = TokenizeContent(tok, s); err != nil {
+				return fmt.Errorf("tokenizer: summary: %w", err)
 			}
-			if st == "" {
-				st = s
-			}
-			ck.ContentLtks = st
-			smt, err := tok.FineGrainedTokenize(st)
-			if err != nil {
-				return fmt.Errorf("tokenizer: summary fine-grain: %w", err)
-			}
-			if smt == "" {
-				smt = st
-			}
-			ck.ContentSmLtks = smt
 		} else if t := schema.ContextualText(*ck); strings.TrimSpace(t) != "" {
-			tt, err := tok.Tokenize(t)
-			if err != nil {
-				return fmt.Errorf("tokenizer: text tokenize: %w", err)
+			if ck.ContentLtks, ck.ContentSmLtks, err = TokenizeContent(tok, t); err != nil {
+				return fmt.Errorf("tokenizer: text: %w", err)
 			}
-			if tt == "" {
-				tt = t
-			}
-			ck.ContentLtks = tt
-			smt, err := tok.FineGrainedTokenize(tt)
-			if err != nil {
-				return fmt.Errorf("tokenizer: text fine-grain: %w", err)
-			}
-			if smt == "" {
-				smt = tt
-			}
-			ck.ContentSmLtks = smt
 		}
 	}
 	return nil
+}
+
+// TitleStem is the document name the title tokens are built from: the name
+// without its trailing file extension.
+func TitleStem(name string) string {
+	return titleExtRE.ReplaceAllString(name, "")
+}
+
+// TokenizeTitle returns the title_tks / title_sm_tks pair for a title stem
+// (see TitleStem).
+func TokenizeTitle(tok tokenizer.Tokenizer, titleStem string) (string, string, error) {
+	titleTk, err := tok.Tokenize(titleStem)
+	if err != nil {
+		return "", "", fmt.Errorf("tokenizer: title tokenize: %w", err)
+	}
+	titleSmTk, err := tok.FineGrainedTokenize(titleTk)
+	if err != nil {
+		return "", "", fmt.Errorf("tokenizer: title fine-grain: %w", err)
+	}
+	return titleTk, titleSmTk, nil
+}
+
+// TokenizeContent returns the content_ltks / content_sm_ltks pair for a chunk
+// body. Text the analyzer reduces to nothing (symbols only, say) is kept as
+// is, so the chunk still matches itself.
+func TokenizeContent(tok tokenizer.Tokenizer, text string) (string, string, error) {
+	ltks, err := tok.Tokenize(text)
+	if err != nil {
+		return "", "", fmt.Errorf("tokenize: %w", err)
+	}
+	if ltks == "" {
+		ltks = text
+	}
+	smLtks, err := tok.FineGrainedTokenize(ltks)
+	if err != nil {
+		return "", "", fmt.Errorf("fine-grain: %w", err)
+	}
+	if smLtks == "" {
+		smLtks = ltks
+	}
+	return ltks, smLtks, nil
 }
 
 // concatFields concatenates the configured fields of a chunk into
