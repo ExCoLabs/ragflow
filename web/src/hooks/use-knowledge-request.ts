@@ -147,11 +147,12 @@ export const useTestRetrieval = () => {
   const queryParams = useMemo(() => {
     return {
       ...values,
-      kb_id: values?.kb_id || knowledgeBaseId,
+      kb_id: values?.dataset_ids?.length ? values.dataset_ids : knowledgeBaseId,
       page: 1,
       document_ids: filterValue.doc_ids,
       highlight: true,
-      include_knowledge_compilation: false,
+      include_knowledge_compilation:
+        values?.include_knowledge_compilation ?? false,
     };
   }, [filterValue, knowledgeBaseId, values]);
 

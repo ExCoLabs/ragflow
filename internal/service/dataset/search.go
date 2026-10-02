@@ -48,6 +48,10 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	if req.UseKG != nil {
 		useKG = *req.UseKG
 	}
+	tocEnhance := false
+	if req.TOCEnhance != nil {
+		tocEnhance = *req.TOCEnhance
+	}
 	similarityThreshold := 0.2
 	if req.SimilarityThreshold != nil {
 		similarityThreshold = *req.SimilarityThreshold
@@ -133,8 +137,15 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 		return nil, err
 	}
 
+	// chatID names the chat model for the LLM-assisted steps (metadata filter,
+	// cross-language, keyword extraction, TOC enhance) so a test run can
+	// reproduce a chat's retrieval; a saved search config overrides it below.
+	chatID := ""
+	if req.ChatID != nil {
+		chatID = *req.ChatID
+	}
+
 	// Override request fields with values from saved search config
-	var chatID string
 	if searchID != "" {
 		if d.searchService == nil {
 			common.Warn("Search service is not initialized for search_id", zap.String("searchID", searchID))
@@ -183,6 +194,9 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 			if scUseKG, ok := searchConfig["use_kg"].(bool); ok {
 				useKG = scUseKG
 			}
+			if scTOCEnhance, ok := searchConfig["toc_enhance"].(bool); ok {
+				tocEnhance = scTOCEnhance
+			}
 			if scLangs, ok := searchConfig["cross_languages"].([]interface{}); ok {
 				crossLanguages = make([]string, len(scLangs))
 				for i, l := range scLangs {
@@ -197,7 +211,9 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 			if scRerankID, ok := searchConfig["rerank_id"].(string); ok {
 				rerankID = scRerankID
 			}
-			chatID, _ = searchConfig["chat_id"].(string)
+			if scChatID, ok := searchConfig["chat_id"].(string); ok && scChatID != "" {
+				chatID = scChatID
+			}
 		} else {
 			common.Warn("Invalid search_id: search_config missing or invalid", zap.String("searchID", searchID))
 			return nil, fmt.Errorf("invalid search_id")
@@ -205,32 +221,25 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	}
 	knnNumCandidates = max(knnNumCandidates, knnTopK)
 
+	// The chat model is resolved once, on first use, and shared by the
+	// LLM-assisted steps below.
+	var cachedChatModel *modelModule.ChatModel
+	chatModelResolved := false
+	getChatModel := func() *modelModule.ChatModel {
+		if !chatModelResolved {
+			chatModelResolved = true
+			cachedChatModel = resolveRetrievalChatModel(ctx, modelSolver, userID, tenantIDs[0], chatID)
+		}
+		return cachedChatModel
+	}
+
 	// If meta_data_filter method is auto/semi_auto, get chat model
 	var chatModelForFilter *modelModule.ChatModel
 	if metadataFilter != nil {
+		// The model the request names (chat_id, or the saved search's), so a
+		// retrieval test filters with the same model as the chat it reproduces.
 		if service.MetaFilterNeedsLLM(metadataFilter) {
-			if chatID != "" {
-				target, err := modelSolver.ResolveModelConfig(ctx, tenantIDs[0], entity.ModelTypeChat, chatID)
-				if err != nil {
-					common.Warn("Failed to get chat model config from search_config chat_id, using tenant default", zap.String("chatID", chatID), zap.Error(err))
-				} else {
-					chatModelForFilter = modelModule.NewChatModel(target.Driver, &target.ModelName, target.APIConfig)
-					// The context window, not the max_output the target carries
-					// alongside it: the metadata filter's prompt budget is
-					// measured against the model's total context.
-					chatModelForFilter.ContextLength = target.ContextLength
-				}
-			}
-
-			if chatModelForFilter == nil {
-				target, err := modelSolver.ResolveDefaultModelConfig(ctx, tenantIDs[0], entity.ModelTypeChat)
-				if err != nil {
-					common.Warn("Failed to get tenant default chat model for meta_data_filter", zap.Error(err))
-				} else {
-					chatModelForFilter = modelModule.NewChatModel(target.Driver, &target.ModelName, target.APIConfig)
-					chatModelForFilter.ContextLength = target.ContextLength
-				}
-			}
+			chatModelForFilter = getChatModel()
 		}
 	}
 
@@ -278,19 +287,15 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	// Apply cross_languages and keyword extraction
 	modifiedQuestion := question
 	if len(crossLanguages) > 0 {
-		translated, err := service.CrossLanguages(ctx, tenantIDs[0], "", question, crossLanguages)
+		translated, err := service.CrossLanguages(ctx, chatModelTenantID(userID, tenantIDs[0], chatID), chatID, question, crossLanguages)
 		if err != nil {
-			common.Warn("Failed to translate question", zap.String("llmID", ""), zap.Error(err))
+			common.Warn("Failed to translate question", zap.String("llmID", chatID), zap.Error(err))
 		} else {
 			modifiedQuestion = translated
 		}
 	}
 	if keyword {
-		target, err := modelSolver.ResolveDefaultModelConfig(ctx, tenantIDs[0], entity.ModelTypeChat)
-		if err != nil {
-			common.Warn("Failed to get default chat model for LLM transformations", zap.Error(err))
-		} else {
-			chatModel := modelModule.NewChatModel(target.Driver, &target.ModelName, target.APIConfig)
+		if chatModel := getChatModel(); chatModel != nil {
 			extractedKeywords, err := service.KeywordExtraction(ctx, chatModel, modifiedQuestion, 3)
 			if err != nil {
 				common.Warn("Failed to extract keywords from question", zap.Error(err))
@@ -353,6 +358,18 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 
 	filteredChunks := retrievalResult.Chunks
 
+	if tocEnhance {
+		if chatModel := getChatModel(); chatModel != nil {
+			kbinfos := map[string]interface{}{"chunks": filteredChunks}
+			enhancer := service.NewTOCEnhancer(d.docEngine, chatModel, tenantIDs, datasetIDs, modifiedQuestion, pageSize)
+			if _, err := enhancer.Enhance(ctx, kbinfos); err != nil {
+				common.Warn("TOC enhance failed", zap.Error(err))
+			} else if enhanced, ok := kbinfos["chunks"].([]map[string]interface{}); ok {
+				filteredChunks = enhanced
+			}
+		}
+	}
+
 	if useKG {
 		common.Warn("use_kg is not yet implemented in Go - skipping KG retrieval")
 	}
@@ -389,4 +406,42 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 		Total:      retrievalResult.Total,
 		MetaFilter: metaFilterDiagnostic,
 	}, nil
+}
+
+// chatModelTenantID returns the tenant a chat model id is resolved under. A
+// chat_id names one of the requesting user's models; without it the dataset
+// tenant's default chat model is used.
+func chatModelTenantID(userID, datasetTenantID, chatID string) string {
+	if chatID != "" {
+		return userID
+	}
+	return datasetTenantID
+}
+
+// resolveRetrievalChatModel returns the chat model named by chatID, falling
+// back to the dataset tenant's default chat model. It returns nil when neither
+// resolves.
+func resolveRetrievalChatModel(ctx context.Context, modelSolver *service.ModelSolver, userID, datasetTenantID, chatID string) *modelModule.ChatModel {
+	if chatID != "" {
+		target, err := modelSolver.ResolveModelConfig(ctx, chatModelTenantID(userID, datasetTenantID, chatID), entity.ModelTypeChat, chatID)
+		if err == nil {
+			return newRetrievalChatModel(target)
+		}
+		common.Warn("Failed to get chat model config from chat_id, using tenant default", zap.String("chatID", chatID), zap.Error(err))
+	}
+	target, err := modelSolver.ResolveDefaultModelConfig(ctx, datasetTenantID, entity.ModelTypeChat)
+	if err != nil {
+		common.Warn("Failed to get tenant default chat model for retrieval", zap.Error(err))
+		return nil
+	}
+	return newRetrievalChatModel(target)
+}
+
+// newRetrievalChatModel builds the chat model with its context window, not
+// the max_output the target carries alongside it: the metadata filter's
+// prompt budget is measured against the model's total context.
+func newRetrievalChatModel(target *service.ModelTarget) *modelModule.ChatModel {
+	chatModel := modelModule.NewChatModel(target.Driver, &target.ModelName, target.APIConfig)
+	chatModel.ContextLength = target.ContextLength
+	return chatModel
 }
