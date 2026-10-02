@@ -96,6 +96,7 @@ interface MetaDataFilter {
   method: string;
   semi_auto?: Array<string | { key: string; op?: string }>;
   boost?: MetaDataBoost;
+  instructions?: string;
 }
 
 export interface MetaDataBoost {

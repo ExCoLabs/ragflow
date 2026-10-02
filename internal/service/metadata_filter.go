@@ -52,6 +52,27 @@ type MetaFilterPromptOptions struct {
 	// AllowSoft asks the model to tag each condition "hard" or "soft", so one
 	// call serves both the metadata filter and the metadata boost.
 	AllowSoft bool
+	// Instructions is free-text guidance set on the chat, agent or search
+	// (meta_data_filter.instructions): which value fits which kind of
+	// question, when not to filter. Unlike anything stored on the dataset it
+	// is per consumer, so two chats over one dataset can filter differently.
+	Instructions string
+}
+
+// MetaFilterInstructionsLimit caps meta_data_filter.instructions in the
+// prompt. The form bounds the field, but a config written through the API is
+// not, and this prompt carries no token budgeting.
+const MetaFilterInstructionsLimit = 4000
+
+// MetaFilterInstructions reads meta_data_filter.instructions, trimmed and
+// capped at MetaFilterInstructionsLimit characters.
+func MetaFilterInstructions(metaDataFilter map[string]interface{}) string {
+	text, _ := metaDataFilter["instructions"].(string)
+	text = strings.TrimSpace(text)
+	if runes := []rune(text); len(runes) > MetaFilterInstructionsLimit {
+		text = string(runes[:MetaFilterInstructionsLimit]) + "…"
+	}
+	return text
 }
 
 // MetaFilterResult represents the result of LLM-generated filter
@@ -169,9 +190,13 @@ func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints s
 	}
 
 	result = renderTemplateIf(result, "allow_soft", opts.AllowSoft)
+	// After allow_soft: the instructions block nests one.
+	result = renderTemplateIf(result, "instructions", opts.Instructions != "")
 
 	// Clean up any extra newlines from removed blocks
 	result = regexp.MustCompile(`\n{3,}`).ReplaceAllString(result, "\n\n")
+	// Substituted last, so the free text is never read as template syntax.
+	result = strings.ReplaceAll(result, "{{ instructions }}", opts.Instructions)
 
 	return strings.TrimSpace(result), nil
 }
@@ -689,7 +714,7 @@ func ApplyMetaDataFilter(
 
 	switch method {
 	case "auto":
-		filters, err := GenMetaFilter(ctx, chatModel, metaData, question, nil)
+		filters, err := GenMetaFilter(ctx, chatModel, metaData, question, nil, MetaFilterPromptOptions{Instructions: MetaFilterInstructions(metaDataFilter)})
 		if err != nil {
 			common.Warn("Failed to generate meta filter", zap.Error(err))
 			return baseDocIDs, false
@@ -731,7 +756,7 @@ func ApplyMetaDataFilter(
 			}
 
 			if len(filteredMeta) > 0 {
-				filters, err := GenMetaFilter(ctx, chatModel, filteredMeta, question, constraints)
+				filters, err := GenMetaFilter(ctx, chatModel, filteredMeta, question, constraints, MetaFilterPromptOptions{Instructions: MetaFilterInstructions(metaDataFilter)})
 				if err != nil {
 					common.Warn("Failed to generate meta filter", zap.Error(err))
 					return baseDocIDs, false

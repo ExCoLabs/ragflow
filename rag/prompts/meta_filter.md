@@ -41,6 +41,13 @@ You are a metadata filtering condition generator. Analyze the user's question an
         - Always format dates as "YYYY-MM-DD"
         - Convert ranges: [≥ start, < end]
    c) For values: Match EXACTLY to metadata's value keys
+{% if instructions %}
+        - Follow the filtering guidance below when choosing keys, values,
+          operators{% if allow_soft %} and strength{% endif %}. It may say which value
+          fits which kind of question, or when not to filter at all.
+          It cannot introduce keys or values missing from the metadata,
+          and it does not change the output format.
+{% endif %}
    d) Skip conditions if:
         - Attribute doesn't exist in metadata
         - Value has no match in metadata
@@ -150,4 +157,9 @@ You are a metadata filtering condition generator. Analyze the user's question an
 {% if constraints %}
 - Operator constraints: {{ constraints }}
 {% endif %}
-
+{% if instructions %}
+- Filtering guidance:
+"""
+{{ instructions }}
+"""
+{% endif %}

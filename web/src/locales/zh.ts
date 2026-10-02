@@ -1192,6 +1192,11 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
         '元数据过滤是使用元数据属性（例如标签、类别或访问权限）来优化和控制系统内相关信息检索的过程。',
       conditions: '条件',
       metadataKeys: '可选过滤项',
+      metadataInstructions: '过滤说明',
+      metadataInstructionsTip:
+        '仅对当前聊天或智能体生效，指导模型生成自动/半自动的过滤与加权条件：某个取值何时适用、适合哪类问题、何时不应过滤。',
+      metadataInstructionsPlaceholder:
+        '例如：只有问题提到地点时才按 region 过滤；“人事”对应 human_resources 部门。',
       metadataBoost: '元数据加权',
       metadataBoostTip:
         '基于元数据的偏好：匹配的分块得分更高，但不排除其他分块，例如“优先最新的报告”或“优先问题中提到的部门”。需要所选数据集均已启用并回填分块元数据，否则忽略。手动：固定偏好；半自动：模型为所列键填入取值；自动：模型将推导出的每个条件标记为要求或偏好。除“禁用”外，固定偏好在所有模式下都生效。',

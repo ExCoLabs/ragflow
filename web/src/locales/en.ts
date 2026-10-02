@@ -1313,6 +1313,11 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
         'Metadata filtering is the process of using metadata attributes (such as tags, categories, or access permissions) to refine and control the retrieval of relevant information within a system.',
       conditions: 'Conditions',
       metadataKeys: 'Filterable items',
+      metadataInstructions: 'Filtering instructions',
+      metadataInstructionsTip:
+        'Guidance for the model that generates the automatic and semi-automatic filter and boost conditions, for this chat or agent only: when a value applies, which kind of question it fits, when not to filter.',
+      metadataInstructionsPlaceholder:
+        'e.g. Filter on region only when the question names a place; "HR" means the department human_resources.',
       metadataBoost: 'Metadata boost',
       metadataBoostTip:
         'Preferences on metadata that rank matching chunks higher without excluding the others, for example "prefer the newest report" or "prefer the department named in the question". Requires chunk metadata to be enabled and backfilled on every selected dataset; otherwise it is ignored. Manual: fixed preferences only. Semi-automatic: the model fills in values for the listed keys. Automatic: the model marks each condition it derives as a requirement or a preference. Fixed preferences apply in every mode except Disabled.',

@@ -2446,6 +2446,8 @@ Failure:
 - `manual` preferences apply in every boost mode except `off`. A key listed in both the filter's and the boost's `semi_auto` belongs to the filter.
 - The filter and the boost share one LLM call. `max_total` caps the sum of boosts per chunk; the fused similarity is in `[0, 1]`, so weights of 0.05–0.2 are the useful range.
 
+`meta_data_filter.instructions` (string, at most 4000 characters) is optional free-text guidance for the LLM that generates automatic and semi-automatic filter and boost conditions, for example which value fits which kind of question or when not to filter. It is set per chat, agent or search, so two chats over the same dataset can filter differently. It cannot add keys or values the metadata does not have and does not change the output format.
+
 The same `meta_data_filter` object (with `boost`) works wherever metadata filters are accepted: chat assistants (including reasoning mode), search apps, the agent Retrieval component, `POST /api/v1/retrieval` and `POST /api/v1/datasets/{dataset_id}/search`. Boosts require chunk metadata to be active on every dataset of the request; otherwise they are ignored and the filter works exactly as before. With chunk metadata active, filter conditions on the listed keys are applied on the chunk fields, except `≠` and `not in`, which keep the document-ID path.
 
 ---

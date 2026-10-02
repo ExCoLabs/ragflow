@@ -103,8 +103,9 @@ func ChunkMetadataConfigForKBIDs(ctx context.Context, kbIDs []string) *common.Ch
 //     also lists belongs to the filter), auto (the LLM tags each condition
 //     hard or soft, soft ones become boosts of auto_weight).
 //
-// Filter and boost share one LLM call. With chunkMeta nil or inactive this is
-// exactly ApplyMetaDataFilter and the boost is ignored.
+// Filter and boost share one LLM call; meta_data_filter.instructions is passed
+// to it as guidance. With chunkMeta nil or inactive this is exactly
+// ApplyMetaDataFilter and the boost is ignored.
 func ApplyMetaDataScope(
 	ctx context.Context,
 	metaDataFilter map[string]interface{},
@@ -240,7 +241,10 @@ func ApplyMetaDataScope(
 	if (filterMethod == "semi_auto" || boostCfg.Method == "semi_auto") && len(constraints) > 0 {
 		promptConstraints = constraints
 	}
-	generated, err := GenMetaFilter(ctx, chatModel, offered, question, promptConstraints, MetaFilterPromptOptions{AllowSoft: boostCfg.Method == "auto"})
+	generated, err := GenMetaFilter(ctx, chatModel, offered, question, promptConstraints, MetaFilterPromptOptions{
+		AllowSoft:    boostCfg.Method == "auto",
+		Instructions: MetaFilterInstructions(metaDataFilter),
+	})
 	if err != nil {
 		common.Warn("Failed to generate meta filter", zap.Error(err))
 		return scope

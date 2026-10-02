@@ -222,6 +222,7 @@ export interface ISearchAppDetailProps {
       method: string;
       manual: { key: string; op: string; value: string }[];
       boost?: Record<string, any>;
+      instructions?: string;
     };
     reference_metadata?: {
       include?: boolean;
