@@ -91,6 +91,11 @@ type Kbinfos struct {
 	mu      sync.Mutex
 	Chunks  []map[string]any
 	DocAggs []map[string]any
+	// admittedAggs marks the DocAggs entries PoolAdmitter.Add synthesized for a
+	// pooled chunk whose document no search aggregation had listed yet. A search's
+	// own aggregation for that document replaces the stand-in (see MergeDocAggs).
+	// Guarded by mu.
+	admittedAggs map[string]bool
 	// ledgerMu guards the run's SEARCH RECORD (ProbedAbsent / Reached).
 	//
 	// It is deliberately NOT mu. The pool lock is held across admit batches, and
@@ -734,6 +739,11 @@ func (n *Novelty) Admits(c map[string]any) bool {
 // which is what pushes the pool past evidencePoolCap (see the comment on evidencePoolCap).
 // Callers that admit user-facing search
 // hits check Full() first.
+//
+// The chunk's document is listed in DocAggs as well: the chat layer publishes the pool's
+// doc_aggs as the answer's reference, and the client resolves a citation's document
+// through them, so a chunk pooled without its document (a claim row, a fan-out or
+// expansion passage) is a citation that opens nothing.
 func (p *PoolAdmitter) Add(c map[string]any) bool {
 	if p.k == nil {
 		return false
@@ -742,7 +752,39 @@ func (p *PoolAdmitter) Add(c map[string]any) bool {
 		return false
 	}
 	p.k.Chunks = append(p.k.Chunks, c)
+	p.k.admitDocAggLocked(c)
 	return true
+}
+
+// admitDocAggLocked lists c's document in DocAggs when no entry names it yet. An
+// existing entry is left as the search aggregated it, except that a missing doc_name
+// is filled in: a claim row carries a doc_id but no title, and a later passage of the
+// same document supplies the name the client puts on the link. Caller holds k.mu.
+func (k *Kbinfos) admitDocAggLocked(c map[string]any) {
+	docID := DocIDOf(c)
+	if docID == "" {
+		return
+	}
+	name := DocTitleOf(c)
+	for _, agg := range k.DocAggs {
+		if docAggKey(agg) != docID {
+			continue
+		}
+		if existing, _ := agg["doc_name"].(string); existing == "" && name != "" {
+			agg["doc_name"] = name
+		}
+		if k.admittedAggs[docID] {
+			if n, ok := agg["count"].(int); ok {
+				agg["count"] = n + 1
+			}
+		}
+		return
+	}
+	k.DocAggs = append(k.DocAggs, map[string]any{"doc_id": docID, "doc_name": name, "count": 1})
+	if k.admittedAggs == nil {
+		k.admittedAggs = map[string]bool{}
+	}
+	k.admittedAggs[docID] = true
 }
 
 // Index is the pool position of c's identity, or -1 when the pool lacks it (and
@@ -855,7 +897,9 @@ func (k *Kbinfos) RetireClaimsCoveredBy(readIDs []string) int {
 }
 
 // MergeDocAggs appends doc aggregations, deduplicating by doc_id: the first agg
-// per doc_id wins.
+// per doc_id wins. The exception is an entry PoolAdmitter.Add synthesized for a pooled
+// chunk: a search's aggregation for that document carries the retrieval's own counts,
+// so it replaces the stand-in in place (keeping its position).
 //
 // Separate from Merge, whose early return on an empty chunk list would skip them:
 // the search tool must record a search's aggregations even when every chunk it
@@ -872,6 +916,16 @@ func (k *Kbinfos) MergeDocAggs(aggs []map[string]any) {
 	}
 	for _, d := range aggs {
 		key := docAggKey(d)
+		if k.admittedAggs[key] {
+			delete(k.admittedAggs, key)
+			for i, existing := range k.DocAggs {
+				if docAggKey(existing) == key {
+					k.DocAggs[i] = d
+					break
+				}
+			}
+			continue
+		}
 		if dseen[key] {
 			continue
 		}

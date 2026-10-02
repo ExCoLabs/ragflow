@@ -3423,6 +3423,13 @@ func (s *ChatPipelineService) decorateHarnessAnswer(answer string, kbinfos map[s
 	// indexes.
 	ans = RepairSlotCitations(ans, slotCitations, citeChunks)
 
+	// Chunk-id markers ("【ID:a1b2c3d4e5f60718】") are the model citing an id it
+	// read in its context rather than a block number. Rewrite each into the
+	// number of the block that rendered that chunk, or drop it when no rendered
+	// block did; left alone it reaches the user as literal marker text.
+	think = RepairChunkIDCitations(think, citeChunks)
+	ans = RepairChunkIDCitations(ans, citeChunks)
+
 	// Range-merged citations ("[ID:1-3]") are the model compressing
 	// consecutive individual citations on its own; expand them back so every
 	// marker resolves to exactly one chunk (out-of-range ranges are dropped).

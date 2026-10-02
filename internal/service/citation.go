@@ -427,6 +427,59 @@ func RepairSlotCitations(answer string, slotCitations map[string][]string, chunk
 	return b.String()
 }
 
+// chunkIDCitationPattern matches a citation that names a chunk by its id instead of
+// by its evidence-block number: "[ID:a1b2c3d4e5f60718]", "【ID:a1b2…】",
+// "(ID:claim_…)". Models copy such ids out of whatever context shows them (a tool
+// result, a pointer quoted in a slot clue) and cite them in the bracket style they
+// prefer — OpenAI-family models write the full-width 【】. Only the block number is
+// resolvable by the client, so these never render as a citation. The token must
+// contain a letter or an underscore — a digits-only token is the block number
+// (RepairBadCitationFormats) and "1-3" a range (ExpandRangeCitations) — and the
+// colon is required, so "(identity)" in prose is not mistaken for a marker.
+var chunkIDCitationPattern = regexp.MustCompile(
+	`\[\s*ID\s*[:：]\s*([0-9A-Za-z_-]*[A-Za-z_][0-9A-Za-z_-]*)\s*\]` +
+		`|【\s*ID\s*[:：]\s*([0-9A-Za-z_-]*[A-Za-z_][0-9A-Za-z_-]*)\s*】` +
+		`|\(\s*ID\s*[:：]\s*([0-9A-Za-z_-]*[A-Za-z_][0-9A-Za-z_-]*)\s*\)`)
+
+// RepairChunkIDCitations rewrites citations that name a chunk id into the canonical
+// "[ID:N]" form, N being that chunk's 0-based position in chunks — the ordered
+// evidence list the compose rendered, whose numbering the client indexes. A marker
+// whose id names no chunk in that list is dropped: left in place it reaches the user
+// as literal "【ID:a1b2c3d4e5f60718】" text, since the client renders only markers it
+// can resolve.
+func RepairChunkIDCitations(answer string, chunks []map[string]interface{}) string {
+	if answer == "" || !chunkIDCitationPattern.MatchString(answer) {
+		return answer
+	}
+	posByID := make(map[string]int, len(chunks))
+	for i, c := range chunks {
+		if id := chunkCitationID(c); id != "" {
+			if _, dup := posByID[id]; !dup {
+				posByID[id] = i
+			}
+		}
+	}
+	var b strings.Builder
+	b.Grow(len(answer))
+	last := 0
+	for _, m := range chunkIDCitationPattern.FindAllStringSubmatchIndex(answer, -1) {
+		id := ""
+		for g := 1; g <= 3; g++ {
+			if m[2*g] >= 0 {
+				id = answer[m[2*g]:m[2*g+1]]
+				break
+			}
+		}
+		b.WriteString(answer[last:m[0]])
+		if pos, ok := posByID[id]; ok {
+			b.WriteString("[ID:" + strconv.Itoa(pos) + "]")
+		}
+		last = m[1]
+	}
+	b.WriteString(answer[last:])
+	return b.String()
+}
+
 // chunkCitationID returns a pool chunk's id under the keys the harness uses
 // (chunk_id, then id — harness.ChunkIDOf's order).
 func chunkCitationID(c map[string]interface{}) string {
@@ -485,6 +538,7 @@ func stripCitations(text string) string {
 	text = cleanCitationMarkers(text)
 	text = canonicalIDMarkerPattern.ReplaceAllString(text, "")
 	text = slotCitationPattern.ReplaceAllString(text, "")
+	text = chunkIDCitationPattern.ReplaceAllString(text, "")
 	text = rangeCitationPattern.ReplaceAllString(text, "")
 	for _, pattern := range badCitationPatterns {
 		text = pattern.ReplaceAllString(text, "")

@@ -42,10 +42,10 @@ import { useFetchDocumentThumbnailsByIds } from '@/hooks/use-document-request';
 import { useLoadingPause } from '@/hooks/use-loading-pause';
 import {
   escapeUnmatchedAngleBrackets,
+  normalizeCitationMarkers,
   parseCitationIndex,
   preprocessLaTeX,
   replaceRetrievingToSection,
-  replaceTextByOldReg,
   replaceThinkToSection,
   unescapeAngleBrackets,
 } from '@/utils/chat';
@@ -161,7 +161,7 @@ const MarkdownContent = ({
     if (text === '' && loading) {
       text = t('chat.searching');
     }
-    const nextText = replaceTextByOldReg(text);
+    const nextText = normalizeCitationMarkers(text);
     const thinkSummary = loading
       ? `${t('chat.thinking')}...`
       : t('chat.thought');
@@ -331,13 +331,18 @@ const MarkdownContent = ({
         ReferenceMarkerReg,
         (match, i) => {
           const chunkIndex = getChunkIndex(match);
-          if (typeof chunkIndex !== 'number') {
-            return match;
+
+          // A chat reference is a positional list, so only a numeric marker names a
+          // chunk in it. Models do write other things — a chunk id copied out of
+          // their context, an index past the end of the evidence — and a chip built
+          // from one opens nothing; drop it instead of showing a dead citation.
+          if (typeof chunkIndex !== 'number' || !Number.isInteger(chunkIndex)) {
+            return null;
           }
           const hasReference = !!reference?.chunks?.[chunkIndex];
           // Explicit markers can render while their sources are still arriving.
           if (!hasReference && !(loading && match.startsWith('[ID:'))) {
-            return match;
+            return null;
           }
 
           return (

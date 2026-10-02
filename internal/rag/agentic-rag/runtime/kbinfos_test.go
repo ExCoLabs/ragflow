@@ -382,3 +382,53 @@ func TestLedgerAccessorsAreIndependentOfThePoolLock(t *testing.T) {
 	}
 	close(released)
 }
+
+// TestPoolAddListsTheChunkDocument pins the doc_aggs bookkeeping of PoolAdmitter.Add: the chat
+// layer publishes the pool's doc_aggs as the answer's reference and the client resolves a
+// citation's document through them, so a chunk pooled without its document — a claim row, a
+// fan-out or expansion passage — is a citation that opens nothing.
+func TestPoolAddListsTheChunkDocument(t *testing.T) {
+	kb := &Kbinfos{}
+	kb.Admit(func(p *PoolAdmitter) {
+		// A claim row: doc_id but no title.
+		p.Add(map[string]any{"chunk_id": "claim_1", "content_with_weight": "claim", "doc_id": "d1"})
+		p.Add(map[string]any{"chunk_id": "c1", "content_with_weight": "one", "doc_id": "d1", "docnm_kwd": "Report.pdf"})
+		p.Add(map[string]any{"chunk_id": "c2", "content_with_weight": "two", "doc_id": "d2", "docnm_kwd": "Notes.md"})
+		// Already pooled: neither the pool nor the counts move.
+		p.Add(map[string]any{"chunk_id": "c2", "content_with_weight": "two", "doc_id": "d2", "docnm_kwd": "Notes.md"})
+		// No document to list.
+		p.Add(map[string]any{"chunk_id": "w1", "content_with_weight": "web"})
+	})
+	want := []map[string]any{
+		{"doc_id": "d1", "doc_name": "Report.pdf", "count": 2},
+		{"doc_id": "d2", "doc_name": "Notes.md", "count": 1},
+	}
+	if fmt.Sprint(kb.DocAggs) != fmt.Sprint(want) {
+		t.Fatalf("doc_aggs = %v, want %v", kb.DocAggs, want)
+	}
+}
+
+// TestSearchAggregationReplacesAdmittedStandIn pins the order the search paths run in: the
+// batch is admitted first and the search's own aggregation merged after it. The entry Add
+// synthesized must give way to that aggregation, or "first agg wins" would keep the stand-in
+// and drop the retrieval's counts; an aggregation that was already there still wins.
+func TestSearchAggregationReplacesAdmittedStandIn(t *testing.T) {
+	kb := &Kbinfos{DocAggs: []map[string]any{{"doc_id": "d0", "doc_name": "Kept", "count": 9}}}
+	kb.Admit(func(p *PoolAdmitter) {
+		p.Add(map[string]any{"chunk_id": "c0", "content_with_weight": "zero", "doc_id": "d0"})
+		p.Add(map[string]any{"chunk_id": "c1", "content_with_weight": "one", "doc_id": "d1", "docnm_kwd": "Report.pdf"})
+	})
+	kb.MergeDocAggs([]map[string]any{
+		{"doc_id": "d0", "doc_name": "Other", "count": 1},
+		{"doc_id": "d1", "doc_name": "Report.pdf", "count": 5, "char_count": 900},
+	})
+	kb.MergeDocAggs([]map[string]any{{"doc_id": "d1", "doc_name": "Later", "count": 1}})
+
+	want := []map[string]any{
+		{"doc_id": "d0", "doc_name": "Kept", "count": 9},
+		{"doc_id": "d1", "doc_name": "Report.pdf", "count": 5, "char_count": 900},
+	}
+	if fmt.Sprint(kb.DocAggs) != fmt.Sprint(want) {
+		t.Fatalf("doc_aggs = %v, want %v", kb.DocAggs, want)
+	}
+}

@@ -1195,8 +1195,27 @@ func TestChatCompletionsStreamFinalCarriesDecoratedReference(t *testing.T) {
 		t.Fatalf("final reference total = %v", got)
 	}
 	stored := parseMessages(store.sessions["session-1"].Message)
-	if got := stored[len(stored)-1]["content"]; got != "<think>checking sources</think>Marigold is a depth-estimation model." {
-		t.Fatalf("stored assistant content = %q, want tagged reasoning and visible answer", got)
+	// The stored answer is the FINAL one: its citation is what the reader sees when the
+	// conversation is reopened, and the streamed text never carried it.
+	if got := stored[len(stored)-1]["content"]; got != "<think>checking sources</think>Marigold is a depth-estimation model. [ID:0]" {
+		t.Fatalf("stored assistant content = %q, want tagged reasoning and the decorated answer", got)
+	}
+}
+
+func TestFinalAssistantContent(t *testing.T) {
+	cases := []struct {
+		name, streamed, final, want string
+	}{
+		{"reasoning kept, answer replaced", "<think>checking</think>A fact【ID:1】.", "A fact[ID:0].", "<think>checking</think>A fact[ID:0]."},
+		{"no reasoning", "A fact【ID:1】.", "A fact[ID:0].", "A fact[ID:0]."},
+		{"empty final keeps the stream", "<think>checking</think>A fact.", "", "<think>checking</think>A fact."},
+		{"final with its own think block wins", "<think>progress</think>A fact.", "<think>steps</think>A fact[ID:0].", "<think>steps</think>A fact[ID:0]."},
+		{"nothing streamed", "", "A fact[ID:0].", "A fact[ID:0]."},
+	}
+	for _, c := range cases {
+		if got := finalAssistantContent(c.streamed, c.final); got != c.want {
+			t.Errorf("%s: finalAssistantContent = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

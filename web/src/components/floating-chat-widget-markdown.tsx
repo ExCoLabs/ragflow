@@ -25,10 +25,10 @@ import {
 import { IReference, IReferenceChunk } from '@/interfaces/database/chat';
 import {
   currentReg,
+  normalizeCitationMarkers,
   parseCitationIndex,
   preprocessLaTeX,
   replaceRetrievingToSection,
-  replaceTextByOldReg,
   replaceThinkToSection,
   showImage,
 } from '@/utils/chat';
@@ -84,7 +84,7 @@ const FloatingChatWidgetMarkdown = ({
 
   const contentWithCursor = useMemo(() => {
     const text = content === '' ? t('chat.searching') : content;
-    const nextText = replaceTextByOldReg(text);
+    const nextText = normalizeCitationMarkers(text);
     return pipe(
       replaceThinkToSection,
       replaceRetrievingToSection,
