@@ -238,6 +238,7 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	// Apply meta_data_filter to get filtered doc_ids
 	docIDs := make([]string, len(documentIDs))
 	copy(docIDs, documentIDs)
+	var metaFilterDiagnostic *common.MetadataFilterDiagnostic
 	if len(metadataFilter) > 0 {
 		metadataSvc := service.NewMetadataService()
 		flattedMeta, err := metadataSvc.GetFlattedMetaByKBs(ctx, datasetIDs)
@@ -245,10 +246,14 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 			common.Warn("Failed to get flatted metadata, using empty metadata for filter", zap.Error(err))
 			flattedMeta = make(common.MetaData)
 		}
+		diagnostic := &common.MetadataFilterDiagnostic{}
 		// nil means the metadata filter produced no scope at all, so the
 		// request keeps the document scope it came with.
-		if filteredDocIDs := service.ApplyMetaDataFilter(ctx, metadataFilter, flattedMeta, question, chatModelForFilter, documentIDs, datasetIDs); filteredDocIDs != nil {
+		if filteredDocIDs := service.ApplyMetaDataFilterWithDiagnostics(ctx, metadataFilter, flattedMeta, question, chatModelForFilter, documentIDs, datasetIDs, diagnostic); filteredDocIDs != nil {
 			docIDs = filteredDocIDs
+		}
+		if diagnostic.Status != "disabled" {
+			metaFilterDiagnostic = diagnostic
 		}
 	}
 
@@ -359,9 +364,10 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	pyChunks := common.ConvertFloatsToPyFormat(filteredChunks).([]map[string]interface{})
 
 	return &service.SearchDatasetsResponse{
-		Chunks:  pyChunks,
-		DocAggs: retrievalResult.DocAggs,
-		Labels:  &labels,
-		Total:   retrievalResult.Total,
+		Chunks:     pyChunks,
+		DocAggs:    retrievalResult.DocAggs,
+		Labels:     &labels,
+		Total:      retrievalResult.Total,
+		MetaFilter: metaFilterDiagnostic,
 	}, nil
 }
