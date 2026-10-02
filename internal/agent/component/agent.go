@@ -56,8 +56,7 @@ const defaultAgentDeferredTimeout = 10 * time.Minute
 // provider is `parts[1]` for the 2-part shape and `parts[2]` for
 // the 3+ shape. Any middle `@<seg>` segments (the "instance" in
 // Python's split_model_name) are intentionally dropped — the Go
-// drivers and the tenant_llm lookup both key on the bare model
-// name + factory, not on the instance.
+// drivers key on the bare model name, not on the instance.
 //
 // Mirrors Python's split_model_name at
 // api/db/joint_services/tenant_model_service.py:163-178:
@@ -170,6 +169,10 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 	if err != nil {
 		return nil, fmt.Errorf("build tools: %w", err)
 	}
+	toolAliases, err := indexedToolNameAliases(ctx, tools)
+	if err != nil {
+		return nil, fmt.Errorf("build tools: %w", err)
+	}
 	input := buildAgentInputMessages(ctx, p)
 	// Eino's MaxStep counts graph nodes, not model calls. One ReAct round
 	// consists of a model decision, a tool node, and the following model
@@ -186,7 +189,8 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: chatModel,
 		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: tools,
+			Tools:       tools,
+			ToolAliases: toolAliases,
 		},
 		// Python's streaming tool loop consumes the complete provider
 		// response before deciding whether the round contains a tool call.
@@ -295,7 +299,7 @@ func scanAllStreamForToolCall(_ context.Context, stream *schema.StreamReader[*sc
 // images attached as multi-modal content parts).
 func buildAgentInputMessages(ctx context.Context, p AgentParam) []*schema.Message {
 	var state *runtime.CanvasState
-	if s, _, err := runtime.GetStateFromContext[*runtime.CanvasState](ctx); err == nil && s != nil {
+	if s, err := runtime.GetStateFromContext(ctx); err == nil && s != nil {
 		state = s
 	}
 	// Inject sys.files uploads into the current user message, mirroring
@@ -524,7 +528,7 @@ func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, cont
 // chunks key is absent / empty. The returned slice is shaped
 // for prompts.CitationSource — the grounding renderer.
 func chunksFromState(ctx context.Context) []prompts.CitationSource {
-	state, _, err := runtime.GetStateFromContext[*runtime.CanvasState](ctx)
+	state, err := runtime.GetStateFromContext(ctx)
 	if err != nil || state == nil {
 		return nil
 	}
@@ -727,6 +731,53 @@ func buildAgentTools(ctx context.Context, p AgentParam) ([]einotool.BaseTool, er
 	return tools, nil
 }
 
+// indexedToolNameAliases lets the model call an indexed tool by its bare
+// name. MCP tools are exposed as <name>_<index> so that equally named tools
+// from different servers stay distinct, but models often call the bare
+// <name> they read in the prompt. Without an alias the eino ToolsNode fails
+// the whole run with "tool ... not found". A bare name is aliased only when
+// it is not itself a tool and exactly one <name>_<digits> tool matches it;
+// ambiguous names stay unresolved.
+func indexedToolNameAliases(ctx context.Context, tools []einotool.BaseTool) (map[string]compose.ToolAliasConfig, error) {
+	names := make(map[string]struct{}, len(tools))
+	candidates := make(map[string][]string)
+	for _, tool := range tools {
+		info, err := tool.Info(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("agent tool info: %w", err)
+		}
+		names[info.Name] = struct{}{}
+		if base, ok := indexedToolBaseName(info.Name); ok {
+			candidates[base] = append(candidates[base], info.Name)
+		}
+	}
+	var aliases map[string]compose.ToolAliasConfig
+	for base, matches := range candidates {
+		if _, exists := names[base]; exists || len(matches) != 1 {
+			continue
+		}
+		if aliases == nil {
+			aliases = make(map[string]compose.ToolAliasConfig)
+		}
+		aliases[matches[0]] = compose.ToolAliasConfig{NameAliases: []string{base}}
+	}
+	return aliases, nil
+}
+
+// indexedToolBaseName splits "<base>_<digits>" and returns base.
+func indexedToolBaseName(name string) (string, bool) {
+	i := strings.LastIndexByte(name, '_')
+	if i <= 0 || i == len(name)-1 {
+		return "", false
+	}
+	for _, r := range name[i+1:] {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	return name[:i], true
+}
+
 type subAgentTool struct {
 	name string
 	spec SubAgentTool
@@ -914,7 +965,7 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	}
 
 	var state *runtime.CanvasState
-	if s, _, err := runtime.GetStateFromContext[*runtime.CanvasState](ctx); err == nil && s != nil {
+	if s, err := runtime.GetStateFromContext(ctx); err == nil && s != nil {
 		state = s
 		if inputs["_ERROR"] == "No dataset is selected." {
 			return map[string]any{"content": "No dataset is selected."}, nil
@@ -962,7 +1013,7 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	// a dedicated LLM call. The rephrased prompt is what the Agent runner
 	// actually consumes.
 	if p.OptimizeMultiTurn {
-		if state, _, sErr := runtime.GetStateFromContext[*runtime.CanvasState](ctx); sErr == nil && state != nil {
+		if state, sErr := runtime.GetStateFromContext(ctx); sErr == nil && state != nil {
 			if rephrased, err := optimizeMultiTurnQuestion(ctx, db, p, state.SnapshotPriorHistory()); err == nil && rephrased != "" {
 				p.UserPrompt = rephrased
 			}
@@ -976,7 +1027,7 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	// the canvas state's Memory. Conversation History is reserved for
 	// actual user/assistant turns maintained by the canvas service.
 	if err == nil && msg != nil {
-		if state, _, sErr := runtime.GetStateFromContext[*runtime.CanvasState](ctx); sErr == nil && state != nil {
+		if state, sErr := runtime.GetStateFromContext(ctx); sErr == nil && state != nil {
 			if summary, sErr2 := addToolCallMemory(ctx, db, p, msg); sErr2 == nil && summary != "" {
 				state.AppendMemory(p.UserPrompt, msg.Content, summary)
 			}
@@ -991,7 +1042,7 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || !isAgentGraphRunError(err) {
 			return nil, fmt.Errorf("component: Agent.Invoke: %w", err)
 		}
-		return map[string]any{"_ERROR": "**ERROR**: " + err.Error()}, nil
+		return map[string]any{"_ERROR": "**ERROR**: " + runtime.MarkdownSafeErrorText(err)}, nil
 	}
 	// Post-stream citation grounding. When Cite is enabled and
 	// the canvas state has recorded retrieval chunks (populated
@@ -1130,9 +1181,7 @@ func buildAgentChatModel(ctx context.Context, p AgentParam) (*models.EinoChatMod
 	// llm_id format. The RAGFlow DSL stores the model identifier as
 	// "<model>@<instance>@<provider>" (mirrors Python's
 	// split_model_name at
-	// api/db/joint_services/tenant_model_service.py:163-178 and the
-	// Go-side SplitModelNameAndFactory at
-	// internal/service/tenant.go:168). Two-part
+	// api/db/joint_services/tenant_model_service.py:163-178. Two-part
 	// "<model>@<provider>" and bare "<model>" are also accepted —
 	// bare means no driver known, which falls through to the dummy
 	// driver below. The trailing "@<provider>" suffix must also be
