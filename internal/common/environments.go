@@ -226,6 +226,8 @@ const (
 	EnvRAGFlowSecretKey                  = "RAGFLOW_SECRET_KEY"
 	EnvEnableRegister                    = "ENABLE_REGISTER"
 	EnvDisablePasswordLogin              = "DISABLE_PASSWORD_LOGIN"
+	EnvOAuthAutoRegister                 = "OAUTH_AUTO_REGISTER"
+	EnvOAuthPostLoginWebhook             = "OAUTH_POST_LOGIN_WEBHOOK"
 	EnvMinioHost                         = "MINIO_HOST"
 	EnvMinioRegion                       = "MINIO_REGION"
 	EnvLang                              = "LANG"

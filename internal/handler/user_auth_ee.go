@@ -26,8 +26,10 @@ func (h *UserHandler) OAuthCallback(c *gin.Context) {
 	common.ErrorWithCode(c, common.CodeNotImplemented, "OAuthCallback not implemented")
 }
 
+// GitHubAuthCallback serves the static /auth/oauth/github/callback route,
+// which shadows the generic one for a channel named "github".
 func (h *UserHandler) GitHubAuthCallback(c *gin.Context) {
-	common.ErrorWithCode(c, common.CodeNotImplemented, "GitHubAuthCallback not implemented")
+	h.oauthCallback(c, "github")
 }
 
 func (h *UserHandler) LarkAuthCallback(c *gin.Context) {
@@ -66,14 +68,22 @@ func (h *UserHandler) GetMeta(c *gin.Context) {
 	common.ErrorWithCode(c, common.CodeNotImplemented, "GetMeta not implemented")
 }
 
+// OAuthLogin starts an SSO login through a channel of the `oauth:` config.
 func (h *UserHandler) OAuthLogin(c *gin.Context) {
-	common.ErrorWithCode(c, common.CodeNotImplemented, "OAuthLogin not implemented")
+	h.oauthLogin(c, c.Param("channel"))
 }
 
+// OAuthChannelCallback completes an SSO login started by OAuthLogin.
 func (h *UserHandler) OAuthChannelCallback(c *gin.Context) {
-	common.ErrorWithCode(c, common.CodeNotImplemented, "OAuthChannelCallback not implemented")
+	h.oauthCallback(c, c.Param("channel"))
 }
 
+// GetLoginChannels lists the configured SSO login channels.
 func (h *UserHandler) GetLoginChannels(c *gin.Context) {
-	common.SuccessWithData(c, []interface{}{}, "success")
+	channels, code, err := h.userService.GetLoginChannels()
+	if err != nil {
+		common.ResponseWithCodeData(c, code, []interface{}{}, "Load channels failure, error: "+err.Error())
+		return
+	}
+	common.SuccessWithData(c, channels, "success")
 }

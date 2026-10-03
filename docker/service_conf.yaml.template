@@ -207,6 +207,10 @@ user_default_llm:
 #     userinfo_url: "https://your-oauth-provider.com/oauth/userinfo"
 #     redirect_uri: "https://your-app.com/api/v1/auth/oauth/oauth2/callback"
 #   oidc:
+#     # Endpoints come from <issuer>/.well-known/openid-configuration, e.g.
+#     # https://login.microsoftonline.com/<tenant-id>/v2.0 for Microsoft Entra ID.
+#     type: "oidc"
+#     icon: "sso"
 #     display_name: "OIDC"
 #     client_id: "your_client_id"
 #     client_secret: "your_client_secret"
