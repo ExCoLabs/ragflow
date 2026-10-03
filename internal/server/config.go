@@ -285,7 +285,48 @@ func PrintAll() {
 	}
 	common.Info("=== All Configurations ===")
 	for key, value := range allSettings {
-		common.Info("config", zap.String("key", key), zap.Any("value", value))
+		common.Info("config", zap.String("key", key), zap.Any("value", redactConfigValue(key, value)))
 	}
 	common.Info("=== End Configurations ===")
+}
+
+// secretConfigKeyParts mark a config key whose value must not reach the log.
+// Matched as substrings of the lower-cased key, so "client_secret",
+// "S3_SECRET_KEY" and "api_key" are all caught.
+var secretConfigKeyParts = []string{"password", "passwd", "secret", "token", "api_key", "apikey", "access_key", "private_key", "credential"}
+
+func isSecretConfigKey(key string) bool {
+	key = strings.ToLower(key)
+	for _, part := range secretConfigKeyParts {
+		if strings.Contains(key, part) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactConfigValue returns a copy of value with every secret-looking leaf
+// replaced, so PrintAll can log the effective configuration without leaking
+// credentials into log shippers.
+func redactConfigValue(key string, value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(v))
+		for k, child := range v {
+			out[k] = redactConfigValue(k, child)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, child := range v {
+			out[i] = redactConfigValue(key, child)
+		}
+		return out
+	}
+	// Only non-empty strings: a numeric "max_tokens" is not a secret, and an
+	// empty secret shows that it is unset.
+	if s, ok := value.(string); ok && s != "" && isSecretConfigKey(key) {
+		return "[REDACTED]"
+	}
+	return value
 }
