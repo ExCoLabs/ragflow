@@ -86,7 +86,8 @@ func setupOAuthTest(t *testing.T, autoRegister, webhook string, extraConf ...str
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&entity.User{}, &entity.Tenant{}, &entity.UserTenant{}, &entity.File{}); err != nil {
+	if err := db.AutoMigrate(&entity.User{}, &entity.Tenant{}, &entity.UserTenant{}, &entity.File{},
+		&entity.TenantModelProvider{}, &entity.TenantModelInstance{}, &entity.TenantModel{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	origDB := dao.DB
@@ -298,6 +299,63 @@ func TestOAuthCallbackBadIDTokenAudience(t *testing.T) {
 	}
 	if n := countRows(t, env.db, &entity.User{}, "1 = 1"); n != 0 {
 		t.Errorf("users = %d, want 0", n)
+	}
+}
+
+func TestOAuthCallbackGroupSyncAndDefaultModels(t *testing.T) {
+	graph := oauthtest.NewGraph(t)
+	const engGroup = "33333333-3333-3333-3333-333333333333"
+	graph.Groups["Engineering"] = engGroup
+	graph.Members["new.user@example.com"] = []string{engGroup}
+	t.Setenv("ENTRA_GROUP_SYNC", "Engineering:eng-team@example.com")
+	t.Setenv("SSO_DOMAINS", "example.com")
+
+	env := setupOAuthTest(t, "true", "", fmt.Sprintf(`    group_sync:
+      enabled: true
+      graph_url: %q
+      graph_token_url: %q
+      default_teams: ["everyone@example.com"]
+user_default_llm:
+  factory: "OpenAI-API-Compatible"
+  api_key: "llm-key"
+  base_url: "https://llm.example.com/v1"
+  instance_name: "main"
+  default_models:
+    chat_model:
+      name: "chat-1"
+      max_tokens: 32768
+      is_tools: true
+    embedding_model: "embed-1"
+`, graph.URL(), graph.TokenURL()))
+	env.provider.Email = "new.user@example.com"
+
+	teams := map[string]string{}
+	for _, owner := range []string{"eng-team@example.com", "everyone@example.com"} {
+		status, token := "1", utility.GenerateToken()
+		team := &entity.User{ID: utility.GenerateToken(), Email: owner, Nickname: owner, AccessToken: &token, IsActive: "1", Status: &status}
+		if err := env.db.Create(team).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := env.db.Create(&entity.UserTenant{ID: utility.GenerateToken(), UserID: team.ID, TenantID: team.ID, Role: "owner", InvitedBy: team.ID, Status: &status}).Error; err != nil {
+			t.Fatal(err)
+		}
+		teams[owner] = team.ID
+	}
+
+	state, cookies := env.login(t)
+	user := userByToken(t, env.db, expectRedirect(t, env.callback(state, cookies), "auth"))
+	for owner, tenantID := range teams {
+		if countRows(t, env.db, &entity.UserTenant{}, "user_id = ? AND tenant_id = ? AND role = ? AND status = ?", user.ID, tenantID, "normal", "1") != 1 {
+			t.Errorf("not a member of team %s", owner)
+		}
+	}
+
+	var tenant entity.Tenant
+	if err := env.db.First(&tenant, "id = ?", user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if tenant.LLMID != "chat-1@main@OpenAI-API-Compatible" || tenant.EmbdID != "embed-1@main@OpenAI-API-Compatible" {
+		t.Errorf("tenant defaults = %q / %q", tenant.LLMID, tenant.EmbdID)
 	}
 }
 

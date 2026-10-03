@@ -36,6 +36,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	"go.uber.org/zap"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/crypto/scrypt"
 	"gorm.io/gorm"
@@ -161,7 +162,7 @@ func (s *UserService) Register(ctx context.Context, req *RegisterRequest) (*enti
 		IsSuperuser:     &isSuperuser,
 	}
 
-	if err = s.createUserWithTenant(user); err != nil {
+	if err = s.createUserWithTenant(ctx, user); err != nil {
 		return nil, common.CodeServerError, err
 	}
 	return user, common.CodeSuccess, nil
@@ -170,8 +171,9 @@ func (s *UserService) Register(ctx context.Context, req *RegisterRequest) (*enti
 // createUserWithTenant inserts a new user together with what every account
 // needs: its own tenant (with the configured default models), the owner
 // relation and the root folder. Shared by sign-up and SSO just-in-time
-// registration.
-func (s *UserService) createUserWithTenant(user *entity.User) error {
+// registration. The models of `user_default_llm` are provisioned afterwards;
+// a failure there is logged and does not undo the registration.
+func (s *UserService) createUserWithTenant(ctx context.Context, user *entity.User) error {
 	cfg := server.GetConfig()
 	status := "1"
 	tenantName := user.Nickname + "'s Kingdom"
@@ -260,6 +262,10 @@ func (s *UserService) createUserWithTenant(user *entity.User) error {
 		return nil
 	}); err != nil {
 		return fmt.Errorf("fail to create transaction: %w", err)
+	}
+	if err := ProvisionDefaultModels(ctx, user.ID, cfg.GetUserDefaultLLM()); err != nil {
+		common.Warn("Failed to provision user_default_llm models for new tenant",
+			zap.String("tenant_id", user.ID), zap.Error(err))
 	}
 	return nil
 }

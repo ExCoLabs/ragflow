@@ -59,7 +59,7 @@ func (s *UserService) LoginOAuthUser(ctx context.Context, channel string, info *
 			return nil, false, ErrOAuthRegistrationDisabled
 		}
 		user = newOAuthUser(ctx, channel, info)
-		if err = s.createUserWithTenant(user); err != nil {
+		if err = s.createUserWithTenant(ctx, user); err != nil {
 			return nil, false, err
 		}
 		common.Info("OAuth/OIDC user registered", zap.String("user_id", user.ID), zap.String("channel", channel))

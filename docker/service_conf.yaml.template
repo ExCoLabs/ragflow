@@ -197,6 +197,14 @@ user_default_llm:
 #     asr_model:
 #       model: 'whisper-large-v3' # alias of name
 #     image2text_model: ''
+#   # The Go server creates the provider, the instance below and these models
+#   # in every new tenant and makes them the tenant defaults. A model with its
+#   # own api_key / base_url / factory gets its own "<instance_name>-<type>"
+#   # instance. Optional per model: max_tokens, is_tools.
+#   instance_name: 'default-llm'
+#   extra_models:              # added to the tenant, not made default
+#     - type: 'chat'
+#       name: 'another-chat-model'
 # oauth:
 #   oauth2:
 #     display_name: "OAuth2"
