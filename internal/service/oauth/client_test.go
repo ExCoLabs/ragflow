@@ -76,9 +76,9 @@ func TestOIDCClientAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	want := oauth.UserInfo{Email: "alice@example.com", Username: "alice", Nickname: "Alice", AvatarURL: "https://example.com/a.png"}
-	if *info != want {
-		t.Errorf("user info = %+v, want %+v", *info, want)
+	want := &oauth.UserInfo{Email: "alice@example.com", Username: "alice", Nickname: "Alice", AvatarURL: "https://example.com/a.png"}
+	if info.Email != want.Email || info.Username != want.Username || info.Nickname != want.Nickname || info.AvatarURL != want.AvatarURL {
+		t.Errorf("user info = %+v, want %+v", *info, *want)
 	}
 }
 

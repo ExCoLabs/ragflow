@@ -68,6 +68,8 @@ type UserInfo struct {
 	Username  string
 	Nickname  string
 	AvatarURL string
+	// Claims are the raw (merged) provider claims, e.g. for the groups claim.
+	Claims map[string]any
 }
 
 // Client drives one login channel.
@@ -243,7 +245,7 @@ func checkEmailVerified(claims map[string]any) error {
 // as the Python client: username defaults to the local part of the email,
 // nickname to the username, avatar_url to the OIDC `picture` claim.
 func normalizeUserInfo(claims map[string]any) *UserInfo {
-	info := &UserInfo{Email: claimString(claims, "email")}
+	info := &UserInfo{Email: claimString(claims, "email"), Claims: claims}
 	info.Username = claimString(claims, "username")
 	if info.Username == "" {
 		info.Username, _, _ = strings.Cut(info.Email, "@")

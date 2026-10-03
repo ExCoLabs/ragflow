@@ -51,8 +51,9 @@ type oauthTestEnv struct {
 }
 
 // setupOAuthTest wires a fake OIDC provider into the `oauth:` config as the
-// channel "sso", an in-memory database and the SSO routes.
-func setupOAuthTest(t *testing.T, autoRegister, webhook string) *oauthTestEnv {
+// channel "sso", an in-memory database and the SSO routes. extraConf is
+// appended to service_conf.yaml.
+func setupOAuthTest(t *testing.T, autoRegister, webhook string, extraConf ...string) *oauthTestEnv {
 	t.Helper()
 	p := oauthtest.New(t)
 
@@ -66,7 +67,7 @@ func setupOAuthTest(t *testing.T, autoRegister, webhook string) *oauthTestEnv {
     client_secret: %q
     scope: "openid profile email"
     redirect_uri: "http://ragflow.test/api/v1/auth/oauth/sso/callback"
-`, p.Issuer(), oauthtest.ClientID, oauthtest.ClientSecret)
+`, p.Issuer(), oauthtest.ClientID, oauthtest.ClientSecret) + strings.Join(extraConf, "")
 	if err := os.WriteFile(confPath, []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -298,4 +299,16 @@ func TestOAuthCallbackBadIDTokenAudience(t *testing.T) {
 	if n := countRows(t, env.db, &entity.User{}, "1 = 1"); n != 0 {
 		t.Errorf("users = %d, want 0", n)
 	}
+}
+
+func TestOAuthCallbackGroupSyncFailureDoesNotBlockLogin(t *testing.T) {
+	env := setupOAuthTest(t, "true", "", `    group_sync:
+      enabled: true
+      graph_url: "http://127.0.0.1:1/v1.0"
+      graph_token_url: "http://127.0.0.1:1/token"
+      mapping:
+        "44444444-4444-4444-4444-444444444444": ["eng-team@example.com"]
+`)
+	state, cookies := env.login(t)
+	userByToken(t, env.db, expectRedirect(t, env.callback(state, cookies), "auth"))
 }

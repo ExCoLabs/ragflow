@@ -228,6 +228,8 @@ const (
 	EnvDisablePasswordLogin              = "DISABLE_PASSWORD_LOGIN"
 	EnvOAuthAutoRegister                 = "OAUTH_AUTO_REGISTER"
 	EnvOAuthPostLoginWebhook             = "OAUTH_POST_LOGIN_WEBHOOK"
+	EnvEntraGroupSync                    = "ENTRA_GROUP_SYNC"
+	EnvSSODomains                        = "SSO_DOMAINS"
 	EnvMinioHost                         = "MINIO_HOST"
 	EnvMinioRegion                       = "MINIO_REGION"
 	EnvLang                              = "LANG"

@@ -17,6 +17,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"net/http"
@@ -24,7 +25,9 @@ import (
 	"ragflow/internal/common"
 	"ragflow/internal/engine/clickhouse"
 	"ragflow/internal/engine/kvrocks"
+	"ragflow/internal/entity"
 	"ragflow/internal/server"
+	"ragflow/internal/server/config"
 	"ragflow/internal/server/local"
 	"ragflow/internal/service"
 	"ragflow/internal/service/oauth"
@@ -37,6 +40,10 @@ import (
 )
 
 const (
+	// groupSyncTimeout bounds the group sync the callback runs before it
+	// redirects; a slow directory delays the login at most this long.
+	groupSyncTimeout = 15 * time.Second
+
 	// oauthStateCookie carries the signed state/nonce/PKCE verifier from the
 	// login redirect to the callback.
 	oauthStateCookie = "ragflow_oauth_state"
@@ -203,6 +210,7 @@ func (h *UserHandler) oauthCallback(c *gin.Context, channel string) {
 		return
 	}
 	operationLog.UserID = user.ID
+	syncGroups(ctx, h.userService, channel, channelCfg, user, info)
 
 	authToken, err := utility.DumpAccessToken(*user.AccessToken, secretKey)
 	if err != nil {
@@ -223,4 +231,24 @@ func (h *UserHandler) oauthCallback(c *gin.Context, channel string) {
 	common.Info("OAuth login successful", zap.String("user_id", user.ID), zap.String("channel", channel), zap.Bool("new_user", created))
 	setOAuthAuthCookie(c, authToken)
 	c.Redirect(http.StatusFound, "/?auth="+url.QueryEscape(authToken))
+}
+
+// syncGroups applies the channel's group -> team mapping to the user. It is
+// bounded by groupSyncTimeout and never fails the login: errors are logged and
+// the user keeps the memberships they had.
+func syncGroups(ctx context.Context, userService *service.UserService, channel string, cfg config.OAuthChannelConfig, user *entity.User, info *oauth.UserInfo) {
+	syncer := oauth.GetGroupSyncer(channel, cfg)
+	if syncer == nil || !syncer.Applies(user.Email) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), groupSyncTimeout)
+	defer cancel()
+	plan, err := syncer.Plan(ctx, info)
+	if err == nil {
+		err = userService.SyncTeamMemberships(ctx, user, plan)
+	}
+	if err != nil {
+		common.Warn("SSO group sync failed; login continues", zap.String("user_id", user.ID),
+			zap.String("channel", channel), zap.Error(err))
+	}
 }
