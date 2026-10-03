@@ -409,6 +409,18 @@ func (s *S3Storage) RemoveEmptyBucket(ctx context.Context, bucket string) error 
 		versions, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
 			Bucket: aws.String(actualBucket), Prefix: aws.String(prefix), MaxKeys: aws.Int32(1),
 		})
+		if isS3VersionListingRefused(err) {
+			objects, listErr := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+				Bucket: aws.String(actualBucket), Prefix: aws.String(prefix), MaxKeys: aws.Int32(1),
+			})
+			if listErr != nil {
+				return listErr
+			}
+			if len(objects.Contents) > 0 {
+				return fmt.Errorf("bucket %s is not empty", bucket)
+			}
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -450,6 +462,9 @@ func (s *S3Storage) removeObjects(ctx context.Context, bucket, prefix string) er
 	})
 	for versions.HasMorePages() {
 		page, err := versions.NextPage(ctx)
+		if isS3VersionListingRefused(err) {
+			return s.removeCurrentObjects(ctx, bucket, prefix)
+		}
 		if err != nil {
 			return fmt.Errorf("list S3 object versions in %q: %w", bucket, err)
 		}
@@ -459,6 +474,31 @@ func (s *S3Storage) removeObjects(ctx context.Context, bucket, prefix string) er
 		}
 		for _, marker := range page.DeleteMarkers {
 			toDelete = append(toDelete, types.ObjectIdentifier{Key: marker.Key, VersionId: marker.VersionId})
+		}
+		if err := s.deleteObjects(ctx, bucket, toDelete); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeCurrentObjects deletes every object under prefix without version IDs.
+// Used when the credentials may not list object versions (an unversioned
+// bucket on a provider that refuses ListObjectVersions, or a key scoped to
+// object operations); a version-less delete is all such a bucket needs.
+func (s *S3Storage) removeCurrentObjects(ctx context.Context, bucket, prefix string) error {
+	objects := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	})
+	for objects.HasMorePages() {
+		page, err := objects.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list S3 objects in %q: %w", bucket, err)
+		}
+		toDelete := make([]types.ObjectIdentifier, 0, len(page.Contents))
+		for _, object := range page.Contents {
+			toDelete = append(toDelete, types.ObjectIdentifier{Key: object.Key})
 		}
 		if err := s.deleteObjects(ctx, bucket, toDelete); err != nil {
 			return err
@@ -534,6 +574,23 @@ func isS3NotFound(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "404" || apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NoSuchBucket"
+	}
+	return false
+}
+
+// isS3VersionListingRefused reports whether ListObjectVersions was rejected
+// rather than failing: S3-compatible providers answer AccessDenied when the key
+// lacks the versioning permission, and NotImplemented when they lack the API.
+func isS3VersionListingRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "AccessDenied", "NotImplemented", "MethodNotAllowed":
+			return true
+		}
 	}
 	return false
 }
