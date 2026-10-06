@@ -28,3 +28,17 @@ export const supportsSourceLocate = (ext?: string) =>
  */
 export const buildExplorerPath = (root: string, docName: string) =>
   `${root.replace(/[\\/]+$/, '')}\\${docName.replace(/[\\/]+/g, '\\')}`;
+
+interface FileLinkConfig {
+  fileLinkRoot?: string;
+  fileLinkRoots?: Record<string, string>;
+}
+
+/** Per-dataset network-drive root, falling back to the deployment-wide one. */
+export const resolveFileLinkRoot = (
+  config: FileLinkConfig | undefined,
+  datasetId?: string,
+) =>
+  (datasetId && config?.fileLinkRoots?.[datasetId]) ||
+  config?.fileLinkRoot ||
+  undefined;

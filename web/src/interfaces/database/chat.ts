@@ -173,6 +173,8 @@ export interface Docagg {
   count: number;
   doc_id: string;
   doc_name: string;
+  dataset_id?: string;
+  kb_id?: string;
   url?: string;
 }
 

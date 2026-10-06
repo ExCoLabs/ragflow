@@ -54,7 +54,10 @@ import {
 import CopyToClipboard from '@/components/copy-to-clipboard';
 import { useFetchDocumentThumbnailsByIds } from '@/hooks/use-document-request';
 import { useSystemConfig } from '@/hooks/use-system-request';
-import { buildExplorerPath } from '@/utils/source-locate';
+import {
+  buildExplorerPath,
+  resolveFileLinkRoot,
+} from '@/utils/source-locate';
 import classNames from 'classnames';
 import { omit } from 'lodash';
 import pipe from 'lodash/fp/pipe';
@@ -86,7 +89,6 @@ const MarkdownContent = ({
 }) => {
   const { t } = useTranslation();
   const { config } = useSystemConfig();
-  const fileLinkRoot: string | undefined = config?.fileLinkRoot;
   const { setDocumentIds, data: fileThumbnails } =
     useFetchDocumentThumbnailsByIds();
   const contentWithCursor = useMemo(() => {
@@ -186,6 +188,10 @@ const MarkdownContent = ({
         documentId,
         document,
       } = getReferenceInfo(chunkIndex);
+      const fileLinkRoot = resolveFileLinkRoot(
+        config,
+        document?.dataset_id ?? document?.kb_id ?? chunkItem?.dataset_id,
+      );
 
       return (
         <div key={chunkItem?.id} className="flex gap-2">
@@ -261,7 +267,7 @@ const MarkdownContent = ({
         </div>
       );
     },
-    [getReferenceInfo, handleDocumentButtonClick, fileLinkRoot],
+    [getReferenceInfo, handleDocumentButtonClick, config],
   );
 
   const renderReference = useCallback(

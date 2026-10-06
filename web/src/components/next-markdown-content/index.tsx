@@ -25,6 +25,7 @@ import { IReferenceChunk, IReferenceObject } from '@/interfaces/database/chat';
 import { getExtension } from '@/utils/document-util';
 import {
   buildExplorerPath,
+  resolveFileLinkRoot,
   supportsSourceLocate,
 } from '@/utils/source-locate';
 import { downloadFileFromBlob } from '@/utils/file-util';
@@ -204,7 +205,6 @@ function MarkdownContent({
 }) {
   const { t } = useTranslation();
   const { config } = useSystemConfig();
-  const fileLinkRoot: string | undefined = config?.fileLinkRoot;
   const { setDocumentIds, data: fileThumbnails } =
     useFetchDocumentThumbnailsByIds();
   const contentWithCursor = useMemo(() => {
@@ -318,6 +318,10 @@ function MarkdownContent({
         documentId,
         document,
       } = getReferenceInfo(chunkIndex);
+      const fileLinkRoot = resolveFileLinkRoot(
+        config,
+        document?.dataset_id ?? document?.kb_id ?? chunkItem?.dataset_id,
+      );
 
       return (
         <div key={chunkItem?.id} className="flex gap-2">
@@ -391,7 +395,7 @@ function MarkdownContent({
         </div>
       );
     },
-    [getReferenceInfo, handleDocumentButtonClick, fileLinkRoot],
+    [getReferenceInfo, handleDocumentButtonClick, config],
   );
 
   const renderReference = useCallback(
