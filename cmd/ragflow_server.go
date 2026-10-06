@@ -33,6 +33,7 @@ import (
 	"ragflow/internal/agent/retrievalbridge"
 	"ragflow/internal/agent/runtime"
 	agenttool "ragflow/internal/agent/tool"
+	smartagentic "ragflow/internal/agentic_rag"
 	"ragflow/internal/channels"
 	"ragflow/internal/deepdoc/native"
 	"ragflow/internal/deepdoc/parser/pdf"
@@ -1206,6 +1207,27 @@ func startServer(ctx context.Context, serverName string, arguments *serverArgs) 
 	agenttool.SetRetrievalService(retrievalAdapter)
 	agenttool.SetMemoryRetrievalService(retrievalbridge.NewMemoryAdapter(memoryService))
 	common.Info("agent: retrieval service adapter installed")
+
+	// The smart-reasoning agent's corpus tools (internal/agentic_rag): regex
+	// pushdown and lexical BM25 over the same doc engine the retrieval adapter
+	// wraps. The locate tools resolve these services per call, so they must be
+	// registered before the server starts serving.
+	runtime.SetGrepService(smartagentic.NewGrepAdapter(docEngine))
+	bm25Adapter := smartagentic.NewBm25Adapter(docEngine)
+	bm25Adapter.SetQueryBuilder(nlp.GetQueryBuilder())
+	bm25Adapter.SetDatasetLanguage(func(ctx context.Context, datasetIDs []string) string {
+		if len(datasetIDs) == 0 {
+			return ""
+		}
+		kbs, err := dao.NewKnowledgebaseDAO().GetByIDs(ctx, dao.DB, datasetIDs)
+		if err != nil {
+			common.Warn("agent: bm25 dataset language lookup failed", zap.Error(err))
+			return ""
+		}
+		return entity.KnowledgebasesLanguage(kbs)
+	})
+	runtime.SetBm25Service(bm25Adapter)
+	common.Info("agent: smart-reasoning corpus services installed (grep + bm25)")
 
 	// Wire the agentic-RAG runtime as the Go chat pipeline's evidence engine
 	// (internal/service/chat_pipeline.retrieveViaHarness): it runs each request on a
