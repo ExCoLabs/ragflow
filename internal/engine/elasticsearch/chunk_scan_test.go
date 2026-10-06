@@ -184,3 +184,41 @@ func TestUpdateChunkFieldsWithNothingToWriteSendsNoRequest(t *testing.T) {
 		t.Errorf("requests = %v", *seen)
 	}
 }
+
+func TestFirstChunkTextReadsTheDocumentHeadInReadingOrder(t *testing.T) {
+	engine, seen := newRecordingEngine(t, func(esRequest) string {
+		return `{"hits":{"hits":[{"_id":"c0","_source":{}},{"_id":"c1","_source":{"content_with_weight":""}},` +
+			`{"_id":"c2","_source":{"content_with_weight":"title: Pragyan Ojha"}},{"_id":"c3","_source":{"content_with_weight":"later"}}]}}`
+	})
+
+	text, found, err := engine.FirstChunkText(t.Context(), "ragflow_t1", "kb1", "d1")
+	if err != nil || !found || text != "title: Pragyan Ojha" {
+		t.Fatalf("FirstChunkText = %q, %v, %v", text, found, err)
+	}
+
+	req := (*seen)[0]
+	if req.path != "/ragflow_t1/_search" || strings.Contains(req.query, "scroll") {
+		t.Errorf("request = %s?%s", req.path, req.query)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal([]byte(req.body), &body); err != nil {
+		t.Fatalf("body: %v", err)
+	}
+	var want map[string]interface{}
+	wantJSON, _ := json.Marshal(firstChunkBody("kb1", "d1"))
+	_ = json.Unmarshal(wantJSON, &want)
+	if !reflect.DeepEqual(body, want) {
+		t.Errorf("body = %s", req.body)
+	}
+	if !strings.Contains(req.body, `{"exists":{"field":"chunk_order_int"}}`) || !strings.Contains(req.body, `"sort":[{"chunk_order_int":"asc"}]`) {
+		t.Errorf("body does not select chunks in reading order: %s", req.body)
+	}
+}
+
+func TestFirstChunkTextReportsADocumentWithoutReadingOrder(t *testing.T) {
+	engine, _ := newRecordingEngine(t, func(esRequest) string { return `{"hits":{"hits":[]}}` })
+	text, found, err := engine.FirstChunkText(t.Context(), "ragflow_t1", "kb1", "d1")
+	if err != nil || found || text != "" {
+		t.Fatalf("FirstChunkText = %q, %v, %v", text, found, err)
+	}
+}

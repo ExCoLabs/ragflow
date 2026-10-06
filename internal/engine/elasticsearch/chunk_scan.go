@@ -142,6 +142,7 @@ func (e *Engine) ScanChunks(ctx context.Context, indexName, datasetID string, op
 	return nil
 }
 
+// decodeScrollPage decodes a search or scroll response.
 func decodeScrollPage(res *esapi.Response, err error) (*scrollPage, error) {
 	if err != nil {
 		return nil, err
@@ -156,6 +157,53 @@ func decodeScrollPage(res *esapi.Response, err error) (*scrollPage, error) {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 	return &page, nil
+}
+
+// leadingChunkWindow is how many chunks FirstChunkText reads from the head of
+// a document looking for one with text.
+const leadingChunkWindow = 10
+
+// firstChunkBody is the request FirstChunkText sends: the leading chunks of
+// one document in reading order. Chunks without chunk_order_int (indexed
+// before the field existed) have no known reading order and are left out.
+func firstChunkBody(datasetID, docID string) map[string]interface{} {
+	return map[string]interface{}{
+		"query": map[string]interface{}{"bool": map[string]interface{}{
+			"filter": []interface{}{
+				map[string]interface{}{"term": map[string]interface{}{"kb_id": datasetID}},
+				map[string]interface{}{"term": map[string]interface{}{"doc_id": docID}},
+				map[string]interface{}{"exists": map[string]interface{}{"field": "chunk_order_int"}},
+			},
+		}},
+		"_source": []string{"content_with_weight"},
+		"sort":    []interface{}{map[string]interface{}{"chunk_order_int": "asc"}},
+		"size":    leadingChunkWindow,
+	}
+}
+
+// FirstChunkText returns the text of document docID's first chunk in reading
+// order that has any. found is false when none of its leading chunks carries
+// both chunk_order_int and text, for example when the document was indexed
+// before chunk_order_int existed.
+func (e *Engine) FirstChunkText(ctx context.Context, indexName, datasetID, docID string) (text string, found bool, err error) {
+	body, err := json.Marshal(firstChunkBody(datasetID, docID))
+	if err != nil {
+		return "", false, fmt.Errorf("failed to marshal first chunk request: %w", err)
+	}
+	res, err := esapi.SearchRequest{
+		Index: []string{indexName},
+		Body:  bytes.NewReader(body),
+	}.Do(ctx, e.client)
+	page, err := decodeScrollPage(res, err)
+	if err != nil {
+		return "", false, fmt.Errorf("first chunk of %s: %w", docID, err)
+	}
+	for _, hit := range page.Hits.Hits {
+		if content, ok := hit.Source["content_with_weight"].(string); ok && content != "" {
+			return content, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // ChunkFieldUpdate sets Fields on chunk ID and leaves every other field of the

@@ -367,10 +367,7 @@ func (c *TokenizerComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map
 		zap.String("component", "Tokenizer"),
 		zap.Int("input_chunks", len(chunks)),
 	)
-	titleStem := TitleStem(name)
-	if toks := declaredTitleTokens(chunks); len(toks) > 0 {
-		titleStem = strings.TrimSpace(titleStem + " " + strings.Join(toks, " "))
-	}
+	titleStem := TitleStem(name, firstChunkText(chunks))
 
 	// chunk_order_int is the position of the chunk in the (post-filter) reading
 	// sequence. It is set unconditionally on every surviving chunk so that all
@@ -766,8 +763,8 @@ func cloneTokenizerChunkDoc(in schema.ChunkDoc) schema.ChunkDoc {
 // "wikipedia", English stopwords and pure numbers are dropped: they are noise that would match
 // unrelated queries once the field is weighted.
 //
-// Only the first non-empty chunk is inspected, because the header block (when present at all)
-// belongs to the head of the document.
+// head is the text of the document's first non-empty chunk (see firstChunkText), because the
+// header block (when present at all) belongs to the head of the document.
 //
 // The extraction is script-agnostic. A word that is not pure ASCII — Chinese, Japanese, Korean,
 // Cyrillic, Arabic, Greek, Hebrew, Thai, or Latin carrying diacritics — is kept whole and handed
@@ -827,30 +824,23 @@ func trimWordEdges(s string) string {
 	})
 }
 
-func declaredTitleTokens(chunks []schema.ChunkDoc) []string {
+func declaredTitleTokens(head string) []string {
 	const (
 		headerLines = 20
 		maxTokens   = 20
 	)
 	var values []string
-	for i := range chunks {
-		head := chunks[i].Text
-		if head == "" {
-			continue
-		}
-		lines := strings.Split(head, "\n")
-		if len(lines) > headerLines {
-			lines = lines[:headerLines]
-		}
-		for _, line := range lines {
-			l := strings.ToLower(strings.TrimSpace(line))
-			for _, key := range []string{"title:", "name:", "fullname:"} {
-				if strings.HasPrefix(l, key) {
-					values = append(values, l[len(key):])
-				}
+	lines := strings.Split(head, "\n")
+	if len(lines) > headerLines {
+		lines = lines[:headerLines]
+	}
+	for _, line := range lines {
+		l := strings.ToLower(strings.TrimSpace(line))
+		for _, key := range []string{"title:", "name:", "fullname:"} {
+			if strings.HasPrefix(l, key) {
+				values = append(values, l[len(key):])
 			}
 		}
-		break
 	}
 	if len(values) == 0 {
 		return nil
@@ -977,10 +967,28 @@ func tokenizeChunks(chunks []schema.ChunkDoc, titleStem string, language string)
 	return nil
 }
 
-// TitleStem is the document name the title tokens are built from: the name
-// without its trailing file extension.
-func TitleStem(name string) string {
-	return titleExtRE.ReplaceAllString(name, "")
+// firstChunkText is the text of the first chunk, in reading order, that has
+// any: the head of the document, where a declared title lives.
+func firstChunkText(chunks []schema.ChunkDoc) string {
+	for i := range chunks {
+		if chunks[i].Text != "" {
+			return chunks[i].Text
+		}
+	}
+	return ""
+}
+
+// TitleStem is the text a document's title tokens are built from: its name
+// without the trailing file extension, followed by the title the document
+// declares in its header block (see declaredTitleTokens). head is the text of
+// the document's first non-empty chunk in reading order, "" when unknown.
+// Every chunk of the document gets the same stem.
+func TitleStem(name, head string) string {
+	stem := titleExtRE.ReplaceAllString(name, "")
+	if toks := declaredTitleTokens(head); len(toks) > 0 {
+		stem = strings.TrimSpace(stem + " " + strings.Join(toks, " "))
+	}
+	return stem
 }
 
 // TokenizeTitle returns the title_tks / title_sm_tks pair for a title stem

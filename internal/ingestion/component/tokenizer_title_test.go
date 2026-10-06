@@ -112,13 +112,31 @@ func TestDeclaredTitleTokens(t *testing.T) {
 			chunks: []schema.ChunkDoc{{}, {Text: ""}},
 			want:   nil,
 		},
+		{
+			name:   "the first non-empty chunk is the head",
+			chunks: []schema.ChunkDoc{{}, {Text: "title: Pragyan Ojha\n"}, {Text: "title: Someone Else\n"}},
+			want:   []string{"pragyan", "ojha"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := declaredTitleTokens(c.chunks)
+			got := declaredTitleTokens(firstChunkText(c.chunks))
 			if !reflect.DeepEqual(got, c.want) {
 				t.Errorf("declaredTitleTokens() = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestTitleStem(t *testing.T) {
+	cases := []struct{ name, head, want string }{
+		{"93372.md", "title: Pragyan Ojha\nbody", "93372 pragyan ojha"},
+		{"Annual report.pdf", "no header here", "Annual report"},
+		{"Annual report.pdf", "", "Annual report"},
+	}
+	for _, c := range cases {
+		if got := TitleStem(c.name, c.head); got != c.want {
+			t.Errorf("TitleStem(%q, %q) = %q, want %q", c.name, c.head, got, c.want)
+		}
 	}
 }

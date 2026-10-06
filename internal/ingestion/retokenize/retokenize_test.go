@@ -18,7 +18,9 @@ package retokenize
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -37,9 +39,9 @@ func requireTokenizerPool(t testing.TB) {
 	}
 }
 
-// indexedChunk is a chunk as the ingestion Tokenizer component leaves it,
-// reduced to the fields the index keeps.
-func indexedChunk(t *testing.T, name, lang string, chunk map[string]any) map[string]interface{} {
+// indexedDocument is a document's chunks as the ingestion Tokenizer
+// component leaves them, reduced to the fields the index keeps.
+func indexedDocument(t *testing.T, docID, name, lang string, chunks ...map[string]any) []map[string]interface{} {
 	t.Helper()
 	c, err := component.NewTokenizerComponent(map[string]any{"search_method": []any{"full_text"}})
 	if err != nil {
@@ -49,19 +51,34 @@ func indexedChunk(t *testing.T, name, lang string, chunk map[string]any) map[str
 		"name":          name,
 		"lang":          lang,
 		"output_format": "chunks",
-		"chunks":        []map[string]any{chunk},
+		"chunks":        chunks,
 	})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	ck := out["chunks"].([]map[string]any)[0]
-	stored := map[string]interface{}{"content_with_weight": ck["text"], "docnm_kwd": name}
-	for _, k := range append([]string{"important_kwd", "question_kwd"}, TokenFields...) {
-		if v, ok := ck[k]; ok {
-			stored[k] = v
+	var stored []map[string]interface{}
+	for i, ck := range out["chunks"].([]map[string]any) {
+		row := map[string]interface{}{
+			"id":                  fmt.Sprintf("%s-c%d", docID, i),
+			"doc_id":              docID,
+			"content_with_weight": ck["text"],
+			"docnm_kwd":           name,
+			"chunk_order_int":     ck["chunk_order_int"],
 		}
+		for _, k := range append([]string{"important_kwd", "question_kwd"}, TokenFields...) {
+			if v, ok := ck[k]; ok {
+				row[k] = v
+			}
+		}
+		stored = append(stored, row)
 	}
 	return stored
+}
+
+// indexedChunk is a single-chunk document as ingestion indexes it.
+func indexedChunk(t *testing.T, name, lang string, chunk map[string]any) map[string]interface{} {
+	t.Helper()
+	return indexedDocument(t, "d1", name, lang, chunk)[0]
 }
 
 func TestChunkFieldsMatchIngestion(t *testing.T) {
@@ -73,7 +90,7 @@ func TestChunkFieldsMatchIngestion(t *testing.T) {
 				"questions": "Who chased the cats?\nWhere did they run?",
 			})
 
-			fields, err := ChunkFields(tokenizer.New(lang), stored)
+			fields, err := ChunkFields(tokenizer.New(lang), stored, component.TitleStem("Annual report.pdf", ""))
 			if err != nil {
 				t.Fatalf("ChunkFields: %v", err)
 			}
@@ -96,7 +113,7 @@ func TestChunkFieldsKeywordsMatchIngestion(t *testing.T) {
 	requireTokenizerPool(t)
 	stored := indexedChunk(t, "doc.txt", "English", map[string]any{"text": "alpha", "keywords": "running dogs,annual report"})
 
-	fields, err := ChunkFields(tokenizer.New("English"), stored)
+	fields, err := ChunkFields(tokenizer.New("English"), stored, component.TitleStem("doc.txt", ""))
 	if err != nil {
 		t.Fatalf("ChunkFields: %v", err)
 	}
@@ -111,7 +128,7 @@ func TestChunkFieldsLeaveAbsentInputsAlone(t *testing.T) {
 		"content_with_weight": "plain text",
 		"important_kwd":       []interface{}{},
 		"docnm_kwd":           "",
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("ChunkFields: %v", err)
 	}
@@ -170,6 +187,32 @@ type fakeStore struct {
 	indexes []string
 	updates [][]elasticsearch.ChunkFieldUpdate
 	failIDs map[string]bool
+	// headLookups counts FirstChunkText calls per document.
+	headLookups map[string]int
+}
+
+// FirstChunkText behaves like the Elasticsearch query: the document's chunks
+// that carry chunk_order_int, in that order, first one with text.
+func (s *fakeStore) FirstChunkText(_ context.Context, _, _, docID string) (string, bool, error) {
+	if s.headLookups == nil {
+		s.headLookups = map[string]int{}
+	}
+	s.headLookups[docID]++
+	var ordered []map[string]interface{}
+	for _, ck := range s.chunks {
+		if _, ok := ck["chunk_order_int"]; ok && ck["doc_id"] == docID {
+			ordered = append(ordered, ck)
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return fmt.Sprint(ordered[i]["chunk_order_int"]) < fmt.Sprint(ordered[j]["chunk_order_int"])
+	})
+	for _, ck := range ordered {
+		if text, _ := ck["content_with_weight"].(string); text != "" {
+			return text, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func (s *fakeStore) ScanChunks(_ context.Context, indexName, _ string, opts elasticsearch.ScanOptions, fn func(string, map[string]interface{}) error) error {
@@ -197,7 +240,7 @@ func (s *fakeStore) UpdateChunkFields(_ context.Context, _ string, updates []ela
 func upToDate(t *testing.T, id string) map[string]interface{} {
 	t.Helper()
 	ck := map[string]interface{}{"id": id, "content_with_weight": "plain text"}
-	fields, err := ChunkFields(tokenizer.New("English"), ck)
+	fields, err := ChunkFields(tokenizer.New("English"), ck, "")
 	if err != nil {
 		t.Fatalf("ChunkFields: %v", err)
 	}
@@ -295,6 +338,85 @@ func TestRunDatasetReportsFailedUpdatesAndContinues(t *testing.T) {
 		t.Errorf("result = %+v", res)
 	}
 	if !strings.Contains(out.String(), "chunk c1: version conflict") {
+		t.Errorf("report = %q", out.String())
+	}
+}
+
+// A document that declares its title in its header block gets those words in
+// title_tks of every chunk at ingestion; a retokenize run must rebuild the
+// same fields, not fall back to the file name. The index here holds the
+// document as it was before declared titles were indexed.
+func TestRunDatasetRebuildsDeclaredTitlesLikeIngestion(t *testing.T) {
+	requireTokenizerPool(t)
+	ingested := indexedDocument(t, "d1", "93372.md", "English",
+		map[string]any{"text": "title: Pragyan Ojha\nSource URL: https://example.org/pp-ojha\nPersonal information"},
+		map[string]any{"text": "He bowled left-arm spin for India."},
+	)
+	if !strings.Contains(ingested[1]["title_tks"].(string), "pragyan") {
+		t.Fatalf("ingestion title_tks = %q, want the declared title", ingested[1]["title_tks"])
+	}
+	nameOnly, _, err := component.TokenizeTitle(tokenizer.New("English"), component.TitleStem("93372.md", ""))
+	if err != nil {
+		t.Fatalf("TokenizeTitle: %v", err)
+	}
+	var indexed []map[string]interface{}
+	for _, ck := range ingested {
+		old := maps.Clone(ck)
+		old["title_tks"] = nameOnly
+		indexed = append(indexed, old)
+	}
+	store := &fakeStore{chunks: indexed}
+
+	res, err := RunDataset(t.Context(), store, Dataset{ID: "kb1", TenantID: "t1", Language: "English"}, Options{BatchSize: 500, ScanSize: 500}, io.Discard)
+	if err != nil {
+		t.Fatalf("RunDataset: %v", err)
+	}
+	if res != (Result{Scanned: 2, Updated: 2}) {
+		t.Errorf("result = %+v", res)
+	}
+	for _, batch := range store.updates {
+		for _, u := range batch {
+			var want map[string]interface{}
+			for _, ck := range ingested {
+				if ck["id"] == u.ID {
+					want = ck
+				}
+			}
+			if !reflect.DeepEqual(u.Fields, map[string]interface{}{"title_tks": want["title_tks"]}) {
+				t.Errorf("chunk %s writes %v, ingestion stored title_tks %q", u.ID, u.Fields, want["title_tks"])
+			}
+		}
+	}
+	if store.headLookups["d1"] != 1 {
+		t.Errorf("first chunk read %d times, want once per document", store.headLookups["d1"])
+	}
+
+	// Run again over what ingestion stored: nothing differs.
+	fresh := &fakeStore{chunks: ingested}
+	if res, err := RunDataset(t.Context(), fresh, Dataset{ID: "kb1", TenantID: "t1", Language: "English"}, Options{BatchSize: 500, ScanSize: 500}, io.Discard); err != nil || res.Updated != 0 {
+		t.Errorf("rerun over ingested chunks = %+v, %v; updates %v", res, err, fresh.updates)
+	}
+}
+
+// Chunks indexed before chunk_order_int existed have no known first chunk:
+// their title comes from the document name alone, and the run says so.
+func TestRunDatasetTitlesDocumentsWithoutReadingOrderFromTheName(t *testing.T) {
+	requireTokenizerPool(t)
+	ck := map[string]interface{}{"id": "c1", "doc_id": "d1", "docnm_kwd": "93372.md", "content_with_weight": "title: Pragyan Ojha"}
+	store := &fakeStore{chunks: []map[string]interface{}{ck}}
+	var out strings.Builder
+
+	if _, err := RunDataset(t.Context(), store, Dataset{ID: "kb1", TenantID: "t1", Language: "English"}, Options{BatchSize: 500, ScanSize: 500}, &out); err != nil {
+		t.Fatalf("RunDataset: %v", err)
+	}
+	want, _, err := component.TokenizeTitle(tokenizer.New("English"), "93372")
+	if err != nil {
+		t.Fatalf("TokenizeTitle: %v", err)
+	}
+	if got := store.updates[0][0].Fields["title_tks"]; got != want {
+		t.Errorf("title_tks = %q, want the name only %q", got, want)
+	}
+	if !strings.Contains(out.String(), "1 documents have no chunk with chunk_order_int") {
 		t.Errorf("report = %q", out.String())
 	}
 }

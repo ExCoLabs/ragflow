@@ -26,12 +26,15 @@
 // while it runs.
 //
 // The fields are derived the way the ingestion Tokenizer component derives
-// them (component.TokenizeContent / TokenizeTitle), with the dataset's
-// language. Compiled artifacts that share the chunk index (knowledge graph,
-// wiki and other compile_kwd rows) build their token fields differently and
-// are skipped. A chunk whose content tokens were built from an extractor
-// summary gets them rebuilt from its stored text, since the summary is not
-// persisted.
+// them (component.TokenizeContent / TitleStem / TokenizeTitle), with the
+// dataset's language. The title stem includes the title a document declares
+// in its first chunk, which is read once per document; a document indexed
+// before chunks carried chunk_order_int has no known first chunk and gets a
+// title from its name alone, as ingestion gave it at the time. Compiled
+// artifacts that share the chunk index (knowledge graph, wiki and other
+// compile_kwd rows) build their token fields differently and are skipped. A
+// chunk whose content tokens were built from an extractor summary gets them
+// rebuilt from its stored text, since the summary is not persisted.
 //
 // The work is driven by a scan of the chunk index, not by the document table:
 // a chunk names its dataset in kb_id, so the run covers every chunk of the
@@ -66,7 +69,7 @@ var TokenFields = []string{"content_ltks", "content_sm_ltks", "title_tks", "titl
 
 // sourceFields are read back with every chunk: the inputs of the token fields,
 // and the token fields themselves so unchanged chunks can be skipped.
-var sourceFields = append([]string{"content_with_weight", "docnm_kwd", "important_kwd", "question_kwd"}, TokenFields...)
+var sourceFields = append([]string{"content_with_weight", "doc_id", "docnm_kwd", "important_kwd", "question_kwd"}, TokenFields...)
 
 // compiledArtifactFields mark rows of the chunk index that are not document
 // chunks: knowledge-graph entities and relations, wiki pages and the other
@@ -137,10 +140,11 @@ func ParseFlags(name string, args []string, output io.Writer) (*Options, error) 
 }
 
 // ChunkFields returns the token fields of one chunk, computed from its stored
-// inputs the way ingestion computes them. Only fields whose input exists on
-// the chunk are returned; a chunk without keywords keeps whatever
-// important_tks it had.
-func ChunkFields(tok tokenizer.Tokenizer, source map[string]interface{}) (map[string]string, error) {
+// inputs the way ingestion computes them. titleStem is the component.TitleStem
+// of the chunk's document; the title fields are left out when it is empty.
+// Only fields whose input exists on the chunk are returned; a chunk without
+// keywords keeps whatever important_tks it had.
+func ChunkFields(tok tokenizer.Tokenizer, source map[string]interface{}, titleStem string) (map[string]string, error) {
 	fields := make(map[string]string, len(TokenFields))
 	if content, ok := source["content_with_weight"].(string); ok && strings.TrimSpace(content) != "" {
 		ltks, smLtks, err := component.TokenizeContent(tok, content)
@@ -149,8 +153,8 @@ func ChunkFields(tok tokenizer.Tokenizer, source map[string]interface{}) (map[st
 		}
 		fields["content_ltks"], fields["content_sm_ltks"] = ltks, smLtks
 	}
-	if name, ok := source["docnm_kwd"].(string); ok && strings.TrimSpace(name) != "" {
-		tks, smTks, err := component.TokenizeTitle(tok, component.TitleStem(name))
+	if strings.TrimSpace(titleStem) != "" {
+		tks, smTks, err := component.TokenizeTitle(tok, titleStem)
 		if err != nil {
 			return nil, err
 		}
@@ -214,6 +218,45 @@ func ChangedFields(source map[string]interface{}, fields map[string]string) map[
 type ChunkStore interface {
 	ScanChunks(ctx context.Context, indexName, datasetID string, opts elasticsearch.ScanOptions, fn func(id string, source map[string]interface{}) error) error
 	UpdateChunkFields(ctx context.Context, indexName string, updates []elasticsearch.ChunkFieldUpdate) (int, []string, error)
+	FirstChunkText(ctx context.Context, indexName, datasetID, docID string) (string, bool, error)
+}
+
+// titleStems resolves and caches the title stem of each document a run meets,
+// so a document's first chunk is read once however many chunks it has.
+type titleStems struct {
+	store     ChunkStore
+	indexName string
+	datasetID string
+	stems     map[string]string
+	// withoutHead counts the documents whose first chunk is unknown.
+	withoutHead int
+}
+
+// of returns the title stem of the chunk's document, or "" when the chunk
+// does not name its document.
+func (t *titleStems) of(ctx context.Context, source map[string]interface{}) (string, error) {
+	name, _ := source["docnm_kwd"].(string)
+	if strings.TrimSpace(name) == "" {
+		return "", nil
+	}
+	docID, _ := source["doc_id"].(string)
+	if docID == "" {
+		return component.TitleStem(name, ""), nil
+	}
+	key := docID + "\x00" + name
+	if stem, ok := t.stems[key]; ok {
+		return stem, nil
+	}
+	head, found, err := t.store.FirstChunkText(ctx, t.indexName, t.datasetID, docID)
+	if err != nil {
+		return "", fmt.Errorf("document %s: %w", docID, err)
+	}
+	if !found {
+		t.withoutHead++
+	}
+	stem := component.TitleStem(name, head)
+	t.stems[key] = stem
+	return stem, nil
 }
 
 // Dataset is what a run needs to know about the dataset it converts.
@@ -249,6 +292,7 @@ func RunDataset(ctx context.Context, store ChunkStore, ds Dataset, opts Options,
 	fmt.Fprintf(out, "retokenize: dataset %s (%s) language=%s index=%s slice=%d/%d\n", ds.Name, ds.ID, language, indexName, opts.Slice, slices)
 
 	tok := tokenizer.New(language)
+	stems := &titleStems{store: store, indexName: indexName, datasetID: ds.ID, stems: map[string]string{}}
 	var res Result
 	var batch []elasticsearch.ChunkFieldUpdate
 	started := time.Now()
@@ -283,7 +327,11 @@ func RunDataset(ctx context.Context, store ChunkStore, ds Dataset, opts Options,
 	}
 	err := store.ScanChunks(ctx, indexName, ds.ID, scan, func(id string, source map[string]interface{}) error {
 		res.Scanned++
-		fields, err := ChunkFields(tok, source)
+		titleStem, err := stems.of(ctx, source)
+		if err != nil {
+			return fmt.Errorf("chunk %s: %w", id, err)
+		}
+		fields, err := ChunkFields(tok, source, titleStem)
 		if err != nil {
 			return fmt.Errorf("chunk %s: %w", id, err)
 		}
@@ -309,6 +357,9 @@ func RunDataset(ctx context.Context, store ChunkStore, ds Dataset, opts Options,
 	verb := "updated"
 	if opts.DryRun {
 		verb = "would be updated"
+	}
+	if stems.withoutHead > 0 {
+		fmt.Fprintf(out, "retokenize: %d documents have no chunk with chunk_order_int and text; their titles come from the document name only\n", stems.withoutHead)
 	}
 	fmt.Fprintf(out, "retokenize: done: %d chunks scanned, %d %s, %d failed in %.0fs\n", res.Scanned, res.Updated, verb, res.Failed, time.Since(started).Seconds())
 	return res, nil
