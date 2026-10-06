@@ -432,3 +432,26 @@ func TestSearchAggregationReplacesAdmittedStandIn(t *testing.T) {
 		t.Fatalf("doc_aggs = %v, want %v", kb.DocAggs, want)
 	}
 }
+
+// The client resolves a document's network-drive root from the dataset its doc_aggs
+// entry names, so every path that lists a document names its dataset when the chunk
+// carries one — including an entry first listed from a claim row without it.
+func TestDocAggsNameTheDataset(t *testing.T) {
+	kb := &Kbinfos{}
+	kb.Admit(func(p *PoolAdmitter) {
+		p.Add(map[string]any{"chunk_id": "claim_1", "content_with_weight": "claim", "doc_id": "d1"})
+		p.Add(map[string]any{"chunk_id": "c1", "content_with_weight": "one", "doc_id": "d1", "docnm_kwd": "Report.pdf", "kb_id": "kb1"})
+	})
+	want := []map[string]any{{"doc_id": "d1", "doc_name": "Report.pdf", "count": 2, "dataset_id": "kb1", "kb_id": "kb1"}}
+	if fmt.Sprint(kb.DocAggs) != fmt.Sprint(want) {
+		t.Fatalf("pool doc_aggs = %v, want %v", kb.DocAggs, want)
+	}
+
+	aggs := DocAggs([]map[string]any{{"doc_id": "d2", "docnm_kwd": "Notes.md", "kb_id": "kb2", "content_with_weight": "abc"}})
+	if len(aggs) != 1 || aggs[0]["dataset_id"] != "kb2" || aggs[0]["kb_id"] != "kb2" {
+		t.Fatalf("search doc_aggs = %v", aggs)
+	}
+	if aggs := DocAggs([]map[string]any{{"doc_id": "d3", "content_with_weight": "abc"}}); len(aggs) != 1 || aggs[0]["dataset_id"] != nil {
+		t.Fatalf("doc_aggs without a dataset = %v", aggs)
+	}
+}

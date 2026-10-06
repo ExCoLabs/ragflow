@@ -4668,12 +4668,13 @@ func (s *ChatPipelineService) fetchAggregateChunks(
 		chunks = append(chunks, chunk)
 
 		// doc_aggs aggregation: group by doc_id, count occurrences,
-		// first-seen doc_name wins.
+		// first-seen doc_name and dataset win.
 		if entry, ok := docAggMap[fmt.Sprintf("%v", docID)]; ok {
 			entry["count"] = entry["count"].(int) + 1
 		} else {
 			docAggMap[fmt.Sprintf("%v", docID)] = map[string]interface{}{
 				"doc_name": docName,
+				"kb_id":    kid,
 				"count":    1,
 			}
 		}
@@ -4681,16 +4682,28 @@ func (s *ChatPipelineService) fetchAggregateChunks(
 
 	docAggs = make([]map[string]interface{}, 0, len(docAggMap))
 	for did, d := range docAggMap {
-		docAggs = append(docAggs, map[string]interface{}{
-			"doc_id":   did,
-			"doc_name": d["doc_name"],
-			"count":    d["count"],
-		})
+		docAggs = append(docAggs, sqlDocAgg(did, d))
 	}
 	common.Debug("SQL retrieval: aggregate secondary fetch produced chunks",
 		zap.Int("chunks", len(chunks)),
 		zap.Int("doc_aggs", len(docAggs)))
 	return chunks, docAggs
+}
+
+// sqlDocAgg is the doc_aggs entry of one document an SQL answer drew rows
+// from. The dataset is named like the other retrieval paths name it, when
+// known, so the client can resolve the document's network-drive root.
+func sqlDocAgg(docID string, d map[string]interface{}) map[string]interface{} {
+	agg := map[string]interface{}{
+		"doc_id":   docID,
+		"doc_name": d["doc_name"],
+		"count":    d["count"],
+	}
+	if kid, _ := d["kb_id"].(string); kid != "" {
+		agg["dataset_id"] = kid
+		agg["kb_id"] = kid
+	}
+	return agg
 }
 
 // -----------------------------------------------------------------------
@@ -4846,19 +4859,17 @@ func (s *ChatPipelineService) buildSQLReference(
 			if e, ok := docAggMap[docIDKey]; ok {
 				e["count"] = e["count"].(int) + 1
 			} else {
+				kid, _ := entry["kb_id"].(string)
 				docAggMap[docIDKey] = map[string]interface{}{
 					"doc_name": dn,
+					"kb_id":    kid,
 					"count":    1,
 				}
 			}
 		}
 		docAggs := make([]map[string]interface{}, 0, len(docAggMap))
 		for did, d := range docAggMap {
-			docAggs = append(docAggs, map[string]interface{}{
-				"doc_id":   did,
-				"doc_name": d["doc_name"],
-				"count":    d["count"],
-			})
+			docAggs = append(docAggs, sqlDocAgg(did, d))
 		}
 		ref["chunks"] = chunksFormat(chunks)
 		ref["doc_aggs"] = docAggs

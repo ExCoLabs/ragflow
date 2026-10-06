@@ -2045,9 +2045,10 @@ func DocAggs(chunks []map[string]any) []map[string]any {
 		return nil
 	}
 	type stat struct {
-		count int
-		chars int
-		name  string
+		count   int
+		chars   int
+		name    string
+		dataset string
 	}
 	order := make([]string, 0, 8)
 	stats := map[string]*stat{}
@@ -2064,7 +2065,7 @@ func DocAggs(chunks []map[string]any) []map[string]any {
 		}
 		s, ok := stats[id]
 		if !ok {
-			s = &stat{name: DocTitleOf(c)}
+			s = &stat{name: DocTitleOf(c), dataset: DatasetIDOf(c)}
 			stats[id] = s
 			order = append(order, id)
 		}
@@ -2077,12 +2078,14 @@ func DocAggs(chunks []map[string]any) []map[string]any {
 		// Field names match runtime's referenceDocAggsFromRetrieval
 		// (doc_id / doc_name / count) so these aggregations can be handed
 		// straight to CanvasState.SetRetrievalReferences without translation.
-		out = append(out, map[string]any{
+		agg := map[string]any{
 			"doc_id":     id,
 			"doc_name":   s.name,
 			"count":      s.count,
 			"char_count": s.chars,
-		})
+		}
+		setDocAggDataset(agg, s.dataset)
+		out = append(out, agg)
 	}
 	return out
 }

@@ -758,8 +758,8 @@ func (p *PoolAdmitter) Add(c map[string]any) bool {
 
 // admitDocAggLocked lists c's document in DocAggs when no entry names it yet. An
 // existing entry is left as the search aggregated it, except that a missing doc_name
-// is filled in: a claim row carries a doc_id but no title, and a later passage of the
-// same document supplies the name the client puts on the link. Caller holds k.mu.
+// or dataset is filled in: a claim row carries a doc_id but no title, and a later
+// passage of the same document supplies the name the client puts on the link. Caller holds k.mu.
 func (k *Kbinfos) admitDocAggLocked(c map[string]any) {
 	docID := DocIDOf(c)
 	if docID == "" {
@@ -773,6 +773,9 @@ func (k *Kbinfos) admitDocAggLocked(c map[string]any) {
 		if existing, _ := agg["doc_name"].(string); existing == "" && name != "" {
 			agg["doc_name"] = name
 		}
+		if _, known := agg["dataset_id"]; !known {
+			setDocAggDataset(agg, DatasetIDOf(c))
+		}
 		if k.admittedAggs[docID] {
 			if n, ok := agg["count"].(int); ok {
 				agg["count"] = n + 1
@@ -780,7 +783,9 @@ func (k *Kbinfos) admitDocAggLocked(c map[string]any) {
 		}
 		return
 	}
-	k.DocAggs = append(k.DocAggs, map[string]any{"doc_id": docID, "doc_name": name, "count": 1})
+	agg := map[string]any{"doc_id": docID, "doc_name": name, "count": 1}
+	setDocAggDataset(agg, DatasetIDOf(c))
+	k.DocAggs = append(k.DocAggs, agg)
 	if k.admittedAggs == nil {
 		k.admittedAggs = map[string]bool{}
 	}

@@ -60,6 +60,16 @@ func DatasetIDOf(c map[string]any) string {
 	return ChunkAttr(c, "dataset_id", "kb_id", "knowledgebase_id")
 }
 
+// setDocAggDataset names the dataset of a doc_aggs entry under the keys the
+// other retrieval paths use (dataset_id, kb_id); the client resolves the
+// document's network-drive root from it. An unknown dataset adds nothing.
+func setDocAggDataset(agg map[string]any, datasetID string) {
+	if datasetID != "" {
+		agg["dataset_id"] = datasetID
+		agg["kb_id"] = datasetID
+	}
+}
+
 // DocTitleOf: exactly: docnm_kwd / doc_title / title /
 // document_name (the same four keys, in the same order). Go chunk retrieval
 // carries the title under docnm_kwd, so no extra alias is needed.
