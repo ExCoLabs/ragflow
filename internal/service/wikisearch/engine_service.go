@@ -136,7 +136,7 @@ func (s *engineWikiService) QueryPages(ctx context.Context, tenantID string, dat
 		out.Chunks = append(out.Chunks, chunk)
 		if docID != "" && !seenDoc[docID] {
 			seenDoc[docID] = true
-			out.DocAggs = append(out.DocAggs, map[string]interface{}{"doc_id": docID, "doc_name": firstString(row["docnm_kwd"])})
+			out.DocAggs = append(out.DocAggs, map[string]interface{}{"doc_id": docID, "doc_name": firstString(row["docnm_kwd"]), "dataset_id": datasetID, "kb_id": datasetID})
 		}
 	}
 	return out, nil

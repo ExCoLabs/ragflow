@@ -51,7 +51,13 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover';
+import CopyToClipboard from '@/components/copy-to-clipboard';
 import { useFetchDocumentThumbnailsByIds } from '@/hooks/use-document-request';
+import { useSystemConfig } from '@/hooks/use-system-request';
+import {
+  buildExplorerPath,
+  resolveFileLinkRoot,
+} from '@/utils/source-locate';
 import classNames from 'classnames';
 import { omit } from 'lodash';
 import pipe from 'lodash/fp/pipe';
@@ -82,6 +88,7 @@ const MarkdownContent = ({
   clickDocumentButton?: (documentId: string, chunk: IReferenceChunk) => void;
 }) => {
   const { t } = useTranslation();
+  const { config } = useSystemConfig();
   const { setDocumentIds, data: fileThumbnails } =
     useFetchDocumentThumbnailsByIds();
   const contentWithCursor = useMemo(() => {
@@ -181,6 +188,10 @@ const MarkdownContent = ({
         documentId,
         document,
       } = getReferenceInfo(chunkIndex);
+      const fileLinkRoot = resolveFileLinkRoot(
+        config,
+        document?.dataset_id ?? document?.kb_id ?? chunkItem?.dataset_id,
+      );
 
       return (
         <div key={chunkItem?.id} className="flex gap-2">
@@ -238,13 +249,25 @@ const MarkdownContent = ({
                 >
                   {document?.doc_name}
                 </Button>
+                {fileLinkRoot && document?.doc_name && (
+                  <span
+                    title={buildExplorerPath(fileLinkRoot, document.doc_name)}
+                  >
+                    <CopyToClipboard
+                      text={buildExplorerPath(
+                        fileLinkRoot,
+                        document.doc_name,
+                      )}
+                    />
+                  </span>
+                )}
               </div>
             )}
           </div>
         </div>
       );
     },
-    [getReferenceInfo, handleDocumentButtonClick],
+    [getReferenceInfo, handleDocumentButtonClick, config],
   );
 
   const renderReference = useCallback(

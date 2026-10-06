@@ -23,7 +23,11 @@ import {
 } from '@/constants/markdown-remark-plugins';
 import { IReferenceChunk, IReferenceObject } from '@/interfaces/database/chat';
 import { getExtension } from '@/utils/document-util';
-import { supportsSourceLocate } from '@/utils/source-locate';
+import {
+  buildExplorerPath,
+  resolveFileLinkRoot,
+  supportsSourceLocate,
+} from '@/utils/source-locate';
 import { downloadFileFromBlob } from '@/utils/file-util';
 import request from '@/utils/request';
 import DOMPurify from 'dompurify';
@@ -53,6 +57,8 @@ import { getDirAttribute } from '@/utils/text-direction';
 
 import { useFetchDocumentThumbnailsByIds } from '@/hooks/use-document-request';
 import { useLoadingPause } from '@/hooks/use-loading-pause';
+import { useSystemConfig } from '@/hooks/use-system-request';
+import CopyToClipboard from '../copy-to-clipboard';
 import { cn } from '@/lib/utils';
 import { ReferenceDuplicates } from '@/components/reference-duplicates';
 import classNames from 'classnames';
@@ -199,6 +205,7 @@ function MarkdownContent({
   disableMath?: boolean;
 }) {
   const { t } = useTranslation();
+  const { config } = useSystemConfig();
   const { setDocumentIds, data: fileThumbnails } =
     useFetchDocumentThumbnailsByIds();
   const contentWithCursor = useMemo(() => {
@@ -312,6 +319,10 @@ function MarkdownContent({
         documentId,
         document,
       } = getReferenceInfo(chunkIndex);
+      const fileLinkRoot = resolveFileLinkRoot(
+        config,
+        document?.dataset_id ?? document?.kb_id ?? chunkItem?.dataset_id,
+      );
 
       return (
         <div key={chunkItem?.id} className="flex gap-2">
@@ -367,6 +378,18 @@ function MarkdownContent({
                 >
                   {document?.doc_name}
                 </Button>
+                {fileLinkRoot && document?.doc_name && (
+                  <span
+                    title={buildExplorerPath(fileLinkRoot, document.doc_name)}
+                  >
+                    <CopyToClipboard
+                      text={buildExplorerPath(
+                        fileLinkRoot,
+                        document.doc_name,
+                      )}
+                    />
+                  </span>
+                )}
               </div>
             )}
             <ReferenceDuplicates duplicates={chunkItem?.duplicates} />
@@ -374,7 +397,7 @@ function MarkdownContent({
         </div>
       );
     },
-    [getReferenceInfo, handleDocumentButtonClick],
+    [getReferenceInfo, handleDocumentButtonClick, config],
   );
 
   const renderReference = useCallback(

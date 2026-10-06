@@ -21,3 +21,24 @@ export const SourceLocateExtensions = ['pdf', 'xlsx', 'xls'] as const;
 export const supportsSourceLocate = (ext?: string) =>
   !!ext &&
   (SourceLocateExtensions as readonly string[]).includes(ext.toLowerCase());
+
+/**
+ * Maps a stored document name (relative path, '/'-separated) to a UNC path
+ * under the configured network-drive root (system config `fileLinkRoot`).
+ */
+export const buildExplorerPath = (root: string, docName: string) =>
+  `${root.replace(/[\\/]+$/, '')}\\${docName.replace(/[\\/]+/g, '\\')}`;
+
+interface FileLinkConfig {
+  fileLinkRoot?: string;
+  fileLinkRoots?: Record<string, string>;
+}
+
+/** Per-dataset network-drive root, falling back to the deployment-wide one. */
+export const resolveFileLinkRoot = (
+  config: FileLinkConfig | undefined,
+  datasetId?: string,
+) =>
+  (datasetId && config?.fileLinkRoots?.[datasetId]) ||
+  config?.fileLinkRoot ||
+  undefined;

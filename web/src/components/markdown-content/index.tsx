@@ -40,6 +40,12 @@ import 'katex/dist/katex.min.css'; // `rehype-katex` does not import the CSS for
 
 import { useFetchDocumentThumbnailsByIds } from '@/hooks/use-document-request';
 import { useLoadingPause } from '@/hooks/use-loading-pause';
+import { useSystemConfig } from '@/hooks/use-system-request';
+import {
+  buildExplorerPath,
+  resolveFileLinkRoot,
+} from '@/utils/source-locate';
+import CopyToClipboard from '../copy-to-clipboard';
 import {
   escapeUnmatchedAngleBrackets,
   normalizeCitationMarkers,
@@ -146,6 +152,7 @@ const MarkdownContent = ({
   disableMath?: boolean;
 }) => {
   const { t } = useTranslation();
+  const { config } = useSystemConfig();
   const { setDocumentIds, data: fileThumbnails } =
     useFetchDocumentThumbnailsByIds();
   const contentWithCursor = useMemo(() => {
@@ -246,6 +253,10 @@ const MarkdownContent = ({
         documentId,
         document,
       } = getReferenceInfo(chunkIndex);
+      const fileLinkRoot = resolveFileLinkRoot(
+        config,
+        document?.dataset_id ?? document?.kb_id ?? chunkItem?.dataset_id,
+      );
 
       return (
         <div key={chunkItem?.id} className="flex gap-2">
@@ -316,6 +327,18 @@ const MarkdownContent = ({
                 >
                   {document?.doc_name}
                 </Button>
+                {fileLinkRoot && document?.doc_name && (
+                  <span
+                    title={buildExplorerPath(fileLinkRoot, document.doc_name)}
+                  >
+                    <CopyToClipboard
+                      text={buildExplorerPath(
+                        fileLinkRoot,
+                        document.doc_name,
+                      )}
+                    />
+                  </span>
+                )}
               </section>
             )}
             <ReferenceDuplicates duplicates={chunkItem?.duplicates} />
@@ -323,7 +346,7 @@ const MarkdownContent = ({
         </div>
       );
     },
-    [getReferenceInfo, handleDocumentButtonClick],
+    [getReferenceInfo, handleDocumentButtonClick, config],
   );
 
   const renderReference = useCallback(

@@ -478,9 +478,11 @@ func agenticDocAggs(chunks []map[string]interface{}) []interface{} {
 		if _, ok := agg[docID]; !ok {
 			order = append(order, docID)
 			agg[docID] = map[string]interface{}{
-				"doc_id":   docID,
-				"doc_name": ck["docnm_kwd"],
-				"count":    0,
+				"doc_id":     docID,
+				"doc_name":   ck["docnm_kwd"],
+				"dataset_id": ck["kb_id"],
+				"kb_id":      ck["kb_id"],
+				"count":      0,
 			}
 		}
 		if n, ok := agg[docID]["count"].(int); ok {

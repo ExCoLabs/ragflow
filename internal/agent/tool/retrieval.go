@@ -607,9 +607,11 @@ func referenceDocAggsFromRetrieval(chunks []RetrievalChunk) []map[string]any {
 		agg, exists := byDocID[key]
 		if !exists {
 			agg = map[string]any{
-				"count":    0,
-				"doc_id":   c.DocumentID,
-				"doc_name": c.DocumentName,
+				"count":      0,
+				"doc_id":     c.DocumentID,
+				"doc_name":   c.DocumentName,
+				"dataset_id": c.DatasetID,
+				"kb_id":      c.DatasetID,
 			}
 			if c.URL != "" {
 				agg["url"] = c.URL

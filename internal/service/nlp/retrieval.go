@@ -431,6 +431,7 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 	if req.Aggs != nil && *req.Aggs {
 		docAggsMap := make(map[string]struct {
 			docID string
+			kbID  string
 			count int
 		})
 		for _, i := range validIdx {
@@ -450,14 +451,19 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 			if v, ok := chunk["doc_id"].(string); ok {
 				docID = v
 			}
+			kbID := ""
+			if v, ok := chunk["kb_id"].(string); ok {
+				kbID = v
+			}
 			if entry, exists := docAggsMap[docName]; exists {
 				entry.count++
 				docAggsMap[docName] = entry
 			} else {
 				docAggsMap[docName] = struct {
 					docID string
+					kbID  string
 					count int
-				}{docID: docID, count: 1}
+				}{docID: docID, kbID: kbID, count: 1}
 			}
 		}
 
@@ -465,11 +471,12 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		type docAggEntry struct {
 			docName string
 			docID   string
+			kbID    string
 			count   int
 		}
 		docAggsList := make([]docAggEntry, 0, len(docAggsMap))
 		for docName, entry := range docAggsMap {
-			docAggsList = append(docAggsList, docAggEntry{docName: docName, docID: entry.docID, count: entry.count})
+			docAggsList = append(docAggsList, docAggEntry{docName: docName, docID: entry.docID, kbID: entry.kbID, count: entry.count})
 		}
 		sort.Slice(docAggsList, func(i, j int) bool {
 			return docAggsList[i].count > docAggsList[j].count
@@ -478,9 +485,11 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		docAggs = make([]map[string]interface{}, 0, len(docAggsList))
 		for _, entry := range docAggsList {
 			docAggs = append(docAggs, map[string]interface{}{
-				"doc_name": entry.docName,
-				"doc_id":   entry.docID,
-				"count":    entry.count,
+				"doc_name":   entry.docName,
+				"doc_id":     entry.docID,
+				"dataset_id": entry.kbID,
+				"kb_id":      entry.kbID,
+				"count":      entry.count,
 			})
 		}
 	} else {
