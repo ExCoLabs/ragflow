@@ -96,6 +96,7 @@ const (
 	EnvE2BAPIKey                         = "E2B_API_KEY"
 	EnvE2BAccessToken                    = "E2B_ACCESS_TOKEN"
 	EnvE2BDomain                         = "E2B_DOMAIN"
+	EnvFileLinkRoot                      = "FILE_LINK_ROOT"
 	EnvTenkiAPIKey                       = "TENKI_API_KEY"
 	EnvTenkiAPIURL                       = "TENKI_API_URL"
 	EnvTenkiImage                        = "TENKI_IMAGE"

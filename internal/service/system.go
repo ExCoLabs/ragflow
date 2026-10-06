@@ -47,6 +47,9 @@ func NewSystemService() *SystemService {
 type ConfigResponse struct {
 	EnableRegister       bool `json:"registerEnabled"`
 	DisablePasswordLogin bool `json:"disablePasswordLogin"`
+	// FileLinkRoot is prepended to a document's stored relative path to form
+	// a network-drive (UNC) path users can open in a local file explorer.
+	FileLinkRoot string `json:"fileLinkRoot,omitempty"`
 }
 
 // GetConfig get system configuration
@@ -55,6 +58,7 @@ func (s *SystemService) GetConfig() (*ConfigResponse, error) {
 	return &ConfigResponse{
 		EnableRegister:       cfg.EnableRegister(),
 		DisablePasswordLogin: cfg.DisablePasswordLogin(),
+		FileLinkRoot:         common.GetEnv(common.EnvFileLinkRoot),
 	}, nil
 }
 

@@ -23,7 +23,10 @@ import {
 } from '@/constants/markdown-remark-plugins';
 import { IReferenceChunk, IReferenceObject } from '@/interfaces/database/chat';
 import { getExtension } from '@/utils/document-util';
-import { supportsSourceLocate } from '@/utils/source-locate';
+import {
+  buildExplorerPath,
+  supportsSourceLocate,
+} from '@/utils/source-locate';
 import { downloadFileFromBlob } from '@/utils/file-util';
 import request from '@/utils/request';
 import DOMPurify from 'dompurify';
@@ -53,6 +56,8 @@ import { getDirAttribute } from '@/utils/text-direction';
 
 import { useFetchDocumentThumbnailsByIds } from '@/hooks/use-document-request';
 import { useLoadingPause } from '@/hooks/use-loading-pause';
+import { useSystemConfig } from '@/hooks/use-system-request';
+import CopyToClipboard from '../copy-to-clipboard';
 import { cn } from '@/lib/utils';
 import classNames from 'classnames';
 import { omit } from 'lodash';
@@ -198,6 +203,8 @@ function MarkdownContent({
   disableMath?: boolean;
 }) {
   const { t } = useTranslation();
+  const { config } = useSystemConfig();
+  const fileLinkRoot: string | undefined = config?.fileLinkRoot;
   const { setDocumentIds, data: fileThumbnails } =
     useFetchDocumentThumbnailsByIds();
   const contentWithCursor = useMemo(() => {
@@ -366,13 +373,25 @@ function MarkdownContent({
                 >
                   {document?.doc_name}
                 </Button>
+                {fileLinkRoot && document?.doc_name && (
+                  <span
+                    title={buildExplorerPath(fileLinkRoot, document.doc_name)}
+                  >
+                    <CopyToClipboard
+                      text={buildExplorerPath(
+                        fileLinkRoot,
+                        document.doc_name,
+                      )}
+                    />
+                  </span>
+                )}
               </div>
             )}
           </div>
         </div>
       );
     },
-    [getReferenceInfo, handleDocumentButtonClick],
+    [getReferenceInfo, handleDocumentButtonClick, fileLinkRoot],
   );
 
   const renderReference = useCallback(

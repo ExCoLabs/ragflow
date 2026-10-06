@@ -16,15 +16,24 @@
 
 import { Card, CardContent } from '@/components/ui/card';
 import { useSetModalState } from '@/hooks/common-hooks';
+import { useSystemConfig } from '@/hooks/use-system-request';
 import { Docagg } from '@/interfaces/database/chat';
 import PdfDrawer from '@/pages/next-search/document-preview-modal';
 import { middleEllipsis } from '@/utils/common-util';
-import { useState } from 'react';
+import { buildExplorerPath } from '@/utils/source-locate';
+import { useCallback, useState } from 'react';
+import CopyToClipboard from '../copy-to-clipboard';
 import FileIcon from '../file-icon';
 
 export function ReferenceDocumentList({ list }: { list: Docagg[] }) {
   const { visible, showModal, hideModal } = useSetModalState();
+  const { config } = useSystemConfig();
+  const fileLinkRoot: string | undefined = config?.fileLinkRoot;
   const [selectedDocument, setSelectedDocument] = useState<Docagg>();
+  const handleCopyAreaClick = useCallback(
+    (e: React.MouseEvent) => e.stopPropagation(),
+    [],
+  );
   return (
     <section className="flex gap-3 flex-wrap">
       {list.map((item) => (
@@ -49,6 +58,16 @@ export function ReferenceDocumentList({ list }: { list: Docagg[] }) {
             <div className="text-text-sub-title-invert">
               {middleEllipsis(item.doc_name)}
             </div>
+            {fileLinkRoot && (
+              <span
+                title={buildExplorerPath(fileLinkRoot, item.doc_name)}
+                onClick={handleCopyAreaClick}
+              >
+                <CopyToClipboard
+                  text={buildExplorerPath(fileLinkRoot, item.doc_name)}
+                />
+              </span>
+            )}
           </CardContent>
         </Card>
       ))}
