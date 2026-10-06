@@ -480,6 +480,21 @@ func RepairChunkIDCitations(answer string, chunks []map[string]interface{}) stri
 	return b.String()
 }
 
+// chunkIDCitationIDs returns the chunk ids named by the answer's chunk-id
+// citation markers (see chunkIDCitationPattern), in order of appearance.
+func chunkIDCitationIDs(answer string) []string {
+	var ids []string
+	for _, m := range chunkIDCitationPattern.FindAllStringSubmatch(answer, -1) {
+		for _, id := range m[1:] {
+			if id != "" {
+				ids = append(ids, id)
+				break
+			}
+		}
+	}
+	return ids
+}
+
 // chunkCitationID returns a pool chunk's id under the keys the harness uses
 // (chunk_id, then id — harness.ChunkIDOf's order).
 func chunkCitationID(c map[string]interface{}) string {

@@ -205,12 +205,17 @@ func (s *ChatPipelineService) agenticRag(
 		// Citations off means neither the [ID:N] markers nor the reference
 		// payload, matching what the regular pipeline ships when quote is
 		// false. The answer text is still whatever the agent wrote.
+		// A citation marker naming a chunk id ("【ID:a1b2…】") is dropped then,
+		// as it would otherwise reach the user as literal text.
 		answer := final
 		reference := map[string]interface{}{}
 		if quote {
 			reference, answer = s.buildAgenticReference(ctx, chat.TenantID, chatDatasetIDs(chat), final)
-		} else if len(agentic_rag.ExtractCitedChunkIDs(final)) > 0 {
-			common.InfoCtx(ctx, "agentic citations suppressed by quote=false")
+		} else {
+			if len(agenticCitedChunkIDs(final)) > 0 {
+				common.InfoCtx(ctx, "agentic citations suppressed by quote=false")
+			}
+			answer = RepairChunkIDCitations(final, nil)
 		}
 		emitResult(AsyncChatResult{Answer: answer, Reference: reference, Final: true})
 	}()
@@ -348,11 +353,7 @@ func convertMessagesToEino(messages []map[string]interface{}) []*schema.Message 
 	return out
 }
 
-// buildAgenticReference turns the answer's own chunk_id citations into the
-// reference payload the naive pipeline ships, and rewrites the answer with
-// [ID:N] markers. With no resolvable citations both come back unchanged: an
-// empty reference keeps the SSE shape the UI expects, and unmarked chunk_id
-// text is the honest state of an answer whose sources could not be loaded.
+// chatDatasetIDs is the dialog's knowledge base scope.
 func chatDatasetIDs(chat *entity.Chat) []string {
 	if chat == nil {
 		return nil
@@ -366,14 +367,44 @@ func chatDatasetIDs(chat *entity.Chat) []string {
 	return ids
 }
 
+// buildAgenticReference turns the answer's own chunk_id citations into the
+// reference payload the naive pipeline ships, and rewrites the answer with
+// [ID:N] markers. With no resolvable citations the reference is empty, which
+// keeps the SSE shape the UI expects, and chunk_id text stays unmarked: the
+// honest state of an answer whose sources could not be loaded.
 func (s *ChatPipelineService) buildAgenticReference(ctx context.Context, tenantID string, datasetIDs []string, final string) (map[string]interface{}, string) {
-	cited := agentic_rag.ExtractCitedChunkIDs(final)
+	cited := agenticCitedChunkIDs(final)
 	if len(cited) == 0 {
 		return map[string]interface{}{}, final
 	}
-	rows := fetchChunksByIDs(ctx, tenantID, datasetIDs, cited)
+	return agenticReferenceFromRows(ctx, final, cited, fetchChunksByIDs(ctx, tenantID, datasetIDs, cited))
+}
+
+// agenticCitedChunkIDs is every chunk id the answer cites, in first-appearance
+// order: the `chunk_id: <id>` provenance the agent is asked to write, then the
+// ids of citation markers that name a chunk ("【ID:a1b2…】"), which models copy
+// from tool output in their own bracket style.
+func agenticCitedChunkIDs(final string) []string {
+	cited := agentic_rag.ExtractCitedChunkIDs(final)
+	seen := make(map[string]struct{}, len(cited))
+	for _, id := range cited {
+		seen[id] = struct{}{}
+	}
+	for _, id := range chunkIDCitationIDs(final) {
+		if _, dup := seen[id]; !dup {
+			seen[id] = struct{}{}
+			cited = append(cited, id)
+		}
+	}
+	return cited
+}
+
+// agenticReferenceFromRows builds the reference payload from the cited chunks
+// that loaded and numbers the answer's citations against it. Chunk-id markers
+// become [ID:N] of their chunk, or are dropped when it did not load.
+func agenticReferenceFromRows(ctx context.Context, final string, cited []string, rows []map[string]interface{}) (map[string]interface{}, string) {
 	if len(rows) == 0 {
-		return map[string]interface{}{}, final
+		return map[string]interface{}{}, RepairChunkIDCitations(final, nil)
 	}
 	// Keep only ids that actually resolved, preserving first-appearance
 	// order: the marker number IS the chunk's position in the payload array.
@@ -390,13 +421,14 @@ func (s *ChatPipelineService) buildAgenticReference(ctx context.Context, tenantI
 		}
 	}
 	if len(resolved) == 0 {
-		return map[string]interface{}{}, final
+		return map[string]interface{}{}, RepairChunkIDCitations(final, nil)
 	}
 	ordered := make([]map[string]interface{}, 0, len(resolved))
 	for _, id := range resolved {
 		ordered = append(ordered, byID[id])
 	}
 	marked := agentic_rag.InsertCitationMarkers(final, resolved)
+	marked = RepairChunkIDCitations(marked, ordered)
 	common.InfoCtx(ctx, "agentic citations built",
 		zap.Int("cited", len(cited)),
 		zap.Int("resolved", len(resolved)),

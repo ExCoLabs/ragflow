@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -681,5 +682,43 @@ func TestDecorateHarnessAnswerDropsCitationsForNotFoundAnswer(t *testing.T) {
 	chunks, _ := res.Reference["chunks"].([]map[string]interface{})
 	if len(chunks) != 1 || chunks[0]["id"] != "c0" {
 		t.Fatalf("reference chunks = %#v, want the evidence passage", res.Reference["chunks"])
+	}
+}
+
+// The agentic answer cites with `chunk_id: <id>`, but a model also copies ids
+// into its own marker style. Both resolve against the same reference payload,
+// and a marker whose chunk did not load is dropped instead of shown as text.
+func TestAgenticReferenceResolvesChunkIDMarkers(t *testing.T) {
+	final := "- Ojha bowled spin `chunk_id: aaa111`\n" +
+		"- He debuted in 2009 【ID:bbb222】\n" +
+		"- Unloaded claim [ID:ccc333]"
+	cited := agenticCitedChunkIDs(final)
+	if !reflect.DeepEqual(cited, []string{"aaa111", "bbb222", "ccc333"}) {
+		t.Fatalf("cited = %v", cited)
+	}
+	rows := []map[string]interface{}{
+		{"id": "bbb222", "doc_id": "d2", "docnm_kwd": "b.md", "content_with_weight": "b"},
+		{"id": "aaa111", "doc_id": "d1", "docnm_kwd": "a.md", "content_with_weight": "a"},
+	}
+
+	reference, answer := agenticReferenceFromRows(t.Context(), final, cited, rows)
+
+	want := "- Ojha bowled spin `chunk_id: aaa111` [ID:0]\n" +
+		"- He debuted in 2009 [ID:1]\n" +
+		"- Unloaded claim "
+	if answer != want {
+		t.Errorf("answer = %q, want %q", answer, want)
+	}
+	chunks := reference["chunks"].([]map[string]interface{})
+	if len(chunks) != 2 || chunks[0]["id"] != "aaa111" || chunks[1]["id"] != "bbb222" {
+		t.Errorf("reference chunks = %v", chunks)
+	}
+	if aggs := reference["doc_aggs"].([]interface{}); len(aggs) != 2 {
+		t.Errorf("doc_aggs = %v", aggs)
+	}
+
+	empty, answer := agenticReferenceFromRows(t.Context(), final, cited, nil)
+	if len(empty) != 0 || strings.Contains(answer, "ID:") {
+		t.Errorf("without loaded chunks: reference = %v, answer = %q", empty, answer)
 	}
 }
