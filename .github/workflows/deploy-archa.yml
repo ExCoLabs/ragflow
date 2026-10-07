@@ -13,9 +13,6 @@ name: deploy-archa
 #   DEPLOY_HOST    - ragflow.archa.excolabs.com
 #   DEPLOY_USER    - debian
 #
-# The GHCR package ghcr.io/excolabs/ragflow must be public, or the VPS must be
-# `docker login ghcr.io`-ed, for the pull to succeed.
-#
 # Not covered: the CUDA GPU worker (archa deploy-gpu-worker.yml) is built
 # FROM ${RAGFLOW_IMAGE} on its own node and has to be rebuilt by hand.
 
@@ -158,16 +155,27 @@ jobs:
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
       # Pull before the backup so the service is down only for the recreate.
+      # The GHCR package is private: the pull authenticates with this job's
+      # GITHUB_TOKEN in a throwaway DOCKER_CONFIG, so no credential outlives the
+      # step on the VPS. The token arrives on stdin, never on a command line.
       # ops.py reads ~/archa/.env itself; .env is never sourced (it holds values
       # with spaces and is a secrets file).
       - name: Roll out ${{ env.IMAGE }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ssh -i ~/.ssh/id_deploy "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "IMAGE='${IMAGE}' SKIP_BACKUP='${SKIP_BACKUP}' bash -s" <<'REMOTE'
+            "IMAGE='${IMAGE}' SKIP_BACKUP='${SKIP_BACKUP}' GHCR_USER='${{ github.actor }}' sh -c 'read -r GHCR_TOKEN; export GHCR_TOKEN; exec bash -s'" \
+            < <(printf '%s\n' "${GHCR_TOKEN}"; cat <<'REMOTE'
           set -euo pipefail
           cd ~/archa
 
-          docker pull "${IMAGE}"
+          pull_config=$(mktemp -d)
+          trap 'rm -rf "${pull_config}"' EXIT
+          printf '%s' "${GHCR_TOKEN}" | DOCKER_CONFIG="${pull_config}" docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+          unset GHCR_TOKEN
+          DOCKER_CONFIG="${pull_config}" docker pull "${IMAGE}"
+          rm -rf "${pull_config}"
 
           if [ "${SKIP_BACKUP}" != "1" ]; then
             python3 ragflow/ops.py backup
@@ -184,6 +192,7 @@ jobs:
           docker compose up -d ragflow ragflow-worker
           docker compose ps ragflow ragflow-worker
           REMOTE
+          )
 
       # The web server's entrypoint runs DB migrations first, so allow it a while.
       - name: Wait for healthz
