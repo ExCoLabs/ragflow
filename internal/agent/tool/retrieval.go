@@ -65,6 +65,12 @@ type retrievalArgs struct {
 	MetaDataFilter           map[string]any `json:"meta_data_filter,omitempty"`
 	RetrievalFrom            string         `json:"retrieval_from,omitempty"`
 	EmptyResponse            string         `json:"empty_response,omitempty"`
+	// FunctionName is the agent-visible tool name from the DSL. It is not
+	// exposed to the model as part of the tool arguments.
+	FunctionName string `json:"-"`
+	// Description is the agent-visible tool description from the DSL. It is
+	// not exposed to the model as part of the tool arguments.
+	Description string `json:"-"`
 }
 
 // retrievalResult is the JSON shape returned to the model. The `_ERROR`
@@ -94,6 +100,8 @@ type chunkPayload struct {
 // surfaces ErrRetrievalServiceMissing.
 type RetrievalTool struct {
 	defaults retrievalArgs
+	name     string
+	desc     string
 }
 
 // NewRetrievalTool returns a RetrievalTool implementing eino's
@@ -108,15 +116,23 @@ func NewRetrievalToolWithDefaults(defaults retrievalArgs) *RetrievalTool {
 	if len(defaults.DatasetIDs) == 0 && len(defaults.KBIDs) != 0 {
 		defaults.DatasetIDs = append([]string(nil), defaults.KBIDs...)
 	}
-	return &RetrievalTool{defaults: defaults}
+	name := defaults.FunctionName
+	if strings.TrimSpace(name) == "" {
+		name = retrievalToolName
+	}
+	desc := defaults.Description
+	if strings.TrimSpace(desc) == "" {
+		desc = retrievalToolDescription
+	}
+	return &RetrievalTool{defaults: defaults, name: name, desc: desc}
 }
 
 // Info returns the tool's metadata for the chat model. The schema mirrors
 // the Python RetrievalParam ToolMeta (plan, field alignment).
 func (r *RetrievalTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
-		Name: retrievalToolName,
-		Desc: retrievalToolDescription,
+		Name: r.name,
+		Desc: r.desc,
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"query": {
 				Type:     schema.String,
@@ -194,6 +210,16 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	// ErrRetrievalServiceMissing; once a real impl is installed
 	// via SetRetrievalService (or SetSimpleRetrievalService for
 	// dev), the chunks flow through normally.
+	var diagnostics *common.MetadataFilterDiagnostic
+	if args.RetrievalFrom == "dataset" {
+		diagnostics = &common.MetadataFilterDiagnostic{}
+		if len(args.MetaDataFilter) == 0 {
+			diagnostics.Method = "disabled"
+			diagnostics.Status = "disabled"
+			diagnostics.Logic = "and"
+			diagnostics.Conditions = []map[string]interface{}{}
+		}
+	}
 	searchReq := RetrievalRequest{
 		Query:                    args.Query,
 		DatasetIDs:               args.DatasetIDs,
@@ -211,6 +237,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		RetrievalFrom:            args.RetrievalFrom,
 		UserID:                   args.UserID,
 		TenantID:                 retrievalTenantID(ctx),
+		Diagnostics:              diagnostics,
 	}
 
 	var chunks []RetrievalChunk
@@ -252,8 +279,25 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	// citation grounding call can read them. The recording is
 	// best-effort — when the canvas state is not
 	// attached (e.g. unit tests), we skip silently.
-	if state, sErr := runtime.GetStateFromContext(ctx); sErr == nil && state != nil && len(chunks) > 0 && args.RetrievalFrom == "dataset" {
+	if state, sErr := runtime.GetStateFromContext(ctx); sErr == nil && state != nil && args.RetrievalFrom == "dataset" {
 		state.SetRetrievalReferences(referenceChunksFromRetrieval(chunks), referenceDocAggsFromRetrieval(chunks))
+		if diagnostics != nil {
+			diagnostic := map[string]any{
+				"method":                 diagnostics.Method,
+				"status":                 diagnostics.Status,
+				"conditions":             diagnostics.Conditions,
+				"logic":                  diagnostics.Logic,
+				"matched_document_count": diagnostics.MatchedDocumentCount,
+				"tool_name":              retrievalToolName,
+				"query":                  args.Query,
+				"dataset_ids":            args.DatasetIDs,
+			}
+			if diagnostics.AppliedOn != "" {
+				// A filter on the chunks' metadata fields has no document count.
+				diagnostic["applied_on"] = diagnostics.AppliedOn
+			}
+			state.AppendMetadataFilterDiagnostic(diagnostic)
+		}
 	}
 	result, err := stubJSONWithErr(out)
 	if err != nil {

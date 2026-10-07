@@ -94,6 +94,17 @@ export interface IDialog {
 interface MetaDataFilter {
   manual: Manual[];
   method: string;
+  semi_auto?: Array<string | { key: string; op?: string }>;
+  boost?: MetaDataBoost;
+  instructions?: string;
+}
+
+export interface MetaDataBoost {
+  method?: string;
+  manual?: Array<Manual & { weight?: number }>;
+  semi_auto?: Array<string | { key: string; op?: string; weight?: number }>;
+  auto_weight?: number;
+  max_total?: number;
 }
 
 interface Manual {
@@ -130,6 +141,15 @@ export interface Message {
   downloads?: IDocumentDownloadInfo[];
 }
 
+/** Another copy of a reference chunk's text, from a duplicated file. */
+export interface IDuplicateChunk {
+  chunk_id: string;
+  document_id: string;
+  document_name: string;
+  dataset_id: string;
+  similarity: number;
+}
+
 export interface IReferenceChunk {
   id: string;
   content: null;
@@ -143,6 +163,7 @@ export interface IReferenceChunk {
   positions: number[][];
   doc_type?: string;
   document_metadata?: Record<string, any>;
+  duplicates?: IDuplicateChunk[];
 }
 
 export interface IReference {
@@ -151,9 +172,29 @@ export interface IReference {
   total: number;
 }
 
+export interface IMetadataFilterCondition {
+  key: string;
+  op: string;
+  value: unknown;
+}
+
+export interface IMetadataFilterDiagnostic {
+  method: string;
+  status: string;
+  conditions?: IMetadataFilterCondition[];
+  logic?: string;
+  matched_document_count?: number;
+  /** `chunk_fields`: filtered on chunk metadata, no document count known. */
+  applied_on?: 'chunk_fields';
+  tool_name?: string;
+  query?: string;
+  dataset_ids?: string[];
+}
+
 export interface IReferenceObject {
   chunks: Record<string, IReferenceChunk>;
   doc_aggs: Record<string, Docagg>;
+  metadata_filters?: IMetadataFilterDiagnostic[];
 }
 
 export interface IAnswer {

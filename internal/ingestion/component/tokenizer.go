@@ -367,10 +367,7 @@ func (c *TokenizerComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map
 		zap.String("component", "Tokenizer"),
 		zap.Int("input_chunks", len(chunks)),
 	)
-	titleStem := titleExtRE.ReplaceAllString(name, "")
-	if toks := declaredTitleTokens(chunks); len(toks) > 0 {
-		titleStem = strings.TrimSpace(titleStem + " " + strings.Join(toks, " "))
-	}
+	titleStem := TitleStem(name, firstChunkText(chunks))
 
 	// chunk_order_int is the position of the chunk in the (post-filter) reading
 	// sequence. It is set unconditionally on every surviving chunk so that all
@@ -766,8 +763,8 @@ func cloneTokenizerChunkDoc(in schema.ChunkDoc) schema.ChunkDoc {
 // "wikipedia", English stopwords and pure numbers are dropped: they are noise that would match
 // unrelated queries once the field is weighted.
 //
-// Only the first non-empty chunk is inspected, because the header block (when present at all)
-// belongs to the head of the document.
+// head is the text of the document's first non-empty chunk (see firstChunkText), because the
+// header block (when present at all) belongs to the head of the document.
 //
 // The extraction is script-agnostic. A word that is not pure ASCII — Chinese, Japanese, Korean,
 // Cyrillic, Arabic, Greek, Hebrew, Thai, or Latin carrying diacritics — is kept whole and handed
@@ -827,30 +824,23 @@ func trimWordEdges(s string) string {
 	})
 }
 
-func declaredTitleTokens(chunks []schema.ChunkDoc) []string {
+func declaredTitleTokens(head string) []string {
 	const (
 		headerLines = 20
 		maxTokens   = 20
 	)
 	var values []string
-	for i := range chunks {
-		head := chunks[i].Text
-		if head == "" {
-			continue
-		}
-		lines := strings.Split(head, "\n")
-		if len(lines) > headerLines {
-			lines = lines[:headerLines]
-		}
-		for _, line := range lines {
-			l := strings.ToLower(strings.TrimSpace(line))
-			for _, key := range []string{"title:", "name:", "fullname:"} {
-				if strings.HasPrefix(l, key) {
-					values = append(values, l[len(key):])
-				}
+	lines := strings.Split(head, "\n")
+	if len(lines) > headerLines {
+		lines = lines[:headerLines]
+	}
+	for _, line := range lines {
+		l := strings.ToLower(strings.TrimSpace(line))
+		for _, key := range []string{"title:", "name:", "fullname:"} {
+			if strings.HasPrefix(l, key) {
+				values = append(values, l[len(key):])
 			}
 		}
-		break
 	}
 	if len(values) == 0 {
 		return nil
@@ -907,19 +897,16 @@ func declaredTitleTokens(chunks []schema.ChunkDoc) []string {
 // Mirrors python tokenizer.py:130-185 and rag/nlp/__init__.py tokenize() /
 // tokenize_chunks().
 //
-// language sets the Snowball stemmer language, matching Python's
+// language selects the analyzer language (Snowball stemmer, or diacritics
+// folding without stemming for Slovak/Czech), matching Python's
 // rag_tokenizer.tokenizer.set_language(language) call inside tokenize().
 func tokenizeChunks(chunks []schema.ChunkDoc, titleStem string, language string) error {
 	tok := tokenizer.New(language)
 	for i := range chunks {
 		ck := &chunks[i]
-		titleTk, err := tok.Tokenize(titleStem)
+		titleTk, titleSmTk, err := TokenizeTitle(tok, titleStem)
 		if err != nil {
-			return fmt.Errorf("tokenizer: title tokenize: %w", err)
-		}
-		titleSmTk, err := tok.FineGrainedTokenize(titleTk)
-		if err != nil {
-			return fmt.Errorf("tokenizer: title fine-grain: %w", err)
+			return err
 		}
 		ck.TitleTks = titleTk
 		ck.TitleSmTks = titleSmTk
@@ -968,42 +955,75 @@ func tokenizeChunks(chunks []schema.ChunkDoc, titleStem string, language string)
 		// the real Text. Python's truthy check (tokenizer.py:155) treats
 		// "   " as present and blanks out content_ltks; Go is more sensible.
 		if s := strings.TrimSpace(ck.Summary); s != "" {
-			st, err := tok.Tokenize(s)
-			if err != nil {
-				return fmt.Errorf("tokenizer: summary tokenize: %w", err)
+			if ck.ContentLtks, ck.ContentSmLtks, err = TokenizeContent(tok, s); err != nil {
+				return fmt.Errorf("tokenizer: summary: %w", err)
 			}
-			if st == "" {
-				st = s
-			}
-			ck.ContentLtks = st
-			smt, err := tok.FineGrainedTokenize(st)
-			if err != nil {
-				return fmt.Errorf("tokenizer: summary fine-grain: %w", err)
-			}
-			if smt == "" {
-				smt = st
-			}
-			ck.ContentSmLtks = smt
 		} else if t := schema.ContextualText(*ck); strings.TrimSpace(t) != "" {
-			tt, err := tok.Tokenize(t)
-			if err != nil {
-				return fmt.Errorf("tokenizer: text tokenize: %w", err)
+			if ck.ContentLtks, ck.ContentSmLtks, err = TokenizeContent(tok, t); err != nil {
+				return fmt.Errorf("tokenizer: text: %w", err)
 			}
-			if tt == "" {
-				tt = t
-			}
-			ck.ContentLtks = tt
-			smt, err := tok.FineGrainedTokenize(tt)
-			if err != nil {
-				return fmt.Errorf("tokenizer: text fine-grain: %w", err)
-			}
-			if smt == "" {
-				smt = tt
-			}
-			ck.ContentSmLtks = smt
 		}
 	}
 	return nil
+}
+
+// firstChunkText is the text of the first chunk, in reading order, that has
+// any: the head of the document, where a declared title lives.
+func firstChunkText(chunks []schema.ChunkDoc) string {
+	for i := range chunks {
+		if chunks[i].Text != "" {
+			return chunks[i].Text
+		}
+	}
+	return ""
+}
+
+// TitleStem is the text a document's title tokens are built from: its name
+// without the trailing file extension, followed by the title the document
+// declares in its header block (see declaredTitleTokens). head is the text of
+// the document's first non-empty chunk in reading order, "" when unknown.
+// Every chunk of the document gets the same stem.
+func TitleStem(name, head string) string {
+	stem := titleExtRE.ReplaceAllString(name, "")
+	if toks := declaredTitleTokens(head); len(toks) > 0 {
+		stem = strings.TrimSpace(stem + " " + strings.Join(toks, " "))
+	}
+	return stem
+}
+
+// TokenizeTitle returns the title_tks / title_sm_tks pair for a title stem
+// (see TitleStem).
+func TokenizeTitle(tok tokenizer.Tokenizer, titleStem string) (string, string, error) {
+	titleTk, err := tok.Tokenize(titleStem)
+	if err != nil {
+		return "", "", fmt.Errorf("tokenizer: title tokenize: %w", err)
+	}
+	titleSmTk, err := tok.FineGrainedTokenize(titleTk)
+	if err != nil {
+		return "", "", fmt.Errorf("tokenizer: title fine-grain: %w", err)
+	}
+	return titleTk, titleSmTk, nil
+}
+
+// TokenizeContent returns the content_ltks / content_sm_ltks pair for a chunk
+// body. Text the analyzer reduces to nothing (symbols only, say) is kept as
+// is, so the chunk still matches itself.
+func TokenizeContent(tok tokenizer.Tokenizer, text string) (string, string, error) {
+	ltks, err := tok.Tokenize(text)
+	if err != nil {
+		return "", "", fmt.Errorf("tokenize: %w", err)
+	}
+	if ltks == "" {
+		ltks = text
+	}
+	smLtks, err := tok.FineGrainedTokenize(ltks)
+	if err != nil {
+		return "", "", fmt.Errorf("fine-grain: %w", err)
+	}
+	if smLtks == "" {
+		smLtks = ltks
+	}
+	return ltks, smLtks, nil
 }
 
 // concatFields concatenates the configured fields of a chunk into

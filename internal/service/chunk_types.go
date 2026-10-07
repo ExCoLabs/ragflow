@@ -181,6 +181,7 @@ type SourcedChunk struct {
 	TermSimilarity   float64                // term_similarity score
 	DocType          string                 // doc_type_kwd or doc_type
 	DocumentMetadata map[string]interface{} // document_metadata
+	Duplicates       interface{}            // duplicates: other copies of the text collapsed into this chunk
 }
 
 // NewSourcedChunks normalizes raw retrieval chunks into typed SourcedChunk values.
@@ -205,6 +206,7 @@ func NewSourcedChunks(raw []map[string]interface{}) []SourcedChunk {
 			TermSimilarity:   getFloat(ck, "term_similarity"),
 			DocType:          getStr(ck, "doc_type_kwd", "doc_type"),
 			DocumentMetadata: getMap(ck, "document_metadata"),
+			Duplicates:       duplicatesOrEmpty(ck["duplicates"]),
 		})
 	}
 	return out

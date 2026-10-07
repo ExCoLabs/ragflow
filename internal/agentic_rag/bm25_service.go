@@ -42,13 +42,29 @@ type Bm25Adapter struct {
 	// "mineralization") can therefore NEVER match its own indexed token
 	// without this tokenization step.
 	queryTokenizer QueryTokenizer
+	// datasetLanguage, when set, names the tokenizer language of the datasets
+	// a search covers, so the query is analyzed the way their chunks were.
+	datasetLanguage DatasetLanguageFunc
 }
 
 // QueryTokenizer converts a raw query string into a tokenized match
 // expression over the tokenized fields. Implemented by the service/nlp
 // QueryBuilder (the same tokenizer family the ingestion pipeline used).
 type QueryTokenizer interface {
-	Question(txt string, tbl string, minMatch float64) (*enginetypes.MatchTextExpr, []string)
+	Question(txt string, tbl string, minMatch float64, language string) (*enginetypes.MatchTextExpr, []string)
+}
+
+// DatasetLanguageFunc returns the tokenizer language shared by the given
+// datasets, or "" for the default analyzer.
+type DatasetLanguageFunc func(ctx context.Context, datasetIDs []string) string
+
+// SetDatasetLanguage attaches the dataset language lookup used to tokenize
+// queries. Without it queries are tokenized with the default language.
+func (b *Bm25Adapter) SetDatasetLanguage(fn DatasetLanguageFunc) {
+	if b == nil {
+		return
+	}
+	b.datasetLanguage = fn
 }
 
 // SetQueryBuilder attaches the query tokenizer. Called at boot, after
@@ -98,6 +114,11 @@ func (b *Bm25Adapter) SearchBm25(ctx context.Context, req runtime.Bm25Request) (
 	ectx, ecancel := engineCallContext(ctx)
 	defer ecancel()
 
+	language := ""
+	if b.datasetLanguage != nil {
+		language = b.datasetLanguage(ctx, req.DatasetIDs)
+	}
+
 	seen := map[string]struct{}{}
 	var merged []runtime.RetrievalChunk
 	for _, q := range queries {
@@ -105,7 +126,7 @@ func (b *Bm25Adapter) SearchBm25(ctx context.Context, req runtime.Bm25Request) (
 		// pipeline used (see Bm25Adapter.queryTokenizer): raw query words
 		// cannot match their stemmed/subword index tokens. Falls back to the
 		// raw text match when no query tokenizer is attached.
-		matchExpr := b.buildMatchExpr(q, topN)
+		matchExpr := b.buildMatchExpr(q, topN, language)
 		res, err := b.docEngine.Search(ectx, &enginetypes.SearchRequest{
 			IndexNames: []string{fmt.Sprintf("ragflow_%s", req.TenantID)},
 			KbIDs:      req.DatasetIDs,
@@ -164,11 +185,11 @@ func floatFromMap(m map[string]interface{}, key string) float64 {
 // buildMatchExpr converts a raw query into the match expression SearchBm25
 // sends to the engine: tokenized via the attached QueryTokenizer when one is
 // registered, otherwise the historical raw-text match.
-func (b *Bm25Adapter) buildMatchExpr(q string, topN int) interface{} {
+func (b *Bm25Adapter) buildMatchExpr(q string, topN int, language string) interface{} {
 	if b == nil || b.queryTokenizer == nil {
 		return &enginetypes.MatchTextExpr{MatchingText: q, TopN: topN}
 	}
-	expr, _ := b.queryTokenizer.Question(q, "", 0.0)
+	expr, _ := b.queryTokenizer.Question(q, "", 0.0, language)
 	if expr == nil {
 		return &enginetypes.MatchTextExpr{MatchingText: q, TopN: topN}
 	}

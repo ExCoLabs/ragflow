@@ -67,6 +67,7 @@ type FormattedChunk struct {
 	RowID            interface{} `json:"row_id"`
 	DocType          interface{} `json:"doc_type"`
 	DocumentMetadata interface{} `json:"document_metadata"`
+	Duplicates       interface{} `json:"duplicates"`
 }
 
 // OpenAICompletionResponse is the non-streaming response payload.
@@ -676,6 +677,7 @@ func formatChunks(chunks []map[string]interface{}) []FormattedChunk {
 			RowID:            chunk["row_id"],
 			DocType:          getValue(chunk, "doc_type_kwd", "doc_type"),
 			DocumentMetadata: chunk["document_metadata"],
+			Duplicates:       duplicatesOrEmpty(chunk["duplicates"]),
 		})
 	}
 	return out

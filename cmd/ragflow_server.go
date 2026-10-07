@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -36,9 +37,9 @@ import (
 	"ragflow/internal/channels"
 	"ragflow/internal/deepdoc/native"
 	"ragflow/internal/deepdoc/parser/pdf"
-	modelModule "ragflow/internal/entity/models"
 	"ragflow/internal/handler"
 	"ragflow/internal/ingestion/knowledge_compile"
+	"ragflow/internal/ingestion/retokenize"
 	ingestion "ragflow/internal/ingestion/service"
 	agentic_rag "ragflow/internal/rag/agentic-rag"
 	"ragflow/internal/router"
@@ -77,7 +78,7 @@ import (
 )
 
 type serverArgs struct {
-	mode          *string // admin | api | ingestor | syncer | deepdoc | migrate
+	mode          *string // admin | api | ingestor | syncer | deepdoc | migrate | retokenize
 	helpFlag      bool
 	versionFlag   bool
 	logLevel      *string
@@ -101,6 +102,10 @@ type serverArgs struct {
 	// deepdocInferenceCPUCores, when set, overrides the DeepDoc inference CPU-core
 	// budget from env/config. nil means "unspecified" (0 means "all cores").
 	deepdocInferenceCPUCores *int
+
+	// retokenize holds the options of the retokenize action: every argument
+	// after --retokenize.
+	retokenize *retokenize.Options
 }
 
 func parseArgs() (*serverArgs, error) {
@@ -181,6 +186,16 @@ func parseArgs() (*serverArgs, error) {
 		case "--migrate":
 			serverMode = "migrate"
 			args.mode = &serverMode
+		case "--retokenize":
+			// The action's own options follow it, so it ends the server's.
+			serverMode = "retokenize"
+			args.mode = &serverMode
+			opts, err := retokenize.ParseFlags(os.Args[0]+" --retokenize", os.Args[i+1:], os.Stderr)
+			if err != nil {
+				return nil, err
+			}
+			args.retokenize = opts
+			return args, nil
 		case "-h", "--help":
 			args.helpFlag = true
 		case "-v", "--version":
@@ -380,7 +395,8 @@ func printHelp(args *serverArgs) {
 	switch {
 	case args.mode == nil || *args.mode == "migrate":
 		fmt.Fprintf(os.Stderr, "Usage: %s --api|--admin|--ingestor|--syncer|--deepdoc [OPTIONS]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "       %s --migrate [OPTIONS]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "       %s --migrate [OPTIONS]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "       %s [OPTIONS] --retokenize --kb-id <dataset id> [RETOKENIZE OPTIONS]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "RAGFlow Server - Open-source RAG engine based on deep document understanding\n\n")
 		fmt.Fprintf(os.Stderr, "Mode selection (default: --api):\n")
 		fmt.Fprintf(os.Stderr, "  --api          \tRun as API server\n")
@@ -389,7 +405,9 @@ func printHelp(args *serverArgs) {
 		fmt.Fprintf(os.Stderr, "  --syncer       \tRun as file sync service\n")
 		fmt.Fprintf(os.Stderr, "  --deepdoc      \tRun as DeepDoc server\n\n")
 		fmt.Fprintf(os.Stderr, "Standalone action (mutually exclusive with a mode):\n")
-		fmt.Fprintf(os.Stderr, "  --migrate      \tRun database migrations and exit\n\n")
+		fmt.Fprintf(os.Stderr, "  --migrate      \tRun database migrations and exit\n")
+		fmt.Fprintf(os.Stderr, "  --retokenize   \tRecompute the token fields of indexed chunks and exit\n")
+		fmt.Fprintf(os.Stderr, "                 \t(must come last; '--retokenize --help' lists its options)\n\n")
 		fmt.Fprintf(os.Stderr, "Common options:\n")
 		fmt.Fprintf(os.Stderr, "  -f, --config string\tPath to configuration file\n")
 		fmt.Fprintf(os.Stderr, "  -p, --port int \tServer port (overrides config file)\n")
@@ -472,6 +490,9 @@ func main() {
 	defer cancel()
 
 	arguments, err := parseArgs()
+	if errors.Is(err, flag.ErrHelp) {
+		os.Exit(0)
+	}
 	if err != nil {
 		fmt.Printf("Failed to parse arguments: %v\n", err)
 		os.Exit(1)
@@ -566,9 +587,9 @@ func main() {
 			uuid := utility.GenerateUUID()
 			serverName = fmt.Sprintf("deepdoc_server_%s", uuid)
 		}
-	case "migrate":
+	case "migrate", "retokenize":
 		if arguments.name == nil {
-			serverName = "migrate"
+			serverName = *arguments.mode
 		}
 	default:
 		err = errors.New(*arguments.mode)
@@ -632,6 +653,17 @@ func main() {
 	}
 	defer engine.Close()
 
+	// The retokenize action needs the database, the doc engine and the
+	// tokenizer, and nothing started below.
+	if *arguments.mode == "retokenize" {
+		if err = runRetokenize(ctx, arguments.retokenize); err != nil {
+			common.Error("Retokenize failed", err)
+			fmt.Fprintf(os.Stderr, "retokenize: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Initialize Kvrocks cache
 	if err = kvrocks.Init(ctx); err != nil {
 		common.Fatal("Failed to initialize Kvrocks", zap.Error(err))
@@ -693,6 +725,14 @@ func main() {
 		fmt.Printf("Invalid server mode: %s\n", *arguments.mode)
 		os.Exit(1)
 	}
+}
+
+func runRetokenize(ctx context.Context, opts *retokenize.Options) error {
+	if err := tokenizer.Init(&tokenizer.PoolConfig{}); err != nil {
+		return fmt.Errorf("failed to initialize tokenizer: %w", err)
+	}
+	defer tokenizer.Close()
+	return retokenize.Run(ctx, *opts, os.Stdout)
 }
 
 func setLogger(serverName string, arguments *serverArgs) {
@@ -1145,7 +1185,7 @@ func startServer(ctx context.Context, serverName string, arguments *serverArgs) 
 		nil,
 		retrievalEnhancer,
 	)
-	retrievalAdapter.SetModelConfigResolver(func(ctx context.Context, tenantID string, modelType entity.ModelType, modelRef string) (modelModule.ModelDriver, string, *modelModule.APIConfig, int, error) {
+	retrievalAdapter.SetModelConfigResolver(func(ctx context.Context, tenantID string, modelType entity.ModelType, modelRef string) (*agenttool.ResolvedModel, error) {
 		var target *service.ModelTarget
 		var err error
 		if strings.TrimSpace(modelRef) == "" {
@@ -1154,9 +1194,15 @@ func startServer(ctx context.Context, serverName string, arguments *serverArgs) 
 			target, err = modelSolver.ResolveModelConfig(ctx, tenantID, modelType, modelRef)
 		}
 		if err != nil {
-			return nil, "", nil, 0, err
+			return nil, err
 		}
-		return target.Driver, target.ModelName, target.APIConfig, target.MaxTokens, nil
+		return &agenttool.ResolvedModel{
+			Driver:        target.Driver,
+			Name:          target.ModelName,
+			APIConfig:     target.APIConfig,
+			MaxTokens:     target.MaxTokens,
+			ContextLength: target.ContextLength,
+		}, nil
 	})
 	agenttool.SetRetrievalService(retrievalAdapter)
 	agenttool.SetMemoryRetrievalService(retrievalbridge.NewMemoryAdapter(memoryService))
@@ -1169,6 +1215,17 @@ func startServer(ctx context.Context, serverName string, arguments *serverArgs) 
 	runtime.SetGrepService(smartagentic.NewGrepAdapter(docEngine))
 	bm25Adapter := smartagentic.NewBm25Adapter(docEngine)
 	bm25Adapter.SetQueryBuilder(nlp.GetQueryBuilder())
+	bm25Adapter.SetDatasetLanguage(func(ctx context.Context, datasetIDs []string) string {
+		if len(datasetIDs) == 0 {
+			return ""
+		}
+		kbs, err := dao.NewKnowledgebaseDAO().GetByIDs(ctx, dao.DB, datasetIDs)
+		if err != nil {
+			common.Warn("agent: bm25 dataset language lookup failed", zap.Error(err))
+			return ""
+		}
+		return entity.KnowledgebasesLanguage(kbs)
+	})
 	runtime.SetBm25Service(bm25Adapter)
 	common.Info("agent: smart-reasoning corpus services installed (grep + bm25)")
 

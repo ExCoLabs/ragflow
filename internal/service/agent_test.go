@@ -961,6 +961,40 @@ func createAgentSessionTestConversation(t *testing.T, id, agentID, userID string
 	}
 }
 
+func TestNormalizeAgentSessionPreservesMetadataFilters(t *testing.T) {
+	session := &entity.API4Conversation{
+		Message: json.RawMessage(`[
+			{"role":"user","content":"question"},
+			{"role":"assistant","content":"answer"}
+		]`),
+		Reference: json.RawMessage(`[
+			{
+				"chunks":[{"chunk_id":"chunk-1","content_with_weight":"content"}],
+				"doc_aggs":[{"doc_id":"doc-1"}],
+				"metadata_filters":[{"method":"auto","status":"applied"}]
+			}
+		]`),
+	}
+
+	normalized := normalizeAgentSession(session, false)
+	messages := normalized["message"].([]map[string]interface{})
+	reference, ok := messages[1]["reference"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("reference = %T, want map", messages[1]["reference"])
+	}
+	chunks, ok := reference["chunks"].([]map[string]interface{})
+	if !ok || len(chunks) != 1 || chunks[0]["id"] != "chunk-1" {
+		t.Fatalf("chunks = %#v, want normalized chunk", reference["chunks"])
+	}
+	filters, ok := reference["metadata_filters"].([]interface{})
+	if !ok || len(filters) != 1 {
+		t.Fatalf("metadata_filters = %#v, want preserved diagnostic", reference["metadata_filters"])
+	}
+	if _, ok := reference["doc_aggs"].([]interface{}); !ok {
+		t.Fatalf("doc_aggs = %T, want preserved slice", reference["doc_aggs"])
+	}
+}
+
 func TestListAgentSessionsServiceSuccess(t *testing.T) {
 	setupAgentSessionServiceTest(t)
 
@@ -1645,22 +1679,15 @@ func TestUpdateAgentTeamMemberPermissionAndOwnerTitleChecks(t *testing.T) {
 		t.Fatalf("failed to seed user tenant: %v", err)
 	}
 
-	samePermission := " TEAM "
+	// Team members can read/run the shared canvas but may not mutate it.
 	if err := NewAgentService().UpdateAgent(ctx, "member-1", "canvas-team-edit", map[string]interface{}{
 		"description": "member edit",
-		"permission":  samePermission,
-	}); err != nil {
-		t.Fatalf("UpdateAgent with same permission failed: %v", err)
+	}); !errors.Is(err, ErrAgentNotOwner) {
+		t.Fatalf("UpdateAgent by member error = %v, want ErrAgentNotOwner", err)
 	}
 
-	nextPermission := "me"
-	if err := NewAgentService().UpdateAgent(ctx, "member-1", "canvas-team-edit", map[string]interface{}{
-		"permission": nextPermission,
-	}); err == nil {
-		t.Fatal("UpdateAgent permission change error = nil, want error")
-	}
-
-	if err := NewAgentService().UpdateAgent(ctx, "member-1", "canvas-team-edit", map[string]interface{}{
+	// The owner can still edit, including duplicate-title checks within their own tenant.
+	if err := NewAgentService().UpdateAgent(ctx, "owner-1", "canvas-team-edit", map[string]interface{}{
 		"title": "Owner Duplicate",
 	}); err == nil || err.Error() != "Owner Duplicate already exists." {
 		t.Fatalf("UpdateAgent duplicate title error = %v, want Owner Duplicate already exists.", err)
@@ -2347,6 +2374,74 @@ func TestResetAgentServiceOtherTenant(t *testing.T) {
 	_, err := NewAgentService().ResetAgent(ctx, "user-1", "canvas-1")
 	if !errors.Is(err, dao.ErrUserCanvasNotFound) {
 		t.Errorf("expected ErrUserCanvasNotFound for cross-tenant access, got %v", err)
+	}
+}
+
+// TestResetAgentServiceRejectsSharedTeamMember verifies that a tenant member who
+// can run/read a shared agent is still forbidden from resetting its state.
+func TestResetAgentServiceRejectsSharedTeamMember(t *testing.T) {
+	setupAgentSessionServiceTest(t)
+	ctx := t.Context()
+	status := "1"
+
+	if err := dao.DB.WithContext(ctx).Create(&entity.UserCanvas{
+		ID:             "canvas-team-reset",
+		UserID:         "owner-1",
+		Title:          sptr("Team Agent"),
+		Permission:     string(entity.TenantPermissionTeam),
+		CanvasCategory: "agent_canvas",
+		DSL:            entity.JSONMap{"graph": map[string]any{"nodes": []any{}, "edges": []any{}}, "components": map[string]any{}, "history": []any{}, "memory": []any{}},
+	}).Error; err != nil {
+		t.Fatalf("failed to create canvas: %v", err)
+	}
+	if err := dao.DB.WithContext(ctx).Create(&entity.UserTenant{
+		ID:        "ut-team-reset",
+		UserID:    "member-1",
+		TenantID:  "owner-1",
+		Role:      "normal",
+		InvitedBy: "owner-1",
+		Status:    &status,
+	}).Error; err != nil {
+		t.Fatalf("failed to create user tenant: %v", err)
+	}
+
+	_, err := NewAgentService().ResetAgent(ctx, "member-1", "canvas-team-reset")
+	if !errors.Is(err, ErrAgentNotOwner) {
+		t.Errorf("expected ErrAgentNotOwner for team member reset, got %v", err)
+	}
+}
+
+// TestUpdateAgentTagsServiceRejectsSharedTeamMember verifies that only the owning
+// tenant may change the tags of a shared canvas.
+func TestUpdateAgentTagsServiceRejectsSharedTeamMember(t *testing.T) {
+	setupAgentSessionServiceTest(t)
+	ctx := t.Context()
+	status := "1"
+
+	if err := dao.DB.WithContext(ctx).Create(&entity.UserCanvas{
+		ID:             "canvas-team-tags",
+		UserID:         "owner-1",
+		Title:          sptr("Team Agent"),
+		Permission:     string(entity.TenantPermissionTeam),
+		CanvasCategory: "agent_canvas",
+		DSL:            entity.JSONMap{},
+	}).Error; err != nil {
+		t.Fatalf("failed to create canvas: %v", err)
+	}
+	if err := dao.DB.WithContext(ctx).Create(&entity.UserTenant{
+		ID:        "ut-team-tags",
+		UserID:    "member-1",
+		TenantID:  "owner-1",
+		Role:      "normal",
+		InvitedBy: "owner-1",
+		Status:    &status,
+	}).Error; err != nil {
+		t.Fatalf("failed to create user tenant: %v", err)
+	}
+
+	ok, code, err := NewAgentService().UpdateAgentTags(ctx, "member-1", "canvas-team-tags", []string{"alpha"})
+	if ok || code != common.CodeOperatingError || err == nil {
+		t.Fatalf("expected owner-only rejection, got ok=%v code=%d err=%v", ok, code, err)
 	}
 }
 

@@ -81,6 +81,22 @@ import (
 
 var retrievalUserPrefixPattern = regexp.MustCompile(`(?i)^user[:：\s]*`)
 
+// metadataScopeResolver is the optional enhancer surface that resolves
+// meta_data_filter to a doc scope plus a filter/boost on the chunk metadata
+// fields (service.ApplyMetaDataScope). Enhancers without it only narrow the
+// doc scope (FilterDocuments).
+type metadataScopeResolver interface {
+	ScopeDocuments(
+		ctx context.Context,
+		filter map[string]any,
+		query string,
+		chatModel *modelModule.ChatModel,
+		baseDocIDs []string,
+		kbs []*entity.Knowledgebase,
+		diagnostics *common.MetadataFilterDiagnostic,
+	) ([]string, *common.ChunkMetaScope, error)
+}
+
 // NLPRetrievalAdapter wraps *nlp.RetrievalService behind the
 // agent-tool RetrievalService interface. The adapter is safe to
 // share across goroutines — the wrapped service is stateless
@@ -93,12 +109,24 @@ type NLPRetrievalAdapter struct {
 	enhancer            retrievalEnhancer
 }
 
+// ResolvedModel is what a modelConfigResolver returns: the provider objects
+// plus the two token limits, kept apart because they are not
+// interchangeable. MaxTokens is the generation cap; ContextLength is the
+// model's context window, the budget a prompt is fitted to.
+type ResolvedModel struct {
+	Driver        modelModule.ModelDriver
+	Name          string
+	APIConfig     *modelModule.APIConfig
+	MaxTokens     int
+	ContextLength int
+}
+
 type modelConfigResolver func(
 	ctx context.Context,
 	tenantID string,
 	modelType entity.ModelType,
 	modelRef string,
-) (modelModule.ModelDriver, string, *modelModule.APIConfig, int, error)
+) (*ResolvedModel, error)
 
 type knowledgebaseLookup interface {
 	GetByIDs(ctx context.Context, sqlDB *gorm.DB, ids []string) ([]*entity.Knowledgebase, error)
@@ -120,6 +148,7 @@ type retrievalEnhancer interface {
 		chatModel *modelModule.ChatModel,
 		baseDocIDs []string,
 		kbIDs []string,
+		diagnostics *common.MetadataFilterDiagnostic,
 	) ([]string, error)
 	LabelQuestion(
 		ctx context.Context,
@@ -188,11 +217,18 @@ func (a *NLPRetrievalAdapter) resolveModelConfig(
 	tenantID string,
 	modelType entity.ModelType,
 	modelRef string,
-) (modelModule.ModelDriver, string, *modelModule.APIConfig, int, error) {
+) (*ResolvedModel, error) {
 	if a == nil || a.modelConfigResolver == nil {
-		return nil, "", nil, 0, fmt.Errorf("retrieval: model config resolver is not configured")
+		return nil, fmt.Errorf("retrieval: model config resolver is not configured")
 	}
-	return a.modelConfigResolver(ctx, tenantID, modelType, modelRef)
+	resolved, err := a.modelConfigResolver(ctx, tenantID, modelType, modelRef)
+	if err != nil {
+		return nil, err
+	}
+	if resolved == nil {
+		return nil, fmt.Errorf("retrieval: model config resolver returned no model")
+	}
+	return resolved, nil
 }
 
 // Search implements RetrievalService. The translation rules live
@@ -234,13 +270,22 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	}
 	query := req.Query
 	docIDs := compactStrings(req.DocScope)
+	chunkMeta := req.ChunkMeta
 	if len(req.MetaDataFilter) > 0 {
 		if a.enhancer == nil {
 			return nil, fmt.Errorf("retrieval: metadata filter service is not configured")
 		}
-		docIDs, err = a.enhancer.FilterDocuments(
-			ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbIDs,
-		)
+		if scoper, ok := a.enhancer.(metadataScopeResolver); ok {
+			var filterMeta *common.ChunkMetaScope
+			docIDs, filterMeta, err = scoper.ScopeDocuments(
+				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbs, req.Diagnostics,
+			)
+			chunkMeta = common.MergeChunkMetaScopes(filterMeta, chunkMeta)
+		} else {
+			docIDs, err = a.enhancer.FilterDocuments(
+				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbIDs, req.Diagnostics,
+			)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("retrieval: filter documents: %w", err)
 		}
@@ -282,7 +327,9 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	preparedReq.DocScope = docIDs
 	preparedReq.DatasetIDs = append([]string(nil), datasets.kbIDs...)
 	nlpReq := nlpRequestFromRetrieval(preparedReq, datasets.tenantIDs, topN, embeddingModel, preparedReq.ExcludeCompiled)
+	nlpReq.Language = entity.KnowledgebasesLanguage(datasets.kbs)
 	nlpReq.RerankModel = rerankModel
+	nlpReq.ChunkMeta = chunkMeta
 	if rankFeature != nil {
 		nlpReq.RankFeature = &rankFeature
 	}
@@ -511,30 +558,27 @@ func (a *NLPRetrievalAdapter) resolveEmbeddingModel(
 	}
 
 	var (
-		driver    modelModule.ModelDriver
-		modelName string
-		apiConfig *modelModule.APIConfig
-		maxTokens int
-		err       error
+		resolved *ResolvedModel
+		err      error
 	)
 	switch {
 	case kb.TenantEmbdID != nil && strings.TrimSpace(*kb.TenantEmbdID) != "":
-		driver, modelName, apiConfig, maxTokens, err = a.resolveModelConfig(
+		resolved, err = a.resolveModelConfig(
 			ctx, kb.TenantID, entity.ModelTypeEmbedding, *kb.TenantEmbdID,
 		)
 	case strings.TrimSpace(kb.EmbdID) != "":
-		driver, modelName, apiConfig, maxTokens, err = a.resolveModelConfig(
+		resolved, err = a.resolveModelConfig(
 			ctx, kb.TenantID, entity.ModelTypeEmbedding, kb.EmbdID,
 		)
 	default:
-		driver, modelName, apiConfig, maxTokens, err = a.resolveModelConfig(
+		resolved, err = a.resolveModelConfig(
 			ctx, kb.TenantID, entity.ModelTypeEmbedding, "",
 		)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: resolve embedding model for dataset %s: %w", kb.ID, err)
 	}
-	return modelModule.NewEmbeddingModel(driver, &modelName, apiConfig, maxTokens), nil
+	return modelModule.NewEmbeddingModel(resolved.Driver, &resolved.Name, resolved.APIConfig, resolved.MaxTokens), nil
 }
 
 func (a *NLPRetrievalAdapter) resolveChatModel(
@@ -544,19 +588,30 @@ func (a *NLPRetrievalAdapter) resolveChatModel(
 ) (*modelModule.ChatModel, error) {
 	method, _ := req.MetaDataFilter["method"].(string)
 	needsChatModel := req.TOCEnhance || method == "auto" || method == "semi_auto"
+	if boost, ok := req.MetaDataFilter["boost"].(map[string]any); ok {
+		// The metadata boost has its own LLM modes (service.MetaFilterNeedsLLM).
+		boostMethod, _ := boost["method"].(string)
+		needsChatModel = needsChatModel || boostMethod == "auto" || boostMethod == "semi_auto"
+	}
 	if !needsChatModel {
 		return nil, nil
 	}
 	if a == nil {
 		return nil, fmt.Errorf("retrieval: model resolver is not configured")
 	}
-	driver, modelName, apiConfig, _, err := a.resolveModelConfig(
+	resolved, err := a.resolveModelConfig(
 		ctx, tenantID, entity.ModelTypeChat, "",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: resolve default chat model: %w", err)
 	}
-	return modelModule.NewChatModel(driver, &modelName, apiConfig), nil
+	chatModel := modelModule.NewChatModel(resolved.Driver, &resolved.Name, resolved.APIConfig)
+	// The metadata filter renders the dataset's whole value space into its
+	// prompt, so it needs the model's context window to decide whether that
+	// prompt can be sent at all. A window that cannot be resolved stays 0, which
+	// message fitting reads as the 8192 default.
+	chatModel.ContextLength = resolved.ContextLength
+	return chatModel, nil
 }
 
 func (a *NLPRetrievalAdapter) resolveRerankModel(
@@ -570,20 +625,13 @@ func (a *NLPRetrievalAdapter) resolveRerankModel(
 	if a == nil || a.modelConfigResolver == nil {
 		return nil, fmt.Errorf("retrieval: model resolver is not configured")
 	}
-	var (
-		driver    modelModule.ModelDriver
-		modelName string
-		apiConfig *modelModule.APIConfig
-		maxTokens int
-		err       error
-	)
-	driver, modelName, apiConfig, maxTokens, err = a.resolveModelConfig(
+	resolved, err := a.resolveModelConfig(
 		ctx, tenantID, entity.ModelTypeRerank, req.RerankID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: resolve rerank model: %w", err)
 	}
-	return modelModule.NewRerankModel(driver, &modelName, apiConfig, maxTokens), nil
+	return modelModule.NewRerankModel(resolved.Driver, &resolved.Name, resolved.APIConfig, resolved.MaxTokens), nil
 }
 
 // translateChunk converts one nlp chunk map into a RetrievalChunk.

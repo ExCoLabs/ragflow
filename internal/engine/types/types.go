@@ -30,6 +30,14 @@ var ErrDocumentNotFound = errors.New("document not found")
 // tolerable no-op, mirroring Python's docStoreConn behavior.
 var ErrIndexNotFound = errors.New("index does not exist")
 
+// ErrMetaValueSpaceIncomplete marks a metadata value space that could not be
+// read in full -- the doc store answered with partial results. Distinct from a
+// failure to read it at all: callers must not generate a metadata filter from a
+// partial value space, because a value missing because its shard failed is
+// indistinguishable from a value that does not exist, and the filter is applied
+// as a hard document scope.
+var ErrMetaValueSpaceIncomplete = errors.New("metadata value space is incomplete")
+
 // SearchRequest unified search request for all engines
 type SearchRequest struct {
 	// Search target
@@ -53,6 +61,11 @@ type SearchRequest struct {
 	// Sorting and ranking
 	OrderBy     *OrderByExpr       // Order by expression (asc/desc on fields)
 	RankFeature map[string]float64 // Rank features for learning to rank
+
+	// ChunkMeta filters and boosts on document metadata copied onto chunks
+	// (see common.ChunkMetaScope). Only engines that implement
+	// engine.ChunkMetadataStore act on it; callers set it only for those.
+	ChunkMeta *common.ChunkMetaScope
 }
 
 // SearchResult unified search result for all engines

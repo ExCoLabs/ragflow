@@ -15,6 +15,7 @@ export default {
       yes: '是',
       no: '否',
       total: '总共',
+      alsoFoundIn: '还出现在 {{count}} 个其他文件中：',
       top: '前 {{top}} 条',
       rename: '重命名',
       name: '名称',
@@ -76,6 +77,7 @@ export default {
       seeAll: '查看全部',
       owner: '所有者',
       running: '运行中...',
+      loading: '加载中...',
     },
     login: {
       loginTitle: '登录账户',
@@ -357,6 +359,7 @@ export default {
       dataFlowRequired: '数据流必填',
     },
     knowledgeDetails: {
+      chatSettingsApplied: '正在使用助理“{{name}}”已保存的检索设置。',
       continueUpload: '继续上传',
       reselectParser: '重新选择解析方法',
       goAddModel: '前往添加模型',
@@ -464,6 +467,16 @@ export default {
       general: '通用',
       chunkMethodTab: '切片方法',
       testResults: '测试结果',
+      openChunkInDocument: '在新标签页中打开该解析块',
+      metadataFilterAuto: '元数据过滤（自动）',
+      metadataFilterSemiAuto: '元数据过滤（半自动）',
+      metadataFilterManual: '元数据过滤（手动）',
+      metadataFilterAnd: '并且',
+      metadataFilterOr: '或者',
+      metadataFilterNoConditions: '未生成任何过滤条件。',
+      metadataFilterIgnored: '未匹配到任何文档，因此检索了整个数据集。',
+      metadataFilterDocumentCount: '已缩小到 {{count}} 个文档',
+      metadataFilterOnChunkFields: '已在解析块的元数据字段上过滤',
       testSetting: '测试设置',
       retrievalTesting: '知识检索测试',
       retrievalTestingDescription:
@@ -621,6 +634,25 @@ export default {
       imageContextWindowTip:
         '抓取图像上下方的 N 个 token，为该 Chunk 提供更丰富的背景上下文。',
       autoMetadata: '自动元数据',
+      chunkMetadata: '分块元数据',
+      chunkMetadataEnabled: '将元数据写入分块',
+      chunkMetadataTip:
+        '把所选文档元数据字段复制到本数据集的每个分块。元数据过滤将直接在搜索引擎中执行（不再依赖文档 ID 列表，超过 10000 个匹配文档的数据集也能正常工作），并可在聊天、智能体、搜索和检索测试中使用元数据加权。',
+      chunkMetadataFields: '字段',
+      chunkMetadataFieldsTip:
+        '要复制的元数据键（最多 32 个）。未列出的键仍可用于过滤，但只能走较慢的文档 ID 路径。',
+      chunkMetadataStatus: '状态',
+      chunkMetadataReady: '已就绪',
+      chunkMetadataNotReady: '需要回填',
+      chunkMetadataBackfill: '回填已有分块',
+      chunkMetadataBackfillQueued: '回填已开始，完成后数据集即为就绪。',
+      chunkMetadataBackfillRunning: '回填进行中：{{done}}/{{total}} 组',
+      chunkMetadataBackfillFailed: '上次回填失败：{{error}}',
+      chunkMetadataSave: '保存分块元数据',
+      chunkMetadataSaved: '分块元数据设置已保存。',
+      chunkMetadataSaveFirst: '开始回填前请先保存分块元数据设置。',
+      chunkMetadataUnsupported:
+        '当前文档引擎不支持分块元数据，元数据过滤仍使用文档 ID。',
       mineruOptions: 'MinerU 选项',
       mineruParseMethod: '解析方法',
       mineruParseMethodTip:
@@ -907,6 +939,9 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
     },
     chunk: {
       chunk: '解析块',
+      copyChunkId: '复制解析块 ID',
+      showingRetrievedChunk: '仅显示从检索测试中打开的解析块。',
+      showAllChunks: '显示全部解析块',
       createChunk: '创建解析块',
       editChunk: '编辑解析块',
       bulk: '批量',
@@ -942,6 +977,8 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
       delete: '删除',
     },
     chat: {
+      testRetrieval: '检索测试',
+      testRetrievalTip: '使用该助理已保存的设置打开检索测试。',
       chatSupport: '聊天支持',
       replyInstantly: '我们通常会即时回复',
       typeYourMessage: '输入消息...',
@@ -1074,6 +1111,14 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
         '仅控制官方模型提供商中的 Qwen、Kimi 和 GLM 模型思考模式。系统默认会关闭 Qwen 思考，以避免任务长时间运行。',
       quote: '显示引文',
       quoteTip: '是否应该显示原文出处？',
+      metadataFilter: '元数据过滤器',
+      metadataFilterApplied: '已应用',
+      metadataFilterDisabled: '已禁用',
+      metadataFilterNoMatches: '已生成，但没有匹配的文档',
+      metadataFilterNotGenerated: '未生成过滤器',
+      metadataFilterUnsupported: '不支持的过滤方式',
+      metadataFilterUnavailable: '过滤器信息不可用',
+      metadataFilterMatchedDocuments: '匹配文档数：{{count}}',
       selfRag: 'Self-RAG',
       selfRagTip: '请参考: https://huggingface.co/papers/2310.11511',
       overview: '聊天 ID',
@@ -1183,6 +1228,26 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
         '元数据过滤是使用元数据属性（例如标签、类别或访问权限）来优化和控制系统内相关信息检索的过程。',
       conditions: '条件',
       metadataKeys: '可选过滤项',
+      metadataInstructions: '过滤说明',
+      metadataInstructionsTip:
+        '仅对当前聊天或智能体生效，指导模型生成自动/半自动的过滤与加权条件：某个取值何时适用、适合哪类问题、何时不应过滤。',
+      metadataInstructionsPlaceholder:
+        '例如：只有问题提到地点时才按 region 过滤；“人事”对应 human_resources 部门。',
+      metadataBoost: '元数据加权',
+      metadataBoostTip:
+        '基于元数据的偏好：匹配的分块得分更高，但不排除其他分块，例如“优先最新的报告”或“优先问题中提到的部门”。需要所选数据集均已启用并回填分块元数据，否则忽略。手动：固定偏好；半自动：模型为所列键填入取值；自动：模型将推导出的每个条件标记为要求或偏好。除“禁用”外，固定偏好在所有模式下都生效。',
+      boostConditions: '偏好取值',
+      boostKeys: '模型选择的键（取值来自问题）',
+      boostFixedConditions: '固定偏好（始终生效）',
+      boostWeight: '权重',
+      boostOpMax: '最新 / 最大',
+      boostOpMin: '最早 / 最小',
+      boostAutoWeight: '推导偏好的权重',
+      boostAutoWeightTip:
+        '分块匹配模型从问题中推导出的偏好时增加的分数（0–1；相似度本身为 0–1，通常 0.05–0.2）。默认 0.15。',
+      boostMaxTotal: '加权总上限',
+      boostMaxTotalTip:
+        '每个分块所有加权之和的上限，避免元数据偏好单独压过相关性。默认 0.3。',
       addCondition: '增加条件',
       meta: {
         disabled: '禁用',

@@ -1104,6 +1104,9 @@ func (s *AgentService) UpdateAgent(ctx context.Context, userID, canvasID string,
 		return err
 	}
 	ownerUserID := canvasInstance.UserID
+	if ownerUserID != userID {
+		return ErrAgentNotOwner
+	}
 
 	if v, ok := patch["permission"]; ok && ownerUserID != userID {
 		requested := strings.ToLower(strings.TrimSpace(fmt.Sprint(v)))
@@ -1238,6 +1241,9 @@ func (s *AgentService) ResetAgent(ctx context.Context, userID, canvasID string) 
 	row, err := s.loadCanvasForUser(ctx, userID, canvasID)
 	if err != nil {
 		return nil, err
+	}
+	if row.UserID != userID {
+		return nil, ErrAgentNotOwner
 	}
 	reset := dslpkg.ResetForCanvas(row.DSL)
 	// Re-normalize through the same entry point UpdateAgent uses so
@@ -1792,13 +1798,12 @@ func (s *AgentService) RunAgent(ctx context.Context, userID, canvasID, sessionID
 	if payload, ok := ctx.Value(webhookPayloadKey{}).(map[string]any); ok && payload != nil {
 		root["webhook_payload"] = payload
 	}
-	// Match Python's @add_tenant_id_to_kwargs behavior for runtime
-	// components and model credential lookup: the canvas runs under
-	// the current caller's tenant id. Team-agent access was already
-	// authorized by loadCanvasForUser above; do not replace this with
-	// an arbitrary joined team tenant or LLM credential lookup can miss
-	// the caller's configured provider key.
-	root["tenant_id"] = userID
+	// Runtime components and model credential lookup need the canvas's
+	// own tenant id, not the caller's personal user id. For a private
+	// agent canvas.UserID equals the caller id; for a team agent it is
+	// the owning group-account id, which is also the tenant id where
+	// the MCP servers, datasets and LLM providers are registered.
+	root["tenant_id"] = canvasRow.UserID
 
 	// Preserve the historical RunTracker tenant dimension separately.
 	// Existing tests and log filters expect the joined tenant id in the

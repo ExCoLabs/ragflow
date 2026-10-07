@@ -2,6 +2,7 @@
 // The data structures returned by the `datasets` interface and `/api/v1/datasets/{id}` are inconsistent.
 
 import { IngestionTaskStatus, RunningStatus } from '@/constants/knowledge';
+import { IDuplicateChunk } from '@/interfaces/database/chat';
 import { DataSourceKey } from '@/pages/user-setting/data-source/constant';
 import { IngestionEventItem } from './ingestion';
 
@@ -192,6 +193,7 @@ export interface ITestingChunk {
   positions: number[][];
   doc_type_kwd: string;
   document_metadata?: Record<string, any>;
+  duplicates?: IDuplicateChunk[];
 }
 
 export interface ITestingDocument {
@@ -207,12 +209,38 @@ export interface ITestingResult {
   labels?: Record<string, number>;
 }
 
+export interface IRetrievalMetaFilterCondition {
+  key: string;
+  op: string;
+  value: unknown;
+}
+
+/** The metadata filter the backend actually ran, LLM-generated ones included. */
+export interface IRetrievalMetaFilter {
+  method: 'auto' | 'semi_auto' | 'manual';
+  /**
+   * `no_matches` from auto / semi_auto drops the filter, so the search ran
+   * unfiltered; from manual it leaves nothing to search.
+   */
+  status: 'applied' | 'no_matches' | 'not_generated' | 'unsupported';
+  logic: string;
+  conditions: IRetrievalMetaFilterCondition[];
+  /** Documents the filter narrowed the search to. */
+  matched_document_count: number;
+  /**
+   * `chunk_fields`: the conditions ran on the document metadata stored on
+   * chunks, so no document count is known.
+   */
+  applied_on?: 'chunk_fields';
+}
+
 export interface INextTestingResult {
   chunks: ITestingChunk[];
   doc_aggs: ITestingDocument[];
   total: number;
   labels?: Record<string, number>;
   isRuned?: boolean;
+  meta_filter?: IRetrievalMetaFilter;
 }
 
 export type IRenameTag = { fromTag: string; toTag: string };

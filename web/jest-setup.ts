@@ -13,12 +13,20 @@ if (typeof globalThis.TextEncoder === 'undefined') {
   Object.assign(globalThis, { TextDecoder, TextEncoder });
 }
 
-// jsdom does not expose web streams; eventsource-parser reads TransformStream
-// at module scope (via hooks/logic-hooks.ts)
+// jsdom does not provide the WHATWG stream classes that eventsource-parser
+// touches at module scope (via hooks/logic-hooks.ts)
 if (typeof globalThis.TransformStream === 'undefined') {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { TransformStream } = require('node:stream/web');
-  Object.assign(globalThis, { TransformStream });
+  const {
+    ReadableStream,
+    TransformStream,
+    WritableStream,
+  } = require('node:stream/web');
+  Object.assign(globalThis, {
+    ReadableStream,
+    TransformStream,
+    WritableStream,
+  });
 }
 
 // jsdom does not implement CSS.supports; css-support.ts calls it at module scope
@@ -37,4 +45,16 @@ if (typeof globalThis.CSS.supports !== 'function') {
 if (typeof globalThis.fetch === 'undefined') {
   (globalThis as Record<string, unknown>).fetch = () =>
     Promise.reject(new Error('fetch is not available in tests'));
+}
+
+// jsdom lacks both; cmdk (inside SelectWithSearch) calls them on mount
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}
+if (typeof Element.prototype.scrollIntoView !== 'function') {
+  Element.prototype.scrollIntoView = () => {};
 }

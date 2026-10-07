@@ -1,0 +1,204 @@
+name: deploy-archa
+
+# Fork-only workflow: every push to main builds the RAGFlow image, pushes it to
+# GHCR and rolls it out to the archa VPS (ExCoLabs/archa, deploy/ → ~/archa).
+#
+# The VPS compose file runs ragflow and ragflow-worker from ${RAGFLOW_IMAGE}
+# in ~/archa/.env. The deploy job takes a backup, pins RAGFLOW_IMAGE to the
+# immutable main-<sha> tag and recreates both services. Roll back by
+# re-running an older successful run, or dispatch with `image` set.
+#
+# Secrets (same values as in ExCoLabs/archa):
+#   DEPLOY_SSH_KEY - private key authorized on the VPS
+#   DEPLOY_HOST    - ragflow.archa.excolabs.com
+#   DEPLOY_USER    - debian
+#
+# The GHCR package ghcr.io/excolabs/ragflow must be public, or the VPS must be
+# `docker login ghcr.io`-ed, for the pull to succeed.
+#
+# Not covered: the CUDA GPU worker (archa deploy-gpu-worker.yml) is built
+# FROM ${RAGFLOW_IMAGE} on its own node and has to be rebuilt by hand.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Deploy this existing image instead of building (e.g. ghcr.io/excolabs/ragflow:main-1a2b3c4d5)"
+        default: ""
+      skip_backup:
+        description: "Skip ops.py backup before the rollout"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    if: github.repository == 'ExCoLabs/ragflow' && inputs.image == ''
+    runs-on: ubuntu-24.04
+    # A newer push supersedes an in-flight build; deploys are never cancelled.
+    concurrency:
+      group: ${{ github.workflow }}-build
+      cancel-in-progress: true
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+
+    steps:
+      # The RAGFlow image is large (texlive + JDK + models + venv + node_modules).
+      # A stock ubuntu-24.04 runner does not have enough free disk to build it.
+      - name: Reclaim runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # The Dockerfile stamps VERSION with `git describe --tags --match=v*`, and
+      # the Go server refuses a database migrated by a newer version. The fork
+      # carries no tags, so take upstream's release tags.
+      - name: Fetch upstream release tags
+        run: |
+          git fetch --no-tags https://github.com/infiniflow/ragflow.git 'refs/tags/v*:refs/tags/v*'
+          git describe --tags --match='v*' --first-parent --always
+
+      # The Dockerfile defaults GOPROXY to goproxy.cn first, which drops connections
+      # from GitHub-hosted runners (http2 GOAWAY mid-download fails `go mod download`
+      # instead of falling through). Pin the go-builder stage to proxy.golang.org.
+      # Applied to the runner's checkout only, never committed.
+      - name: Use proxy.golang.org in the Go build stage
+        run: |
+          sed -i '/^FROM .* AS go-builder$/a ENV GOPROXY=https://proxy.golang.org,direct' Dockerfile
+          grep -n -A1 'AS go-builder' Dockerfile
+
+      - name: Compute image name
+        id: image
+        run: |
+          name="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ragflow"
+          sha="$(git rev-parse --short=9 HEAD)"
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "ref=${name}:main-${sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          build-args: |
+            NEED_MIRROR=0
+          tags: |
+            ${{ steps.image.outputs.name }}:main
+            ${{ steps.image.outputs.ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: Summary
+        run: |
+          {
+            echo "### Pushed"
+            echo '```'
+            echo "${{ steps.image.outputs.name }}:main"
+            echo "${{ steps.image.outputs.ref }}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  deploy:
+    needs: build
+    # Runs after a build, or alone when dispatched with an explicit image.
+    if: >-
+      always() && github.repository == 'ExCoLabs/ragflow' &&
+      (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.image != ''))
+    runs-on: ubuntu-24.04
+    environment: production
+    concurrency:
+      group: ${{ github.workflow }}-deploy
+      cancel-in-progress: false
+    env:
+      IMAGE: ${{ inputs.image || needs.build.outputs.image }}
+      SKIP_BACKUP: ${{ inputs.skip_backup && '1' || '0' }}
+
+    steps:
+      - name: Validate image reference
+        run: |
+          if ! [[ "${IMAGE}" =~ ^ghcr\.io/[a-z0-9._/-]+:[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Not a ghcr.io image reference: ${IMAGE}"
+            exit 1
+          fi
+
+      - name: SSH setup
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Pull before the backup so the service is down only for the recreate.
+      # ops.py reads ~/archa/.env itself; .env is never sourced (it holds values
+      # with spaces and is a secrets file).
+      - name: Roll out ${{ env.IMAGE }}
+        run: |
+          ssh -i ~/.ssh/id_deploy "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "IMAGE='${IMAGE}' SKIP_BACKUP='${SKIP_BACKUP}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/archa
+
+          docker pull "${IMAGE}"
+
+          if [ "${SKIP_BACKUP}" != "1" ]; then
+            python3 ragflow/ops.py backup
+          fi
+
+          previous=$(sed -n 's/^RAGFLOW_IMAGE=//p' .env | tail -n1)
+          echo "Previous RAGFLOW_IMAGE: ${previous:-<unset>}"
+          if grep -q '^RAGFLOW_IMAGE=' .env; then
+            sed -i "s|^RAGFLOW_IMAGE=.*|RAGFLOW_IMAGE=${IMAGE}|" .env
+          else
+            printf '\nRAGFLOW_IMAGE=%s\n' "${IMAGE}" >> .env
+          fi
+
+          docker compose up -d ragflow ragflow-worker
+          docker compose ps ragflow ragflow-worker
+          REMOTE
+
+      # The web server's entrypoint runs DB migrations first, so allow it a while.
+      - name: Wait for healthz
+        run: |
+          url="https://${{ secrets.DEPLOY_HOST }}/api/v1/system/healthz"
+          for _ in $(seq 60); do
+            if body=$(curl -fsS --max-time 10 "${url}") && echo "${body}" | grep -q '"status":"ok"'; then
+              echo "${body}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::${url} did not report status ok within 10 minutes"
+          echo "${body:-}"
+          exit 1
+
+      - name: Summary
+        run: echo "### Deployed \`${IMAGE}\`" >> "${GITHUB_STEP_SUMMARY}"

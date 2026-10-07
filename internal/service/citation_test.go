@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -402,6 +403,69 @@ func TestRepairSlotCitations_NoopWithoutSlotMarkersOrMap(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// RepairChunkIDCitations — markers naming a chunk id instead of a block
+// number ("【ID:a1b2c3d4e5f60718】"), which the client cannot resolve.
+// -----------------------------------------------------------------------
+
+func TestRepairChunkIDCitations(t *testing.T) {
+	chunks := []map[string]interface{}{
+		{"chunk_id": "c0", "content": "zero"},
+		{"chunk_id": "a1b2c3d4e5f60718", "content": "one"},
+		{"id": "claim_9f8e", "content": "claim"},
+	}
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"x [ID:a1b2c3d4e5f60718] y", "x [ID:1] y"},
+		{"x【ID:a1b2c3d4e5f60718】y", "x[ID:1]y"},
+		{"x 【ID：a1b2c3d4e5f60718】 y", "x [ID:1] y"},
+		{"x (ID: claim_9f8e) y", "x [ID:2] y"},
+		// Names no rendered chunk: dropped, not left as text.
+		{"25226【ID:deadbeefdeadbeef】.", "25226."},
+		{"x [ID:unknown] y", "x  y"},
+		// Not chunk-id markers: block numbers, ranges, slots, links and prose.
+		{"x 【ID:1】 [ID:1-3] [ID:Slot 0] y", "x 【ID:1】 [ID:1-3] [ID:Slot 0] y"},
+		{"see [Project Brief](https://example.com) (identity) [ID] y", "see [Project Brief](https://example.com) (identity) [ID] y"},
+	}
+	for _, c := range cases {
+		if got := RepairChunkIDCitations(c.in, chunks); got != c.want {
+			t.Errorf("RepairChunkIDCitations(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDecorateHarnessAnswerResolvesFullWidthAndChunkIDMarkers is the reported
+// failure end to end: over a one-block evidence list the model cited the
+// full-width "【ID:1】" (past the end of the list) and a chunk id it read in its
+// context. Both used to reach the reader as literal text. The id resolves to its
+// block and the out-of-range number is dropped, so the answer carries one
+// citation the client can open, and its document is the reference's.
+func TestDecorateHarnessAnswerResolvesFullWidthAndChunkIDMarkers(t *testing.T) {
+	kbinfos := map[string]interface{}{
+		"chunks": []map[string]interface{}{
+			{"chunk_id": "c-other", "content_with_weight": "x", "doc_id": "d2", "docnm_kwd": "Doc Two"},
+			{"chunk_id": "a1b2c3d4e5f60718", "content_with_weight": "price 25226", "doc_id": "d1", "docnm_kwd": "Doc One"},
+		},
+		"doc_aggs": []interface{}{
+			map[string]interface{}{"doc_id": "d1", "doc_name": "Doc One"},
+			map[string]interface{}{"doc_id": "d2", "doc_name": "Doc Two"},
+		},
+	}
+	s := &ChatPipelineService{}
+	res := s.decorateHarnessAnswer("The quoted price is 25226【ID:1】【ID:a1b2c3d4e5f60718】.",
+		kbinfos, nil, []string{"a1b2c3d4e5f60718"}, true)
+
+	if want := "The quoted price is 25226[ID:0]."; res.Answer != want {
+		t.Fatalf("answer = %q, want %q", res.Answer, want)
+	}
+	aggs, _ := res.Reference["doc_aggs"].([]interface{})
+	if len(aggs) != 1 || aggs[0].(map[string]interface{})["doc_id"] != "d1" {
+		t.Fatalf("reference doc_aggs = %#v, want only the cited Doc One", res.Reference["doc_aggs"])
+	}
+}
+
+// -----------------------------------------------------------------------
 // ExpandRangeCitations — range-merged citations ("[ID:1-3]") the model
 // produces on its own (no code path emits them).
 // -----------------------------------------------------------------------
@@ -618,5 +682,43 @@ func TestDecorateHarnessAnswerDropsCitationsForNotFoundAnswer(t *testing.T) {
 	chunks, _ := res.Reference["chunks"].([]map[string]interface{})
 	if len(chunks) != 1 || chunks[0]["id"] != "c0" {
 		t.Fatalf("reference chunks = %#v, want the evidence passage", res.Reference["chunks"])
+	}
+}
+
+// The agentic answer cites with `chunk_id: <id>`, but a model also copies ids
+// into its own marker style. Both resolve against the same reference payload,
+// and a marker whose chunk did not load is dropped instead of shown as text.
+func TestAgenticReferenceResolvesChunkIDMarkers(t *testing.T) {
+	final := "- Ojha bowled spin `chunk_id: aaa111`\n" +
+		"- He debuted in 2009 【ID:bbb222】\n" +
+		"- Unloaded claim [ID:ccc333]"
+	cited := agenticCitedChunkIDs(final)
+	if !reflect.DeepEqual(cited, []string{"aaa111", "bbb222", "ccc333"}) {
+		t.Fatalf("cited = %v", cited)
+	}
+	rows := []map[string]interface{}{
+		{"id": "bbb222", "doc_id": "d2", "docnm_kwd": "b.md", "content_with_weight": "b"},
+		{"id": "aaa111", "doc_id": "d1", "docnm_kwd": "a.md", "content_with_weight": "a"},
+	}
+
+	reference, answer := agenticReferenceFromRows(t.Context(), final, cited, rows)
+
+	want := "- Ojha bowled spin `chunk_id: aaa111` [ID:0]\n" +
+		"- He debuted in 2009 [ID:1]\n" +
+		"- Unloaded claim "
+	if answer != want {
+		t.Errorf("answer = %q, want %q", answer, want)
+	}
+	chunks := reference["chunks"].([]map[string]interface{})
+	if len(chunks) != 2 || chunks[0]["id"] != "aaa111" || chunks[1]["id"] != "bbb222" {
+		t.Errorf("reference chunks = %v", chunks)
+	}
+	if aggs := reference["doc_aggs"].([]interface{}); len(aggs) != 2 {
+		t.Errorf("doc_aggs = %v", aggs)
+	}
+
+	empty, answer := agenticReferenceFromRows(t.Context(), final, cited, nil)
+	if len(empty) != 0 || strings.Contains(answer, "ID:") {
+		t.Errorf("without loaded chunks: reference = %v, answer = %q", empty, answer)
 	}
 }

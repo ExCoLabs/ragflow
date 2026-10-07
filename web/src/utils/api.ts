@@ -229,6 +229,10 @@ export default {
   fetchPipelineDatasetLogs: (datasetId: string) =>
     `${restAPIv1}/datasets/${datasetId}/ingestions`,
   listPipelines: `${restAPIv1}/pipelines?type=builtin`,
+  chunkMetadata: (datasetId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/chunk_metadata`,
+  chunkMetadataBackfill: (datasetId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/chunk_metadata/backfill`,
   runIndex: (datasetId: string, indexType: string) =>
     `${restAPIv1}/datasets/${datasetId}/index?type=${indexType.toLowerCase()}`,
   traceIndex: (datasetId: string, indexType: string) =>

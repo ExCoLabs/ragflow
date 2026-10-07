@@ -25,10 +25,10 @@ import {
 import { IReference, IReferenceChunk } from '@/interfaces/database/chat';
 import {
   currentReg,
+  normalizeCitationMarkers,
   parseCitationIndex,
   preprocessLaTeX,
   replaceRetrievingToSection,
-  replaceTextByOldReg,
   replaceThinkToSection,
   showImage,
 } from '@/utils/chat';
@@ -61,6 +61,7 @@ import { useIsDarkTheme } from './theme-provider';
 import { Button } from './ui/button';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from './ui/hover-card';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
+import { ReferenceDuplicates } from './reference-duplicates';
 
 const getChunkIndex = (match: string) =>
   parseCitationIndex(match.replace(/\[|\]/g, ''));
@@ -84,7 +85,7 @@ const FloatingChatWidgetMarkdown = ({
 
   const contentWithCursor = useMemo(() => {
     const text = content === '' ? t('chat.searching') : content;
-    const nextText = replaceTextByOldReg(text);
+    const nextText = normalizeCitationMarkers(text);
     return pipe(
       replaceThinkToSection,
       replaceRetrievingToSection,
@@ -265,6 +266,7 @@ const FloatingChatWidgetMarkdown = ({
                 </Tooltip>
               </section>
             )}
+            <ReferenceDuplicates duplicates={chunkItem?.duplicates} />
           </div>
         </div>
       );

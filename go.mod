@@ -30,6 +30,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cloudwego/eino v0.10.0-alpha.33
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/denisenkom/go-mssqldb v0.12.3
 	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/elastic/go-elasticsearch/v8 v8.19.1

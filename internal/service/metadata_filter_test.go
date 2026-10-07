@@ -17,11 +17,41 @@
 package service
 
 import (
+	"context"
 	"sort"
 	"testing"
 
 	"ragflow/internal/common"
 )
+
+func TestApplyMetaDataFilterWithDiagnosticsGenerationErrors(t *testing.T) {
+	for _, method := range []string{"auto", "semi_auto"} {
+		t.Run(method, func(t *testing.T) {
+			filter := map[string]interface{}{"method": method}
+			if method == "semi_auto" {
+				filter["semi_auto"] = []interface{}{"author"}
+			}
+			diagnostic := &common.MetadataFilterDiagnostic{}
+			docIDs := ApplyMetaDataFilterWithDiagnostics(
+				context.Background(),
+				filter,
+				common.MetaData{"author": {"Ada": {"doc-1"}}},
+				"question",
+				nil,
+				[]string{"doc-1"},
+				nil,
+				diagnostic,
+			)
+			// A generation error preserves the unfiltered base scope.
+			if len(docIDs) != 1 || docIDs[0] != "doc-1" {
+				t.Fatalf("docIDs = %v, want [doc-1]", docIDs)
+			}
+			if diagnostic.Method != method || diagnostic.Status != "not_generated" {
+				t.Fatalf("diagnostic = %+v, want method %q and status not_generated", diagnostic, method)
+			}
+		})
+	}
+}
 
 func TestApplyMetaFilter_Equals(t *testing.T) {
 	metas := common.MetaData{
@@ -521,4 +551,62 @@ func TestCompareValuesDirectly(t *testing.T) {
 			t.Errorf("compareValues(%q, %q, %q) = %v, want %v", tt.v1, tt.v2, tt.op, got, tt.want)
 		}
 	}
+}
+
+// ApplyMetaDataFilter's outcomes must stay distinguishable: "the metadata could
+// not narrow the search" (nil) is not the same answer as "no document matches"
+// (["-999"]), because the returned slice is applied as a hard document scope.
+func TestApplyMetaDataFilter_SeparatesNoNarrowingFromNoMatch(t *testing.T) {
+	base := []string{"doc-1", "doc-2"}
+	metas := common.MetaData{"author": {"Zhang San": {"doc-1"}}}
+
+	// The generator answering with no conditions is the common case on a large
+	// dataset: either the question names no metadata, or the value space was too
+	// big to show and generation was refused. Neither means "no such document".
+	for _, method := range []string{"auto", "semi_auto"} {
+		t.Run(method+" without generated conditions returns no scope", func(t *testing.T) {
+			chatModel, driver := newCapturingFilterModel(t)
+			filter := map[string]interface{}{"method": method}
+			if method == "semi_auto" {
+				filter["semi_auto"] = []interface{}{"author"}
+			}
+
+			got := ApplyMetaDataFilter(t.Context(), filter, metas, "who wrote it?", chatModel, base, nil)
+
+			if driver.calls != 1 {
+				t.Fatalf("model calls: got %d, want 1", driver.calls)
+			}
+			if got != nil {
+				t.Fatalf("got %v, want nil so the caller keeps its own document scope", got)
+			}
+		})
+	}
+
+	t.Run("manual conditions matching nothing return the sentinel", func(t *testing.T) {
+		filter := map[string]interface{}{
+			"method": "manual",
+			"logic":  "and",
+			"manual": []interface{}{map[string]interface{}{"key": "author", "op": "=", "value": "nobody"}},
+		}
+
+		got := ApplyMetaDataFilter(t.Context(), filter, metas, "", nil, base, nil)
+
+		if len(got) != 1 || got[0] != NoMatchDocIDSentinel {
+			t.Fatalf("got %v, want [%s]: the user asked for these exact conditions", got, NoMatchDocIDSentinel)
+		}
+	})
+
+	t.Run("manual conditions that match return their documents", func(t *testing.T) {
+		filter := map[string]interface{}{
+			"method": "manual",
+			"logic":  "and",
+			"manual": []interface{}{map[string]interface{}{"key": "author", "op": "=", "value": "Zhang San"}},
+		}
+
+		got := ApplyMetaDataFilter(t.Context(), filter, metas, "", nil, base, nil)
+
+		if len(got) != 1 || got[0] != "doc-1" {
+			t.Fatalf("got %v, want [doc-1]", got)
+		}
+	})
 }

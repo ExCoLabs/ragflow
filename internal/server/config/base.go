@@ -36,6 +36,8 @@ type Config struct {
 	log  LogConfig
 	smtp common.SMTPConfig
 
+	userDefaultLLM UserDefaultLLMConfig
+
 	// From environments
 	environments Environments
 

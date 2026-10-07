@@ -44,6 +44,31 @@ func TestParseArgsMigrateSelectsMode(t *testing.T) {
 	}
 }
 
+// --retokenize hands every argument after it to the action, so server options
+// such as the config path go before it.
+func TestParseArgsRetokenizeTakesTheRestOfTheLine(t *testing.T) {
+	args, err := parseArgsForTest(t, "--config", "conf.yaml", "--retokenize", "--kb-id", "kb1", "--dry-run", "--slice", "1", "--slices", "2")
+	if err != nil {
+		t.Fatalf("parseArgs error = %v", err)
+	}
+	if args.mode == nil || *args.mode != "retokenize" {
+		t.Fatalf("mode = %v, want retokenize", args.mode)
+	}
+	if args.configPath == nil || *args.configPath != "conf.yaml" {
+		t.Errorf("config path = %v", args.configPath)
+	}
+	opts := args.retokenize
+	if opts == nil || len(opts.DatasetIDs) != 1 || opts.DatasetIDs[0] != "kb1" || !opts.DryRun || opts.Slice != 1 || opts.Slices != 2 {
+		t.Errorf("retokenize options = %+v", opts)
+	}
+
+	for _, argv := range [][]string{{"--retokenize"}, {"--retokenize", "--kb-id", "kb1", "--config", "conf.yaml"}} {
+		if _, err := parseArgsForTest(t, argv...); err == nil {
+			t.Errorf("parseArgs(%v) error = nil, want error", argv)
+		}
+	}
+}
+
 func TestParseArgsLogLevel(t *testing.T) {
 	for _, level := range []string{"debug", "info", "warn", "error"} {
 		for _, argv := range [][]string{{"--api", "--log-level", level}, {"--migrate", "--log-level=" + level}} {

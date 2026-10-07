@@ -1,5 +1,7 @@
 package service
 
+import "ragflow/internal/common"
+
 // CheckEmbeddingRequest is the request structure for checking embedding compatibility.
 type CheckEmbeddingRequest struct {
 	EmbeddingID string `json:"embd_id" binding:"required"`
@@ -46,6 +48,7 @@ type SearchDatasetsRequest struct {
 	DocumentIDs              []string               `json:"document_ids,omitempty"`
 	DocIDs                   []string               `json:"doc_ids,omitempty"`
 	UseKG                    *bool                  `json:"use_kg,omitempty"`
+	TOCEnhance               *bool                  `json:"toc_enhance,omitempty"`
 	KNNTopK                  *int                   `json:"knn_top_k,omitempty"`
 	TopK                     *int                   `json:"top_k,omitempty"` // Legacy alias for knn_top_k.
 	KNNNumCandidates         *int                   `json:"knn_num_candidates,omitempty"`
@@ -53,7 +56,9 @@ type SearchDatasetsRequest struct {
 	SearchID                 *string                `json:"search_id,omitempty"`
 	MetadataCondition        map[string]interface{} `json:"metadata_condition,omitempty"`
 	MetadataFilter           map[string]interface{} `json:"meta_data_filter,omitempty"`
+	MetadataBoost            interface{}            `json:"metadata_boost,omitempty"` // list of {key, op, value, weight} or {"manual": [...], "max_total"}
 	RerankID                 *string                `json:"rerank_id,omitempty"`
+	ChatID                   *string                `json:"chat_id,omitempty"` // Chat model ID for the LLM-assisted steps.
 	Keyword                  *bool                  `json:"keyword,omitempty"`
 	Highlight                *bool                  `json:"highlight,omitempty"`
 	SimilarityThreshold      *float64               `json:"similarity_threshold,omitempty"`
@@ -69,6 +74,9 @@ type SearchDatasetsResponse struct {
 	DocAggs []map[string]interface{} `json:"doc_aggs"`
 	Labels  *map[string]float64      `json:"labels"`
 	Total   int64                    `json:"total"`
+	// MetaFilter is what a requested metadata filter resolved to (for
+	// auto/semi_auto, the LLM's conditions). Omitted when none was requested.
+	MetaFilter *common.MetadataFilterDiagnostic `json:"meta_filter,omitempty"`
 }
 
 // SearchDatasetRequest is the request structure for searching chunks within one dataset.
@@ -81,6 +89,7 @@ type SearchDatasetRequest struct {
 	DocumentIDs              []string               `json:"document_ids,omitempty"`
 	DocIDs                   []string               `json:"doc_ids,omitempty"`
 	UseKG                    *bool                  `json:"use_kg,omitempty"`
+	TOCEnhance               *bool                  `json:"toc_enhance,omitempty"`
 	KNNTopK                  *int                   `json:"knn_top_k,omitempty"`
 	TopK                     *int                   `json:"top_k,omitempty"` // Legacy alias for knn_top_k.
 	KNNNumCandidates         *int                   `json:"knn_num_candidates,omitempty"`
@@ -88,7 +97,9 @@ type SearchDatasetRequest struct {
 	SearchID                 *string                `json:"search_id,omitempty"`
 	MetadataCondition        map[string]interface{} `json:"metadata_condition,omitempty"`
 	MetadataFilter           map[string]interface{} `json:"meta_data_filter,omitempty"`
+	MetadataBoost            interface{}            `json:"metadata_boost,omitempty"` // list of {key, op, value, weight} or {"manual": [...], "max_total"}
 	RerankID                 *string                `json:"rerank_id,omitempty"`
+	ChatID                   *string                `json:"chat_id,omitempty"` // Chat model ID for the LLM-assisted steps.
 	Keyword                  *bool                  `json:"keyword,omitempty"`
 	SimilarityThreshold      *float64               `json:"similarity_threshold,omitempty"`
 	KeywordsSimilarityWeight *float64               `json:"keywords_similarity_weight,omitempty"`
@@ -111,6 +122,7 @@ func (req *SearchDatasetRequest) ToSearchDatasetsRequest(datasetID string) *Sear
 		DocumentIDs:              req.DocumentIDs,
 		DocIDs:                   req.DocIDs,
 		UseKG:                    req.UseKG,
+		TOCEnhance:               req.TOCEnhance,
 		KNNTopK:                  req.KNNTopK,
 		TopK:                     req.TopK,
 		KNNNumCandidates:         req.KNNNumCandidates,
@@ -118,7 +130,9 @@ func (req *SearchDatasetRequest) ToSearchDatasetsRequest(datasetID string) *Sear
 		SearchID:                 req.SearchID,
 		MetadataCondition:        req.MetadataCondition,
 		MetadataFilter:           req.MetadataFilter,
+		MetadataBoost:            req.MetadataBoost,
 		RerankID:                 req.RerankID,
+		ChatID:                   req.ChatID,
 		Keyword:                  req.Keyword,
 		SimilarityThreshold:      req.SimilarityThreshold,
 		KeywordsSimilarityWeight: req.KeywordsSimilarityWeight,

@@ -16,7 +16,11 @@
 
 package service
 
-import "ragflow/internal/common"
+import (
+	"ragflow/internal/common"
+	"ragflow/internal/server"
+	"unicode"
+)
 
 type LoginChannel struct {
 	Channel     string `json:"channel"`
@@ -27,6 +31,40 @@ type LoginChannel struct {
 // GetLoginChannels gets all supported authentication channels
 func (s *UserService) GetLoginChannels() ([]*LoginChannel, common.ErrorCode, error) {
 	channels := make([]*LoginChannel, 0)
-
+	cfg := server.GetConfig()
+	if cfg == nil {
+		return channels, common.CodeSuccess, nil
+	}
+	for _, name := range cfg.GetOAuthChannelNames() {
+		ch, _ := cfg.GetOAuthChannel(name)
+		channel := &LoginChannel{Channel: name, DisplayName: ch.DisplayName, Icon: ch.Icon}
+		if channel.DisplayName == "" {
+			channel.DisplayName = titleCase(name)
+		}
+		if channel.Icon == "" {
+			channel.Icon = "sso"
+		}
+		channels = append(channels, channel)
+	}
 	return channels, common.CodeSuccess, nil
+}
+
+// titleCase mirrors Python's str.title(), the default display name of a
+// channel: upper-case each letter that follows a non-letter.
+func titleCase(s string) string {
+	out := []rune(s)
+	prevLetter := false
+	for i, r := range out {
+		if unicode.IsLetter(r) {
+			if prevLetter {
+				out[i] = unicode.ToLower(r)
+			} else {
+				out[i] = unicode.ToUpper(r)
+			}
+			prevLetter = true
+		} else {
+			prevLetter = false
+		}
+	}
+	return string(out)
 }

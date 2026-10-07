@@ -220,6 +220,9 @@ type RetrieveRequest struct {
 	// MetaDataFilter restricts retrieval to chunks whose metadata matches
 	// Nil means no filtering.
 	MetaDataFilter map[string]any
+	// ChunkMeta is the session's resolved filter/boost on document metadata
+	// stored on chunks (service.ApplyMetaDataScope). Nil changes nothing.
+	ChunkMeta *common.ChunkMetaScope
 	// RankFeature: `rank_feature` argument
 	// (agentic_rag.py:retrieve): question-type tags produced by
 	// label_question(question, self.kbs) that the retriever uses to boost
@@ -407,6 +410,9 @@ type SearchDeps struct {
 	// MetaDataFilter restricts retrieval to matching chunk metadata. Nil means no
 	// filtering.
 	MetaDataFilter map[string]any
+	// ChunkMeta is the session-wide filter/boost on chunk metadata fields,
+	// resolved by the caller from the chat's meta_data_filter.
+	ChunkMeta *common.ChunkMetaScope
 	// DocScope is the session-wide document restriction. It is a CEILING applied by
 	// scopedDocIDs before any search: an explicit caller scope is intersected with it.
 	// Empty means "search everything".
@@ -788,6 +794,7 @@ func runSearch(ctx context.Context, deps SearchDeps, p SearchParams, opts search
 			KeywordsSimilarityWeight: &opts.keywordsSimilarityWeight,
 			TenantID:                 deps.TenantID,
 			MetaDataFilter:           deps.MetaDataFilter,
+			ChunkMeta:                deps.ChunkMeta,
 			RankFeature:              rankFeature,
 			ExcludeCompiled:          opts.excludeCompiled,
 		})
@@ -2038,9 +2045,10 @@ func DocAggs(chunks []map[string]any) []map[string]any {
 		return nil
 	}
 	type stat struct {
-		count int
-		chars int
-		name  string
+		count   int
+		chars   int
+		name    string
+		dataset string
 	}
 	order := make([]string, 0, 8)
 	stats := map[string]*stat{}
@@ -2057,7 +2065,7 @@ func DocAggs(chunks []map[string]any) []map[string]any {
 		}
 		s, ok := stats[id]
 		if !ok {
-			s = &stat{name: DocTitleOf(c)}
+			s = &stat{name: DocTitleOf(c), dataset: DatasetIDOf(c)}
 			stats[id] = s
 			order = append(order, id)
 		}
@@ -2070,12 +2078,14 @@ func DocAggs(chunks []map[string]any) []map[string]any {
 		// Field names match runtime's referenceDocAggsFromRetrieval
 		// (doc_id / doc_name / count) so these aggregations can be handed
 		// straight to CanvasState.SetRetrievalReferences without translation.
-		out = append(out, map[string]any{
+		agg := map[string]any{
 			"doc_id":     id,
 			"doc_name":   s.name,
 			"count":      s.count,
 			"char_count": s.chars,
-		})
+		}
+		setDocAggDataset(agg, s.dataset)
+		out = append(out, agg)
 	}
 	return out
 }

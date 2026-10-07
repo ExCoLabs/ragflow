@@ -10,14 +10,20 @@ import {
   useStaleDatasetFormSchema,
 } from '@/hooks/use-stale-dataset-validation';
 import { cn } from '@/lib/utils';
+import { ChatSearchParam } from '@/pages/dataset/testing/chat-retrieval-settings';
+import { Routes } from '@/routes';
 import {
   removeUselessFieldsFromValues,
   setLLMSettingEnabledValues,
 } from '@/utils/form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { isEmpty, omit } from 'lodash';
-import { LucidePanelRightClose, LucideSettings } from 'lucide-react';
-import { useEffect } from 'react';
+import {
+  LucidePanelRightClose,
+  LucideSettings,
+  LucideTextSearch,
+} from 'lucide-react';
+import { useCallback, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router';
@@ -172,6 +178,19 @@ export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
 
   useRevalidateStaleDatasetIds(form, datasetsFetched);
 
+  const firstDatasetId = data?.dataset_ids?.[0];
+
+  // Opens in a new tab so unsaved edits here survive; the test uses the saved
+  // settings.
+  const openRetrievalTesting = useCallback(() => {
+    const params = new URLSearchParams({ [ChatSearchParam]: id! });
+    window.open(
+      `${Routes.DatasetBase}${Routes.DatasetTesting}/${firstDatasetId}?${params}`,
+      '_blank',
+      'noopener,noreferrer',
+    );
+  }, [firstDatasetId, id]);
+
   return (
     <>
       {settingVisible || (
@@ -234,6 +253,17 @@ export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
                 </ScrollArea>
 
                 <div className="p-5 pt-4 space-x-5 text-right">
+                  <Button
+                    type="button"
+                    variant={'ghost'}
+                    onClick={openRetrievalTesting}
+                    disabled={!firstDatasetId}
+                    title={t('chat.testRetrievalTip')}
+                    data-testid="chat-detail-settings-test-retrieval"
+                  >
+                    <LucideTextSearch />
+                    {t('chat.testRetrieval')}
+                  </Button>
                   <Button
                     variant={'outline'}
                     onClick={switchSettingVisible}

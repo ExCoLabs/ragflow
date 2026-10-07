@@ -38,10 +38,50 @@ type MetaValueDocs map[string][]string
 // Example: {"author": {"Zhang San": ["doc1"]}, "year": {"2024": ["doc1", "doc2"]}}
 type MetaData map[string]MetaValueDocs
 
+// MetaValueSpace maps a metadata field name to its distinct values.
+// Example: {"author": ["Zhang San", "Li Si"], "year": ["2024", "2025"]}
+//
+// This is what the filter generator picks a metadata filter from. It carries no
+// document IDs: the generator never needs them, and building the space from an
+// aggregation rather than from a document scan is what makes it complete.
+type MetaValueSpace map[string][]string
+
+// ValueSpace drops the document IDs, keeping the distinct values per key.
+func (m MetaData) ValueSpace() MetaValueSpace {
+	space := make(MetaValueSpace, len(m))
+	for key, values := range m {
+		list := make([]string, 0, len(values))
+		for value := range values {
+			list = append(list, value)
+		}
+		sort.Strings(list)
+		space[key] = list
+	}
+	return space
+}
+
 // MetaFilterInput groups filter conditions with their logic operator.
 type MetaFilterInput struct {
 	Conditions []MetaCondition
 	Logic      string // "and" | "or"
+}
+
+// MetadataFilterDiagnostic captures the runtime outcome of a metadata-filter
+// pass: the method, whether it was applied, disabled, generated nothing,
+// matched nothing or was unsupported, the conditions it ran (for
+// auto/semi_auto the LLM's) and how many documents they matched. The
+// retrieval test reports it as meta_filter, agent references as one entry of
+// metadata_filters.
+type MetadataFilterDiagnostic struct {
+	Method               string                   `json:"method"`
+	Status               string                   `json:"status"`
+	Conditions           []map[string]interface{} `json:"conditions"`
+	Logic                string                   `json:"logic"`
+	MatchedDocumentCount int                      `json:"matched_document_count"`
+	// AppliedOn is "chunk_fields" when the conditions ran as a filter on the
+	// document metadata stored on chunks (no document id list, so
+	// MatchedDocumentCount is not known); empty for the document id path.
+	AppliedOn string `json:"applied_on,omitempty"`
 }
 
 // operatorMapping translates Python-style operators to internal symbols.

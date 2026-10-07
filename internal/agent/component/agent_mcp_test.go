@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
@@ -183,5 +184,77 @@ func TestAgentMCPToolNamesDoNotCollide(t *testing.T) {
 		if info.Name != want[i] {
 			t.Errorf("tool %d name = %q, want %q", i, info.Name, want[i])
 		}
+	}
+}
+
+func TestIndexedToolNameAliases(t *testing.T) {
+	cases := []struct {
+		name  string
+		tools []string
+		want  map[string]string // indexed tool -> bare alias
+	}{
+		{name: "unique indexed tool", tools: []string{"search_archa_data_1", "search_archa_metodika_0"}, want: map[string]string{"search_archa_data_1": "search_archa_data", "search_archa_metodika_0": "search_archa_metodika"}},
+		{name: "ambiguous bare name", tools: []string{"search_0", "search_1"}, want: nil},
+		{name: "bare name is itself a tool", tools: []string{"expert", "expert_2"}, want: nil},
+		{name: "not indexed", tools: []string{"retrieval", "web_search", "trailing_"}, want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tools := make([]tool.BaseTool, 0, len(tc.tools))
+			for _, name := range tc.tools {
+				tools = append(tools, &passthroughTool{name: name})
+			}
+			aliases, err := indexedToolNameAliases(t.Context(), tools)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(aliases) != len(tc.want) {
+				t.Fatalf("aliases = %+v, want %+v", aliases, tc.want)
+			}
+			for indexed, bare := range tc.want {
+				if got := aliases[indexed].NameAliases; len(got) != 1 || got[0] != bare {
+					t.Errorf("aliases[%q] = %v, want [%q]", indexed, got, bare)
+				}
+			}
+		})
+	}
+}
+
+func TestToolsNodeDispatchesBareNameToUniqueIndexedTool(t *testing.T) {
+	data := &passthroughTool{name: "search_archa_data_1"}
+	metodika := &passthroughTool{name: "search_archa_metodika_0"}
+	tools := []tool.BaseTool{data, metodika}
+	aliases, err := indexedToolNameAliases(t.Context(), tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := compose.NewToolNode(t.Context(), &compose.ToolsNodeConfig{Tools: tools, ToolAliases: aliases})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := schema.AssistantMessage("", []schema.ToolCall{{ID: "call1", Type: "function", Function: schema.FunctionCall{Name: "search_archa_data", Arguments: `{"query":"x"}`}}})
+	out, err := node.Invoke(t.Context(), call)
+	if err != nil {
+		t.Fatalf("bare tool name was not dispatched: %v", err)
+	}
+	if len(out) != 1 || out[0].Content != `{"query":"x"}` {
+		t.Fatalf("unexpected tool output: %+v", out)
+	}
+	if data.calls.Load() != 1 || metodika.calls.Load() != 0 {
+		t.Fatalf("dispatched data=%d metodika=%d, want 1/0", data.calls.Load(), metodika.calls.Load())
+	}
+
+	ambiguous := []tool.BaseTool{&passthroughTool{name: "search_0"}, &passthroughTool{name: "search_1"}}
+	aliases, err = indexedToolNameAliases(t.Context(), ambiguous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err = compose.NewToolNode(t.Context(), &compose.ToolsNodeConfig{Tools: ambiguous, ToolAliases: aliases})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call = schema.AssistantMessage("", []schema.ToolCall{{ID: "call2", Type: "function", Function: schema.FunctionCall{Name: "search", Arguments: `{}`}}})
+	if _, err := node.Invoke(t.Context(), call); err == nil {
+		t.Fatal("ambiguous bare tool name must not be dispatched")
 	}
 }

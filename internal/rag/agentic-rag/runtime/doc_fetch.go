@@ -103,17 +103,18 @@ func fetchFullDocument(ctx context.Context, deps SearchDeps, docID string, maxTo
 		return nil, nil
 	}
 
-	docName := ""
+	docName, datasetID := "", ""
 	for _, c := range chunks {
-		if t := DocTitleOf(c); t != "" {
-			docName = t
-			break
+		if docName == "" {
+			docName = DocTitleOf(c)
+		}
+		if datasetID == "" {
+			datasetID = DatasetIDOf(c)
 		}
 	}
-	aggs := []map[string]any{
-		{"doc_name": docName, "doc_id": docID, "count": len(chunks)},
-	}
-	return chunks, aggs
+	agg := map[string]any{"doc_name": docName, "doc_id": docID, "count": len(chunks)}
+	setDocAggDataset(agg, datasetID)
+	return chunks, []map[string]any{agg}
 }
 
 // summarizeDocument

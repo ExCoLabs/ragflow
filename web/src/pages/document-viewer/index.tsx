@@ -39,6 +39,12 @@ const DocumentViewer = () => {
     return;
   }
 
+  const isHandled =
+    Images.includes(ext!) ||
+    ['md', 'mdx', 'txt', 'eml', 'epub', 'pdf', 'xlsx', 'csv', 'docx', 'ppt', 'pptx'].includes(
+      ext!,
+    );
+
   return (
     <section className="w-full h-full">
       {Images.includes(ext!) && (
@@ -50,7 +56,9 @@ const DocumentViewer = () => {
       {(ext === 'md' || ext === 'mdx') && (
         <Md url={api} className="!h-dvh p-5"></Md>
       )}
-      {ext === 'txt' && <TxtPreviewer url={api}></TxtPreviewer>}
+      {(ext === 'txt' || ext === 'eml') && (
+        <TxtPreviewer url={api}></TxtPreviewer>
+      )}
 
       {ext === 'epub' && (
         <EpubPreviewer url={api} className="!h-dvh p-5"></EpubPreviewer>
@@ -59,9 +67,7 @@ const DocumentViewer = () => {
       {ext === 'pdf' && (
         <PdfPreview url={api} className="!h-dvh p-5"></PdfPreview>
       )}
-      {(ext === 'xlsx' || ext === 'xls') && (
-        <ExcelCsvPreviewer url={api}></ExcelCsvPreviewer>
-      )}
+      {ext === 'xlsx' && <ExcelCsvPreviewer url={api}></ExcelCsvPreviewer>}
       {ext === 'csv' && (
         <section className="m-1">
           <CSVFileViewer url={api} />
@@ -72,6 +78,14 @@ const DocumentViewer = () => {
 
       {(ext === 'ppt' || ext === 'pptx') && (
         <PptPreviewer url={api} className="!h-dvh p-5"></PptPreviewer>
+      )}
+
+      {!isHandled && (
+        <div className="flex h-full items-center justify-center">
+          <a href={api} className="text-text-primary underline">
+            Download file
+          </a>
+        </div>
       )}
     </section>
   );

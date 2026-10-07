@@ -423,3 +423,69 @@ func TestS3StorageRemoveBucketHeadBucketErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestS3StorageRemoveBucketFallsBackWhenVersionListingIsDenied(t *testing.T) {
+	var deleteBody string
+	storage := newS3TestStorage("us-east-1", func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodHead:
+			return s3Response(http.StatusOK, ""), nil
+		case req.URL.Query().Has("versions"):
+			return s3Response(http.StatusForbidden, `<Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>`), nil
+		case req.URL.Query().Get("list-type") == "2":
+			if got := req.URL.Query().Get("prefix"); got != "prefix/kb01/" {
+				t.Fatalf("ListObjectsV2 prefix = %q, want prefix/kb01/", got)
+			}
+			return s3Response(http.StatusOK, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/kb01/document</Key></Contents></ListBucketResult>`), nil
+		case req.URL.Query().Has("delete"):
+			body, _ := io.ReadAll(req.Body)
+			deleteBody = string(body)
+			return s3Response(http.StatusOK, `<DeleteResult/>`), nil
+		}
+		t.Fatalf("unexpected request: %s %s", req.Method, req.URL)
+		return nil, nil
+	})
+	storage.bucket = "physical"
+	storage.prefixPath = "prefix"
+	if err := storage.RemoveBucket(t.Context(), "kb01"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(deleteBody, `<Key>prefix/kb01/document</Key>`) || strings.Contains(deleteBody, "<VersionId>") {
+		t.Fatalf("DeleteObjects body = %s, want the current object without a version id", deleteBody)
+	}
+}
+
+func TestS3StorageRemoveEmptyBucketFallsBackWhenVersionListingIsDenied(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		listing   string
+		wantEmpty bool
+	}{
+		{name: "empty", listing: `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`, wantEmpty: true},
+		{name: "nonempty", listing: `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/kb01/file</Key></Contents></ListBucketResult>`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			storage := newS3TestStorage("us-east-1", func(req *http.Request) (*http.Response, error) {
+				switch {
+				case req.Method == http.MethodHead:
+					return s3Response(http.StatusOK, ""), nil
+				case req.URL.Query().Has("versions"):
+					return s3Response(http.StatusForbidden, `<Error><Code>AccessDenied</Code></Error>`), nil
+				case req.URL.Query().Get("list-type") == "2":
+					return s3Response(http.StatusOK, test.listing), nil
+				}
+				t.Fatalf("unexpected request: %s %s", req.Method, req.URL)
+				return nil, nil
+			})
+			storage.bucket = "physical"
+			storage.prefixPath = "prefix"
+			err := storage.RemoveEmptyBucket(t.Context(), "kb01")
+			if test.wantEmpty && err != nil {
+				t.Fatalf("RemoveEmptyBucket = %v, want nil for an empty logical bucket", err)
+			}
+			if !test.wantEmpty && err == nil {
+				t.Fatal("RemoveEmptyBucket returned nil for a nonempty logical bucket")
+			}
+		})
+	}
+}

@@ -637,7 +637,10 @@ func (s *ChatPipelineService) AsyncChat(
 
 		// meta_data_filter — use LLM to map the question to metadata
 		// criteria, then filter docIDs to matching
-		// documents only.
+		// documents only. When the datasets carry document metadata on their
+		// chunks, the filter and the metadata boost apply on those fields
+		// instead (chunkMetaScope).
+		var chunkMetaScope *common.ChunkMetaScope
 		if chat.MetaDataFilter != nil && len(*chat.MetaDataFilter) > 0 && len(kbs) > 0 {
 			kbIDs := kbIDStrings(kbs)
 			if metaQ := questions[len(questions)-1]; metaQ != "" {
@@ -647,7 +650,7 @@ func (s *ChatPipelineService) AsyncChat(
 					flattedMeta, mErr = s.MetadataSvc.GetFlattedMetaByKBs(ctx, kbIDs)
 				}
 				if mErr == nil {
-					if filtered, _ := ApplyMetaDataFilter(
+					scope := ApplyMetaDataScope(
 						ctx,
 						*chat.MetaDataFilter,
 						flattedMeta,
@@ -655,7 +658,10 @@ func (s *ChatPipelineService) AsyncChat(
 						chatModel,
 						docIDs,
 						kbIDs,
-					); filtered != nil {
+						ChunkMetadataConfigForKBs(kbs),
+					)
+					chunkMetaScope = scope.ChunkMeta
+					if filtered := scope.DocIDs; filtered != nil {
 						common.Debug("meta_data_filter applied",
 							zap.Int("filtered_count", len(filtered)),
 							zap.Int("pre_filter_count", len(docIDs)))
@@ -866,6 +872,7 @@ func (s *ChatPipelineService) AsyncChat(
 					SimilarityThreshold:    chat.SimilarityThreshold,
 					VectorSimilarityWeight: chat.VectorSimilarityWeight,
 					RerankCandidatesCount:  int(chat.RerankCandidatesCount),
+					ChunkMeta:              chunkMetaScope,
 				}, webSearch, sink, thinkSink, harnessSystemPrompt, history)
 				// The harness streams think-then-answer inside ONE compose call.
 				// Close the block here, once that call (and its trailing
@@ -931,6 +938,8 @@ func (s *ChatPipelineService) AsyncChat(
 							RerankModel:            rerankModel,
 							EmbeddingModel:         embModel,
 							Aggs:                   func() *bool { v := true; return &v }(),
+							ChunkMeta:              chunkMetaScope,
+							Language:               entity.KnowledgebasesLanguage(kbs),
 						}
 
 						result, retErr := retrievalSvc.Retrieval(ctx, req)
@@ -2374,6 +2383,10 @@ func (s *ChatPipelineService) getModels(ctx context.Context, chat *entity.Chat) 
 	var chatModel *modelModule.ChatModel
 	if err == nil {
 		chatModel = modelModule.NewChatModel(target.Driver, &target.ModelName, target.APIConfig)
+		// The context window, not the max_output the target carries alongside
+		// it: prompt budgets (gen_meta_filter's among them) are measured
+		// against the model's total context.
+		chatModel.ContextLength = target.ContextLength
 	}
 
 	// Rerank model.
@@ -3446,6 +3459,13 @@ func (s *ChatPipelineService) decorateHarnessAnswer(answer string, kbinfos map[s
 	// block's 0-based index in the rendered list, the numbering the client
 	// indexes.
 	ans = RepairSlotCitations(ans, slotCitations, citeChunks)
+
+	// Chunk-id markers ("【ID:a1b2c3d4e5f60718】") are the model citing an id it
+	// read in its context rather than a block number. Rewrite each into the
+	// number of the block that rendered that chunk, or drop it when no rendered
+	// block did; left alone it reaches the user as literal marker text.
+	think = RepairChunkIDCitations(think, citeChunks)
+	ans = RepairChunkIDCitations(ans, citeChunks)
 
 	// Range-merged citations ("[ID:1-3]") are the model compressing
 	// consecutive individual citations on its own; expand them back so every
@@ -4648,12 +4668,13 @@ func (s *ChatPipelineService) fetchAggregateChunks(
 		chunks = append(chunks, chunk)
 
 		// doc_aggs aggregation: group by doc_id, count occurrences,
-		// first-seen doc_name wins.
+		// first-seen doc_name and dataset win.
 		if entry, ok := docAggMap[fmt.Sprintf("%v", docID)]; ok {
 			entry["count"] = entry["count"].(int) + 1
 		} else {
 			docAggMap[fmt.Sprintf("%v", docID)] = map[string]interface{}{
 				"doc_name": docName,
+				"kb_id":    kid,
 				"count":    1,
 			}
 		}
@@ -4661,16 +4682,28 @@ func (s *ChatPipelineService) fetchAggregateChunks(
 
 	docAggs = make([]map[string]interface{}, 0, len(docAggMap))
 	for did, d := range docAggMap {
-		docAggs = append(docAggs, map[string]interface{}{
-			"doc_id":   did,
-			"doc_name": d["doc_name"],
-			"count":    d["count"],
-		})
+		docAggs = append(docAggs, sqlDocAgg(did, d))
 	}
 	common.Debug("SQL retrieval: aggregate secondary fetch produced chunks",
 		zap.Int("chunks", len(chunks)),
 		zap.Int("doc_aggs", len(docAggs)))
 	return chunks, docAggs
+}
+
+// sqlDocAgg is the doc_aggs entry of one document an SQL answer drew rows
+// from. The dataset is named like the other retrieval paths name it, when
+// known, so the client can resolve the document's network-drive root.
+func sqlDocAgg(docID string, d map[string]interface{}) map[string]interface{} {
+	agg := map[string]interface{}{
+		"doc_id":   docID,
+		"doc_name": d["doc_name"],
+		"count":    d["count"],
+	}
+	if kid, _ := d["kb_id"].(string); kid != "" {
+		agg["dataset_id"] = kid
+		agg["kb_id"] = kid
+	}
+	return agg
 }
 
 // -----------------------------------------------------------------------
@@ -4826,19 +4859,17 @@ func (s *ChatPipelineService) buildSQLReference(
 			if e, ok := docAggMap[docIDKey]; ok {
 				e["count"] = e["count"].(int) + 1
 			} else {
+				kid, _ := entry["kb_id"].(string)
 				docAggMap[docIDKey] = map[string]interface{}{
 					"doc_name": dn,
+					"kb_id":    kid,
 					"count":    1,
 				}
 			}
 		}
 		docAggs := make([]map[string]interface{}, 0, len(docAggMap))
 		for did, d := range docAggMap {
-			docAggs = append(docAggs, map[string]interface{}{
-				"doc_id":   did,
-				"doc_name": d["doc_name"],
-				"count":    d["count"],
-			})
+			docAggs = append(docAggs, sqlDocAgg(did, d))
 		}
 		ref["chunks"] = chunksFormat(chunks)
 		ref["doc_aggs"] = docAggs
@@ -5079,6 +5110,7 @@ func chunksFormat(chunksRaw []map[string]interface{}) []map[string]interface{} {
 			"row_id":            chunk["row_id"],
 			"doc_type":          getChunkValue(chunk, "doc_type_kwd", "doc_type"),
 			"document_metadata": chunk["document_metadata"],
+			"duplicates":        duplicatesOrEmpty(chunk["duplicates"]),
 		}
 		result = append(result, formatted)
 	}
@@ -5094,6 +5126,23 @@ func getChunkValue(chunk map[string]interface{}, k1, k2 string) interface{} {
 		return v
 	}
 	return chunk[k2]
+}
+
+// duplicatesOrEmpty mirrors Python's `chunk.get("duplicates") or []`: the
+// other copies of a chunk's text that retrieval collapsed into it, or an empty
+// list.
+func duplicatesOrEmpty(v interface{}) interface{} {
+	switch d := v.(type) {
+	case []map[string]interface{}:
+		if len(d) > 0 {
+			return d
+		}
+	case []interface{}:
+		if len(d) > 0 {
+			return d
+		}
+	}
+	return []interface{}{}
 }
 
 // harnessBoundDatasetNames renders the {knowledge} default for the agentic
@@ -5126,6 +5175,9 @@ type HarnessRetrieval struct {
 	SimilarityThreshold    float64
 	VectorSimilarityWeight float64
 	RerankCandidatesCount  int
+	// ChunkMeta is the chat's meta_data_filter resolved on the chunk metadata
+	// fields (filter and boost); every agentic retrieval carries it.
+	ChunkMeta *common.ChunkMetaScope
 }
 
 // HarnessRequest carries the minimal inputs the chat pipeline hands to the

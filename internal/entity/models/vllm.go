@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"ragflow/internal/common"
 	"strings"
 )
@@ -52,11 +53,29 @@ func (v *VllmModel) Name() string {
 	return "VLLM"
 }
 
+// qwen3ChatTemplateKwargsEnv opts out of the Qwen3 chat_template_kwargs
+// injection. Some OpenAI-compatible hosts (e.g. OVH AI Endpoints) reject
+// unknown body fields with HTTP 400; with the variable set to "0" Qwen3 models
+// run in the provider's default thinking mode instead.
+const qwen3ChatTemplateKwargsEnv = "LLM_QWEN3_CHAT_TEMPLATE_KWARGS"
+
+func qwen3ChatTemplateKwargsEnabled() bool {
+	return strings.TrimSpace(os.Getenv(qwen3ChatTemplateKwargsEnv)) != "0"
+}
+
 // applyVllmCompatibleThinking maps Qwen3 controls to the chat-template payload
 // expected by vLLM while preserving the generic thinking payload for other models.
 func applyVllmCompatibleThinking(reqBody map[string]interface{}, modelName string, config *ChatConfig) {
 	modelNameLower := strings.ToLower(modelName)
 	if strings.Contains(modelNameLower, "qwen3") {
+		// The generic controls are stripped either way, so nothing the
+		// provider does not understand reaches it.
+		delete(reqBody, "thinking")
+		delete(reqBody, "enable_thinking")
+		if !qwen3ChatTemplateKwargsEnabled() {
+			return
+		}
+
 		enableThinking := false
 		if config != nil && config.Thinking != nil {
 			enableThinking = *config.Thinking
@@ -71,8 +90,6 @@ func applyVllmCompatibleThinking(reqBody map[string]interface{}, modelName strin
 		}
 		chatTemplateKwargs["enable_thinking"] = enableThinking
 		reqBody["chat_template_kwargs"] = chatTemplateKwargs
-		delete(reqBody, "thinking")
-		delete(reqBody, "enable_thinking")
 		return
 	}
 

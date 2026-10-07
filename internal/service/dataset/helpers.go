@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
 	pipelinepkg "ragflow/internal/ingestion/pipeline"
@@ -369,6 +370,12 @@ func preserveDatasetParserConfigState(next, existing entity.JSONMap, incoming ma
 	}
 	if mm != nil {
 		next["metadata"] = mm
+	}
+	// chunk_metadata is dataset-level state, not pipeline configuration: it is
+	// managed through PUT /datasets/:id/chunk_metadata and the backfill, so a
+	// parser_config rebuild keeps the stored value.
+	if cm, ok := existing[common.ChunkMetadataConfigKey]; ok {
+		next[common.ChunkMetadataConfigKey] = cm
 	}
 	// Resolve the dataset-level parent_child setting (component-scoped on a
 	// chunker node) and scope it onto every chunker node in next. There is no

@@ -46,10 +46,10 @@ import 'katex/dist/katex.min.css'; // `rehype-katex` does not import the CSS for
 import {
   currentReg,
   escapeUnmatchedAngleBrackets,
+  normalizeCitationMarkers,
   parseCitationIndex,
   preprocessLaTeX,
   replaceRetrievingToSection,
-  replaceTextByOldReg,
   replaceThinkToSection,
   unescapeAngleBrackets,
 } from '@/utils/chat';
@@ -60,6 +60,7 @@ import { useLoadingPause } from '@/hooks/use-loading-pause';
 import { useSystemConfig } from '@/hooks/use-system-request';
 import CopyToClipboard from '../copy-to-clipboard';
 import { cn } from '@/lib/utils';
+import { ReferenceDuplicates } from '@/components/reference-duplicates';
 import classNames from 'classnames';
 import { omit } from 'lodash';
 import pipe from 'lodash/fp/pipe';
@@ -220,7 +221,7 @@ function MarkdownContent({
     if (text === '') {
       text = t('chat.searching');
     }
-    const nextText = replaceTextByOldReg(text);
+    const nextText = normalizeCitationMarkers(text);
     const thinkSummary = loading
       ? `${t('chat.thinking')}...`
       : t('chat.thought');
@@ -391,6 +392,7 @@ function MarkdownContent({
                 )}
               </div>
             )}
+            <ReferenceDuplicates duplicates={chunkItem?.duplicates} />
           </div>
         </div>
       );

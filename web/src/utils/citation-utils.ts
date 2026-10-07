@@ -46,3 +46,17 @@ export const parseCitationIndex = (value: string): CitationKey => {
 
 export const citationMarkerReg =
   /\[(?:ID:)?([0-9a-fA-F\u0660-\u0669\u06F0-\u06F9]+)\]/g;
+
+// The shapes a marker arrives in before it is renderable: the pre-0.13 `##n$$`
+// form, and the full-width `【ID:n】` brackets that OpenAI-family models cite in
+// natively. Only `[ID:n]` is matched by citationMarkerReg, so anything else
+// reaches the reader as literal marker text.
+const legacyMarkerReg = /#{2}([0-9\u0660-\u0669\u06F0-\u06F9]+)\${2}/g;
+const fullWidthMarkerReg =
+  /【\s*ID\s*[:：\s]*([0-9a-fA-F\u0660-\u0669\u06F0-\u06F9]+)\s*】/g;
+
+/** Rewrites every citation marker shape into the canonical `[ID:n]`. */
+export const normalizeCitationMarkers = (text: string) =>
+  text
+    ?.replace(legacyMarkerReg, (_, id: string) => `[ID:${id}]`)
+    ?.replace(fullWidthMarkerReg, (_, id: string) => `[ID:${id}]`);

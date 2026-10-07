@@ -73,6 +73,18 @@ type RetrievalRequest struct {
 	// bridge a wording gap the query's own words cannot cross; the scoring pass
 	// then uses the engine's kNN score directly instead of re-scoring tokens.
 	VectorOnly bool
+	// CollapseDuplicates returns chunks whose text is identical (after
+	// whitespace normalization) once, as the highest ranked copy. The other
+	// copies are listed under that chunk's "duplicates" but do not count
+	// towards Total, the page, or DocAggs, so duplicate files cannot crowd out
+	// distinct content. nil means true.
+	CollapseDuplicates *bool
+	// ChunkMeta filters and boosts on document metadata stored on chunks
+	// (service.ApplyMetaDataScope). Nil leaves retrieval unchanged.
+	ChunkMeta *common.ChunkMetaScope
+	// Language is the dataset language ("" = English); diacritic-folding
+	// languages (Slovak, Czech) fold the query so its tokens match index tokens.
+	Language string
 }
 
 // RetrievalResult result from retrieval search
@@ -178,6 +190,8 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		AllowDenseFallback:     req.AllowDenseFallback,
 		VectorOnly:             req.VectorOnly,
 		Filter:                 req.Filter,
+		ChunkMeta:              req.ChunkMeta,
+		Language:               req.Language,
 	}
 	searchResult, err := s.Search(ctx, searchReq)
 	if err != nil {
@@ -198,6 +212,11 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 	}
 	if len(sim) == 0 {
 		return &RetrievalResult{Chunks: []map[string]interface{}{}, DocAggs: []map[string]interface{}{}, Total: 0}, nil
+	}
+	// Metadata preferences are added after text/vector similarity, and after
+	// the rerank model when there is one, so they survive every ranking stage.
+	if req.ChunkMeta != nil && len(req.ChunkMeta.Boosts) > 0 {
+		addMetaBoostScores(sim, req.ChunkMeta, searchResult)
 	}
 
 	// Sort indices (positions into search results) by score descending
@@ -240,6 +259,16 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 	}
 	if len(validIdx) == 0 {
 		return &RetrievalResult{Chunks: []map[string]interface{}{}, DocAggs: []map[string]interface{}{}, Total: 0}, nil
+	}
+
+	// Collapse after the metadata boost and the sort: of several identical
+	// texts the copy kept is the best ranked one with its document's boost
+	// included, so a preferred document's copy represents the text and the
+	// others are listed under it.
+	collapseDuplicates := req.CollapseDuplicates == nil || *req.CollapseDuplicates
+	var duplicatesOf map[int][]int
+	if collapseDuplicates {
+		validIdx, duplicatesOf = collapseDuplicateChunks(searchResult, validIdx)
 	}
 
 	// Calculate pagination
@@ -370,6 +399,24 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 			resultChunk["vector"] = zeroVector
 		}
 
+		if collapseDuplicates {
+			// Presentation-only, so it already uses the public field names and
+			// passes through chunksFormat and the REST key mapping.
+			duplicates := make([]map[string]interface{}, 0, len(duplicatesOf[i]))
+			for _, j := range duplicatesOf[i] {
+				dupID := searchResult.IDs[j]
+				dup := searchResult.Field[dupID]
+				duplicates = append(duplicates, map[string]interface{}{
+					"chunk_id":      dupID,
+					"document_id":   stringField(dup, "doc_id"),
+					"document_name": stringField(dup, "docnm_kwd"),
+					"dataset_id":    stringField(dup, "kb_id"),
+					"similarity":    sim[j],
+				})
+			}
+			resultChunk["duplicates"] = duplicates
+		}
+
 		if searchResult.Highlight != nil {
 			if highlightText, ok := searchResult.Highlight[chunkID]; ok {
 				resultChunk["highlight"] = highlightText
@@ -456,6 +503,42 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 	}, nil
 }
 
+// collapseDuplicateChunks keeps the first (best ranked) chunk of every distinct
+// text. idx is ordered by rank; it returns the kept indices in that order and,
+// for each kept index, the indices of the chunks it stands for. Text is
+// compared after collapsing whitespace; chunks without text are never merged
+// with each other.
+func collapseDuplicateChunks(searchResult *RetrievalSearchResult, idx []int) ([]int, map[int][]int) {
+	kept := make([]int, 0, len(idx))
+	duplicatesOf := make(map[int][]int)
+	firstByText := make(map[string]int)
+	for _, i := range idx {
+		text := ""
+		if i >= 0 && i < len(searchResult.IDs) {
+			if v := searchResult.Field[searchResult.IDs[i]]["content_with_weight"]; v != nil {
+				text = strings.Join(strings.Fields(fmt.Sprint(v)), " ")
+			}
+		}
+		if text == "" {
+			kept = append(kept, i)
+			continue
+		}
+		if first, ok := firstByText[text]; ok {
+			duplicatesOf[first] = append(duplicatesOf[first], i)
+			continue
+		}
+		firstByText[text] = i
+		kept = append(kept, i)
+	}
+	return kept, duplicatesOf
+}
+
+// stringField returns chunk[key] when it is a string, otherwise "".
+func stringField(chunk map[string]interface{}, key string) string {
+	v, _ := chunk[key].(string)
+	return v
+}
+
 func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *RetrievalRequest, searchResult *RetrievalSearchResult) ([]float64, []float64, []float64, error) {
 	// sim = tkWeight*tsim + vtWeight*vsim
 	vtWeight := *req.VectorSimilarityWeight
@@ -477,6 +560,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 			"content_ltks",
 			qb,
 			*req.RankFeature,
+			req.Language,
 		)
 	}
 
@@ -507,6 +591,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 			"content_ltks",
 			qb,
 			*req.RankFeature,
+			req.Language,
 		)
 		return sim, tsim, vsim, nil
 	}
@@ -563,6 +648,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 			"content_ltks",
 			qb,
 			*req.RankFeature,
+			req.Language,
 		)
 		return sim, tsim, vsim, nil
 	}
@@ -579,6 +665,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 		"content_ltks",
 		qb,
 		*req.RankFeature,
+		req.Language,
 	)
 	return sim, tsim, vsim, nil
 }
@@ -605,6 +692,24 @@ type RetrievalSearchRequest struct {
 	EmbeddingModel         *models.EmbeddingModel
 	VectorSimilarityWeight *float64
 	AllowDenseFallback     *bool
+	// ChunkMeta is RetrievalRequest.ChunkMeta.
+	ChunkMeta *common.ChunkMetaScope
+	// Language is the dataset language ("" = English).
+	Language string
+}
+
+// addMetaBoostScores adds the metadata boost of each candidate to its fused
+// similarity (common.MetaBoostScores).
+func addMetaBoostScores(sim []float64, scope *common.ChunkMetaScope, searchResult *RetrievalSearchResult) {
+	chunks := make([]map[string]interface{}, len(sim))
+	for i := range sim {
+		if i < len(searchResult.IDs) {
+			chunks[i] = searchResult.Field[searchResult.IDs[i]]
+		}
+	}
+	for i, boost := range common.MetaBoostScores(scope.Boosts, chunks, scope.BoostMaxTotal) {
+		sim[i] += boost
+	}
 }
 
 func buildInfinityFusionExpr(topn int, vectorSimilarityWeight *float64) *types.FusionExpr {
@@ -716,6 +821,14 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		"content_with_weight", "doc_type_kwd", "mom_id", "row_id()",
 		"_score",
 	}
+	// The boost scorer reads the chunk metadata fields back from each hit.
+	if req.ChunkMeta != nil {
+		for _, f := range common.MetaBoostFieldNames(req.ChunkMeta.Boosts) {
+			if !slices.Contains(src, f) {
+				src = append(src, f)
+			}
+		}
+	}
 
 	kwds := make(map[string]struct{})
 
@@ -727,6 +840,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		Limit:        limit,
 		Filter:       filters,
 		SelectFields: src,
+		ChunkMeta:    req.ChunkMeta,
 	}
 
 	// queryVector tracks the query vector for reranking
@@ -749,7 +863,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		// Non-empty question
 
 		// Compute keywords via QueryBuilder
-		matchText, keywords := GetQueryBuilder().Question(req.Question, "", minMatch(req.VectorSimilarityWeight, 0.3))
+		matchText, keywords := GetQueryBuilder().Question(req.Question, "", minMatch(req.VectorSimilarityWeight, 0.3), req.Language)
 		for _, k := range keywords {
 			kwds[k] = struct{}{}
 		}
@@ -815,6 +929,10 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 			// If result is empty, retry with relaxed conditions
 			if engineResult.Total == 0 {
 				_, hasDocIDFilter := filters["doc_id"]
+				// A chunk metadata filter scopes the search the same way.
+				if req.ChunkMeta != nil && req.ChunkMeta.Filter != nil {
+					hasDocIDFilter = true
+				}
 				if req.VectorOnly || matchText == nil {
 					if *req.AllowDenseFallback {
 						common.Debug("Retrieval dense-only fallback after empty initial search")
@@ -852,7 +970,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 					// and lower vector similarity threshold (0.17 vs default 0.1-0.2).
 					// This provides a second chance for queries that were too strict
 					// on the first attempt.
-					matchText, _ := GetQueryBuilder().Question(req.Question, "qa", minMatch(req.VectorSimilarityWeight, 0.1))
+					matchText, _ := GetQueryBuilder().Question(req.Question, "qa", minMatch(req.VectorSimilarityWeight, 0.1), req.Language)
 					matchDense = cloneDenseExpr(denseTemplate)
 					matchDense.ExtraOptions["similarity"] = 0.17
 					if req.VectorOnly || matchText == nil {
@@ -884,9 +1002,10 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		}
 
 		// Build kwds from keywords with fine-grained tokenization
+		tok := tokenizer.New(req.Language)
 		for _, k := range keywords {
 			kwds[k] = struct{}{}
-			fgToken, _ := tokenizer.FineGrainedTokenize(k)
+			fgToken, _ := tok.FineGrainedTokenize(k)
 			for kk := range strings.FieldsSeq(fgToken) {
 				if len(kk) < 2 {
 					continue

@@ -36,6 +36,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	"go.uber.org/zap"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/crypto/scrypt"
 	"gorm.io/gorm"
@@ -161,7 +162,21 @@ func (s *UserService) Register(ctx context.Context, req *RegisterRequest) (*enti
 		IsSuperuser:     &isSuperuser,
 	}
 
-	tenantName := req.Nickname + "'s Kingdom"
+	if err = s.createUserWithTenant(ctx, user); err != nil {
+		return nil, common.CodeServerError, err
+	}
+	return user, common.CodeSuccess, nil
+}
+
+// createUserWithTenant inserts a new user together with what every account
+// needs: its own tenant (with the configured default models), the owner
+// relation and the root folder. Shared by sign-up and SSO just-in-time
+// registration. The models of `user_default_llm` are provisioned afterwards;
+// a failure there is logged and does not undo the registration.
+func (s *UserService) createUserWithTenant(ctx context.Context, user *entity.User) error {
+	cfg := server.GetConfig()
+	status := "1"
+	tenantName := user.Nickname + "'s Kingdom"
 
 	llmID := cfg.GetDefaultChatModel().Name
 	if llmID == "" {
@@ -193,7 +208,7 @@ func (s *UserService) Register(ctx context.Context, req *RegisterRequest) (*enti
 	}
 
 	tenant := &entity.Tenant{
-		ID:        userID,
+		ID:        user.ID,
 		Name:      &tenantName,
 		LLMID:     llmID,
 		EmbdID:    embdID,
@@ -208,10 +223,10 @@ func (s *UserService) Register(ctx context.Context, req *RegisterRequest) (*enti
 	userTenantID := utility.GenerateToken()
 	userTenant := &entity.UserTenant{
 		ID:        userTenantID,
-		UserID:    userID,
-		TenantID:  userID,
+		UserID:    user.ID,
+		TenantID:  user.ID,
 		Role:      "owner",
-		InvitedBy: userID,
+		InvitedBy: user.ID,
 		Status:    &status,
 	}
 	fileID := utility.GenerateToken()
@@ -219,8 +234,8 @@ func (s *UserService) Register(ctx context.Context, req *RegisterRequest) (*enti
 	rootFile := &entity.File{
 		ID:        fileID,
 		ParentID:  fileID,
-		TenantID:  userID,
-		CreatedBy: userID,
+		TenantID:  user.ID,
+		CreatedBy: user.ID,
 		Name:      "/",
 		Type:      "folder",
 		Location:  &file__,
@@ -228,27 +243,31 @@ func (s *UserService) Register(ctx context.Context, req *RegisterRequest) (*enti
 	}
 
 	db := dao.GetDB()
-	if err = db.Transaction(func(tx *gorm.DB) error {
-		if err = tx.Create(user).Error; err != nil {
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(user).Error; err != nil {
 			return fmt.Errorf("failed to create user: %w", err)
 		}
 
-		if err = tx.Create(tenant).Error; err != nil {
+		if err := tx.Create(tenant).Error; err != nil {
 			return fmt.Errorf("failed to create tenant: %w", err)
 		}
 
-		if err = tx.Create(userTenant).Error; err != nil {
+		if err := tx.Create(userTenant).Error; err != nil {
 			return fmt.Errorf("failed to create user tenant relation: %w", err)
 		}
 
-		if err = tx.Create(rootFile).Error; err != nil {
+		if err := tx.Create(rootFile).Error; err != nil {
 			return fmt.Errorf("failed to create root folder: %w", err)
 		}
 		return nil
 	}); err != nil {
-		return nil, common.CodeServerError, fmt.Errorf("fail to create transaction: %w", err)
+		return fmt.Errorf("fail to create transaction: %w", err)
 	}
-	return user, common.CodeSuccess, nil
+	if err := ProvisionDefaultModels(ctx, user.ID, cfg.GetUserDefaultLLM()); err != nil {
+		common.Warn("Failed to provision user_default_llm models for new tenant",
+			zap.String("tenant_id", user.ID), zap.Error(err))
+	}
+	return nil
 }
 
 // Login user login

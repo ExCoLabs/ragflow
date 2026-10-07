@@ -2770,3 +2770,14 @@ func TestGetLLMModelConfigReadsToolSupportPerResolution(t *testing.T) {
 		t.Error("a flipped is_tools flag was not seen by the next resolution")
 	}
 }
+
+func TestSQLDocAggNamesTheDataset(t *testing.T) {
+	got := sqlDocAgg("d1", map[string]interface{}{"doc_name": "a.xlsx", "count": 2, "kb_id": "kb1"})
+	want := map[string]interface{}{"doc_id": "d1", "doc_name": "a.xlsx", "count": 2, "dataset_id": "kb1", "kb_id": "kb1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sqlDocAgg = %v, want %v", got, want)
+	}
+	if got := sqlDocAgg("d2", map[string]interface{}{"doc_name": "b.xlsx", "count": 1, "kb_id": ""}); got["dataset_id"] != nil || got["kb_id"] != nil {
+		t.Errorf("sqlDocAgg without a dataset = %v", got)
+	}
+}

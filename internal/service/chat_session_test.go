@@ -1195,8 +1195,27 @@ func TestChatCompletionsStreamFinalCarriesDecoratedReference(t *testing.T) {
 		t.Fatalf("final reference total = %v", got)
 	}
 	stored := parseMessages(store.sessions["session-1"].Message)
-	if got := stored[len(stored)-1]["content"]; got != "<think>checking sources</think>Marigold is a depth-estimation model." {
-		t.Fatalf("stored assistant content = %q, want tagged reasoning and visible answer", got)
+	// The stored answer is the FINAL one: its citation is what the reader sees when the
+	// conversation is reopened, and the streamed text never carried it.
+	if got := stored[len(stored)-1]["content"]; got != "<think>checking sources</think>Marigold is a depth-estimation model. [ID:0]" {
+		t.Fatalf("stored assistant content = %q, want tagged reasoning and the decorated answer", got)
+	}
+}
+
+func TestFinalAssistantContent(t *testing.T) {
+	cases := []struct {
+		name, streamed, final, want string
+	}{
+		{"reasoning kept, answer replaced", "<think>checking</think>A fact【ID:1】.", "A fact[ID:0].", "<think>checking</think>A fact[ID:0]."},
+		{"no reasoning", "A fact【ID:1】.", "A fact[ID:0].", "A fact[ID:0]."},
+		{"empty final keeps the stream", "<think>checking</think>A fact.", "", "<think>checking</think>A fact."},
+		{"final with its own think block wins", "<think>progress</think>A fact.", "<think>steps</think>A fact[ID:0].", "<think>steps</think>A fact[ID:0]."},
+		{"nothing streamed", "", "A fact[ID:0].", "A fact[ID:0]."},
+	}
+	for _, c := range cases {
+		if got := finalAssistantContent(c.streamed, c.final); got != c.want {
+			t.Errorf("%s: finalAssistantContent = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 
@@ -1491,6 +1510,35 @@ func TestChunksFormat_PreservesAlreadyNormalizedFields(t *testing.T) {
 	if c["content"] != "already normalized" {
 		t.Fatalf("content=%v", c["content"])
 	}
+}
+
+// TestChunksFormat_CarriesDuplicates pins Python's `chunk.get("duplicates") or []`
+// in every reference formatter: the copies retrieval collapsed into a chunk
+// pass through unchanged, and a chunk without any gets an empty list.
+func TestChunksFormat_CarriesDuplicates(t *testing.T) {
+	dups := []map[string]interface{}{{"chunk_id": "c1-copy", "document_name": "copy.pdf"}}
+	raw := []map[string]interface{}{
+		{"chunk_id": "c1", "content_with_weight": "text", "duplicates": dups},
+		{"chunk_id": "c2", "content_with_weight": "other"},
+	}
+	check := func(name string, got []interface{}) {
+		t.Helper()
+		if d, ok := got[0].([]map[string]interface{}); !ok || len(d) != 1 || d[0]["chunk_id"] != "c1-copy" {
+			t.Fatalf("%s: duplicates = %#v, want the collapsed copy", name, got[0])
+		}
+		if d, ok := got[1].([]interface{}); !ok || d == nil || len(d) != 0 {
+			t.Fatalf("%s: duplicates = %#v, want empty list", name, got[1])
+		}
+	}
+
+	session := (&ChatSessionService{}).chunksFormat(map[string]interface{}{"chunks": raw})
+	check("ChatSessionService.chunksFormat", []interface{}{session[0]["duplicates"], session[1]["duplicates"]})
+	pipeline := chunksFormat(raw)
+	check("chunksFormat", []interface{}{pipeline[0]["duplicates"], pipeline[1]["duplicates"]})
+	openai := formatChunks(raw)
+	check("formatChunks", []interface{}{openai[0].Duplicates, openai[1].Duplicates})
+	ask := ChunksFormat(NewSourcedChunks(raw))
+	check("ChunksFormat", []interface{}{ask[0]["duplicates"], ask[1]["duplicates"]})
 }
 
 func TestChunksFormat_EmptyReference(t *testing.T) {

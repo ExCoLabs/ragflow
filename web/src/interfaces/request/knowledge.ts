@@ -6,8 +6,15 @@ export interface ITestRetrievalRequestBody {
   keywords_similarity_weight: number;
   rerank_id?: string;
   use_kg?: boolean;
+  toc_enhance?: boolean;
+  keyword?: boolean;
+  knn_top_k?: number;
+  cross_languages?: string[];
+  // Chat model id for the LLM-assisted retrieval steps.
+  chat_id?: string;
+  include_knowledge_compilation?: boolean;
   highlight?: boolean;
-  kb_id?: string[];
+  dataset_ids?: string[];
   meta_data_filter?: {
     logic?: string;
     method?: string;

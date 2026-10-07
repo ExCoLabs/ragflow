@@ -15,6 +15,7 @@ export default {
       yes: 'Yes',
       no: 'No',
       total: 'Total',
+      alsoFoundIn: 'Also found in {{count}} other file(s):',
       top: 'Top {{top}}',
       rename: 'Rename',
       name: 'Name',
@@ -46,6 +47,8 @@ export default {
       arabic: 'Arabic',
       turkish: 'Turkish',
       dutch: 'Dutch',
+      slovak: 'Slovak',
+      czech: 'Czech',
       language: 'Language',
       languageMessage: 'Please input your language!',
       languagePlaceholder: 'select your language',
@@ -93,6 +96,7 @@ export default {
       bulkOperate: 'Bulk operate',
       owner: 'Owner',
       running: 'Running...',
+      loading: 'Loading...',
     },
     login: {
       loginTitle: 'Sign in to your account',
@@ -398,6 +402,8 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
       dataFlowRequired: 'Data flow is required',
     },
     knowledgeDetails: {
+      chatSettingsApplied:
+        'Using the saved retrieval settings of chat "{{name}}".',
       continueUpload: 'Continue upload',
       reselectParser: 'Reselect parse method',
       goAddModel: 'Go add model',
@@ -520,6 +526,17 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
       general: 'General',
       chunkMethodTab: 'Chunk method',
       testResults: 'Results',
+      openChunkInDocument: 'Open this chunk in the document (new tab)',
+      metadataFilterAuto: 'Metadata filter (auto)',
+      metadataFilterSemiAuto: 'Metadata filter (semi-auto)',
+      metadataFilterManual: 'Metadata filter (manual)',
+      metadataFilterAnd: 'and',
+      metadataFilterOr: 'or',
+      metadataFilterNoConditions: 'No conditions were generated.',
+      metadataFilterIgnored:
+        'Matched no documents, so the whole dataset was searched.',
+      metadataFilterDocumentCount: 'Narrowed to {{count}} documents',
+      metadataFilterOnChunkFields: 'Applied on chunk metadata fields',
       testSetting: 'Setting',
       retrievalTesting: 'Retrieval testing',
       retrievalTestingDescription:
@@ -684,6 +701,28 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
       imageContextWindowTip:
         'Captures N tokens of text above and below an image to provide richer background context.',
       autoMetadata: 'Auto metadata',
+      chunkMetadata: 'Chunk metadata',
+      chunkMetadataEnabled: 'Store metadata in chunks',
+      chunkMetadataTip:
+        'Copies the selected document metadata fields into every chunk of this dataset. Metadata filters then apply directly in the search engine (no per-document ID list, so datasets with more than 10 000 matching documents work) and metadata boosts become available in chats, agents, search and retrieval testing.',
+      chunkMetadataFields: 'Fields',
+      chunkMetadataFieldsTip:
+        'Which metadata keys to copy (at most 32). Keys not listed here can still be used in filters, but only through the slower document-ID path.',
+      chunkMetadataStatus: 'Status',
+      chunkMetadataReady: 'Ready',
+      chunkMetadataNotReady: 'Backfill required',
+      chunkMetadataBackfill: 'Backfill existing chunks',
+      chunkMetadataBackfillQueued:
+        'Backfill started. The dataset becomes ready once it finishes.',
+      chunkMetadataBackfillRunning:
+        'Backfill running: {{done}}/{{total}} groups',
+      chunkMetadataBackfillFailed: 'Last backfill failed: {{error}}',
+      chunkMetadataSave: 'Save chunk metadata',
+      chunkMetadataSaved: 'Chunk metadata settings saved.',
+      chunkMetadataSaveFirst:
+        'Save the chunk metadata settings before starting a backfill.',
+      chunkMetadataUnsupported:
+        'The document engine does not support chunk metadata; metadata filters keep using document IDs.',
       mineruOptions: 'MinerU options',
       mineruParseMethod: 'Parse method',
       mineruParseMethodTip:
@@ -998,6 +1037,10 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
     },
     chunk: {
       type: 'Type',
+      copyChunkId: 'Copy chunk ID',
+      showingRetrievedChunk:
+        'Showing only the chunk you opened from retrieval testing.',
+      showAllChunks: 'Show all chunks',
       docType: {
         image: 'Image',
         table: 'Table',
@@ -1043,6 +1086,9 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       delete: 'Delete',
     },
     chat: {
+      testRetrieval: 'Test retrieval',
+      testRetrievalTip:
+        'Open retrieval testing with the saved settings of this chat.',
       chatSupport: 'Chat Support',
       replyInstantly: 'We typically reply instantly',
       typeYourMessage: 'Type your message...',
@@ -1179,6 +1225,14 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
         'Only controls thinking mode for official Qwen, Kimi, and GLM model providers. System default disables Qwen thinking to avoid long-running tasks.',
       quote: 'Show citations',
       quoteTip: 'Whether to display the original text as a reference.',
+      metadataFilter: 'Metadata filter',
+      metadataFilterApplied: 'Applied',
+      metadataFilterDisabled: 'Disabled',
+      metadataFilterNoMatches: 'Generated, but no documents matched',
+      metadataFilterNotGenerated: 'No filter was generated',
+      metadataFilterUnsupported: 'Unsupported filter method',
+      metadataFilterUnavailable: 'Filter information is unavailable',
+      metadataFilterMatchedDocuments: 'Matched documents: {{count}}',
       selfRag: 'Self-RAG',
       selfRagTip: 'Please refer to: https://huggingface.co/papers/2310.11511',
       overview: 'Chat ID',
@@ -1301,6 +1355,26 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
         'Metadata filtering is the process of using metadata attributes (such as tags, categories, or access permissions) to refine and control the retrieval of relevant information within a system.',
       conditions: 'Conditions',
       metadataKeys: 'Filterable items',
+      metadataInstructions: 'Filtering instructions',
+      metadataInstructionsTip:
+        'Guidance for the model that generates the automatic and semi-automatic filter and boost conditions, for this chat or agent only: when a value applies, which kind of question it fits, when not to filter.',
+      metadataInstructionsPlaceholder:
+        'e.g. Filter on region only when the question names a place; "HR" means the department human_resources.',
+      metadataBoost: 'Metadata boost',
+      metadataBoostTip:
+        'Preferences on metadata that rank matching chunks higher without excluding the others, for example "prefer the newest report" or "prefer the department named in the question". Requires chunk metadata to be enabled and backfilled on every selected dataset; otherwise it is ignored. Manual: fixed preferences only. Semi-automatic: the model fills in values for the listed keys. Automatic: the model marks each condition it derives as a requirement or a preference. Fixed preferences apply in every mode except Disabled.',
+      boostConditions: 'Preferred values',
+      boostKeys: 'Model-chosen keys (value taken from the question)',
+      boostFixedConditions: 'Fixed preferences (always applied)',
+      boostWeight: 'Weight',
+      boostOpMax: 'newest / highest',
+      boostOpMin: 'oldest / lowest',
+      boostAutoWeight: 'Weight of inferred preferences',
+      boostAutoWeightTip:
+        'Score added to a chunk that matches a preference the model derived from the question (0–1; the similarity itself is 0–1, so 0.05–0.2 is the useful range). Default 0.15.',
+      boostMaxTotal: 'Maximum total boost',
+      boostMaxTotalTip:
+        'Cap on the sum of all boosts per chunk, so metadata preferences can never outrank relevance on their own. Default 0.3.',
       addCondition: 'Add condition',
       meta: {
         disabled: 'Disabled',
@@ -3871,6 +3945,8 @@ Important structured information may include: names, dates, locations, events, k
       arabic: 'Arabic',
       turkish: 'Turkish',
       dutch: 'Dutch',
+      slovak: 'Slovak',
+      czech: 'Czech',
     },
     pagination: {
       total: 'Total {{total}}',

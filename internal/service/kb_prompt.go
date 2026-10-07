@@ -47,6 +47,7 @@ func ChunksFormat(chunks []SourcedChunk) []map[string]interface{} {
 			"row_id":            ck.ID, // row_id == ID for consistency with Python
 			"doc_type":          ck.DocType,
 			"document_metadata": ck.DocumentMetadata,
+			"duplicates":        duplicatesOrEmpty(ck.Duplicates),
 		}
 	}
 	return out

@@ -27,7 +27,7 @@ func TestRetrievalUsesRerankCandidatesCountAsCandidateSet(t *testing.T) {
 		rows[i] = map[string]interface{}{
 			"id":                  fmt.Sprintf("chunk-%02d", i),
 			"content_ltks":        "alpha",
-			"content_with_weight": "alpha",
+			"content_with_weight": fmt.Sprintf("alpha %02d", i),
 			"_score":              0.9,
 		}
 	}
@@ -187,10 +187,10 @@ func (e *retrievalCountEngine) Close() error               { return nil }
 func (e *retrievalCountEngine) Ping(context.Context) error { return nil }
 func (e *retrievalCountEngine) GetType() string            { return "elasticsearch" }
 func (e *retrievalCountEngine) SupportsPageRank() bool     { return false }
-func (e *retrievalCountEngine) CreateChunkStore(context.Context, string, string, int, string) error {
+func (e *retrievalCountEngine) CreateChunkStore(context.Context, string, string, int, string, string) error {
 	return nil
 }
-func (e *retrievalCountEngine) InsertChunks(context.Context, []map[string]interface{}, string, string) ([]string, error) {
+func (e *retrievalCountEngine) InsertChunks(context.Context, []map[string]interface{}, string, string, string) ([]string, error) {
 	return nil, nil
 }
 func (e *retrievalCountEngine) UpdateChunks(context.Context, map[string]interface{}, map[string]interface{}, string, string) error {

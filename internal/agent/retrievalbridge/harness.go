@@ -144,7 +144,10 @@ func NewHarnessRetriever(modelProviderService *service.ModelProviderService, met
 			// DocScope mirrors Python RAGTools(doc_scope=...): the narrowed doc_ids
 			// (chat-level doc_ids + meta_data_filter) restrict every agentic
 			// retrieval to the user-selected documents instead of the whole kb.
-			DocScope:      req.DocIDs,
+			DocScope: req.DocIDs,
+			// ChunkMeta: the part of meta_data_filter (filter and boost) the
+			// chat resolved on chunk metadata fields instead of doc ids.
+			ChunkMeta:     req.Retrieval.ChunkMeta,
 			DocIDVerifier: agentic_rag.NewDocIDLookup(),
 			// MetadataResolver backs the metadata_search tool and the pre-search
 			// metadata channel (Python DocMetadataService push-down + meta_filter
