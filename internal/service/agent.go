@@ -2390,6 +2390,13 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 			return nil, canvasInvokeError(err)
 		}
 
+		// When the model returns no content (e.g. provider timeout, empty
+		// stream, reasoning exhaustion), surface a visible message so the
+		// user knows the request did not succeed silently.
+		if strings.TrimSpace(answer) == "" && !messageEventsEmitted {
+			answer = "Ospravedlňujem sa, nepodarilo sa mi zostaviť odpoveď. Skúste otázku zopakovať alebo ju preformulovať."
+		}
+
 		// Persist the Agent answer for subsequent Agent prompts. The terminal
 		// Message output is presentation data and may wrap the answer with
 		// template literals; retaining it in the prompt history makes the model
