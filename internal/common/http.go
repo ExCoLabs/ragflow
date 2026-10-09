@@ -79,7 +79,7 @@ func GetSchemeSafeHTTPClient() *http.Client {
 		t.MaxIdleConnsPerHost = 500
 		t.IdleConnTimeout = 90 * time.Second
 		t.DisableCompression = false
-		t.ResponseHeaderTimeout = 60 * time.Second
+		t.ResponseHeaderTimeout = responseHeaderTimeout(5 * time.Minute)
 		t.TLSHandshakeTimeout = 30 * time.Second
 
 		var rt http.RoundTripper = t
@@ -88,6 +88,19 @@ func GetSchemeSafeHTTPClient() *http.Client {
 		schemeSafeHttpClient = &http.Client{Transport: rt}
 	}
 	return schemeSafeHttpClient
+}
+
+// responseHeaderTimeout returns the configured HTTP response-header timeout.
+// The fallback is used unless overridden by LLM_RESPONSE_HEADER_TIMEOUT (Go
+// duration string, e.g. "5m", "120s"). Reasoning models may need 2-5 min
+// of thinking before the first response byte.
+func responseHeaderTimeout(fallback time.Duration) time.Duration {
+	if v := os.Getenv("LLM_RESPONSE_HEADER_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fallback
 }
 
 // providerStreamLogThreshold / providerCallLogThreshold are the durations past
