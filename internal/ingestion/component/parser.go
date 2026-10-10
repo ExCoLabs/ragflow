@@ -149,8 +149,25 @@ func NewParserComponent(params map[string]any) (runtime.Component, error) {
 			return nil, errors.New("parser: enable_vision_enhancement must be a boolean")
 		}
 	}
+	var pdfZoom float64
+	if raw, exists := params["zoom"]; exists {
+		if z, ok := raw.(float64); ok && z > 0 {
+			pdfZoom = z
+		}
+		if z, ok := raw.(int); ok && z > 0 {
+			pdfZoom = float64(z)
+		}
+	}
+	var globalVLM map[string]any
+	if raw, exists := params["vlm"]; exists {
+		vlm, ok := raw.(map[string]any)
+		if !ok {
+			return nil, errors.New("parser: vlm must be an object")
+		}
+		globalVLM = vlm
+	}
 	for k, raw := range params {
-		if k == "outputs" || k == "allowed_output_format" || k == "enable_vision_enhancement" {
+		if k == "outputs" || k == "allowed_output_format" || k == "enable_vision_enhancement" || k == "vlm" || k == "zoom" {
 			continue
 		}
 		ftCfg, ok := raw.(map[string]any)
@@ -162,6 +179,33 @@ func NewParserComponent(params map[string]any) (runtime.Component, error) {
 		}
 		for fk, fv := range ftCfg {
 			s[k][fk] = cloneParserSetupValue(fv)
+		}
+		// Apply a global zoom setting to the PDF family so DeepDOC renders
+		// scanned or low-resolution technical drawings at a higher scale.
+		if k == "pdf" && pdfZoom > 0 {
+			s[k]["zoom"] = pdfZoom
+		}
+		// Make the global VLM config (model + optional custom prompt) visible
+		// inside family setups for vision enhancement. Preserve audio's own
+		// VLM keys so speech-to-text model selection is not overridden.
+		if globalVLM != nil && k != "audio" {
+			familyVLM, _ := s[k]["vlm"].(map[string]any)
+			if familyVLM == nil {
+				familyVLM = make(map[string]any)
+			}
+			if globalLLM, ok := globalVLM["llm_id"].(string); ok && globalLLM != "" {
+				if _, exists := familyVLM["llm_id"]; !exists {
+					familyVLM["llm_id"] = globalLLM
+				}
+			}
+			if globalPrompt, ok := globalVLM["prompt"].(string); ok && strings.TrimSpace(globalPrompt) != "" {
+				if _, exists := familyVLM["prompt"]; !exists {
+					familyVLM["prompt"] = strings.TrimSpace(globalPrompt)
+				}
+			}
+			if len(familyVLM) > 0 {
+				s[k]["vlm"] = familyVLM
+			}
 		}
 	}
 	normalizeParserOutputFormats(s)

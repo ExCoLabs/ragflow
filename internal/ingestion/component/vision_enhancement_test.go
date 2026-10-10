@@ -507,6 +507,58 @@ func TestVisionEnhancement_LanguagePriority(t *testing.T) {
 	}
 }
 
+// TestVisionEnhancement_UsesCustomPromptFromSetup verifies that a per-dataset
+// prompt configured under setup["vlm"]["prompt"] is sent to the VLM instead of
+// the default file-based prompt.
+func TestVisionEnhancement_UsesCustomPromptFromSetup(t *testing.T) {
+	invoker := &visionEnhanceCaptureInvoker{}
+	promptBuilderCalled := false
+	swapVisionGlobals(t, fakeResolver, invoker.invoke, func(language string) (string, error) {
+		promptBuilderCalled = true
+		return "default prompt for " + language, nil
+	})
+
+	dispatched := parser.ParseResult{
+		OutputFormat: "json",
+		JSON: []map[string]any{
+			{"text": "", "image": "aGVsbG8taW1hZ2U=", "doc_type_kwd": "image"},
+		},
+	}
+	setups := map[string]schema.ParserSetup{
+		"pdf": {
+			"parse_method": "deepdoc",
+			"vlm":          map[string]any{"prompt": "custom technical drawing prompt: {{ language }}"},
+		},
+	}
+
+	_, handled, err := maybeDispatchVisionEnhancement(
+		t.Context(), dao.DB, utility.FileTypePDF, dispatched,
+		map[string]any{"tenant_id": "t1", "lang": "Slovak"}, setups,
+	)
+	if err != nil {
+		t.Fatalf("maybeDispatchVisionEnhancement: %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if promptBuilderCalled {
+		t.Error("default prompt builder was called, want custom prompt used")
+	}
+	if len(invoker.captured) == 0 {
+		t.Fatal("no VLM message captured")
+	}
+	parts, ok := invoker.captured[0].Content.([]interface{})
+	if !ok || len(parts) == 0 {
+		t.Fatalf("captured message content = %T/%v", invoker.captured[0].Content, invoker.captured[0].Content)
+	}
+	textPart, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first content part = %T, want map", parts[0])
+	}
+	if got := textPart["text"]; got != "custom technical drawing prompt: Slovak" {
+		t.Errorf("prompt text = %q, want %q", got, "custom technical drawing prompt: Slovak")
+	}
+}
 func TestVisionEnhancement_MarkdownOutputUntouched(t *testing.T) {
 	called := false
 	swapVisionGlobals(t,

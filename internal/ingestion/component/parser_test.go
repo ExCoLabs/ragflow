@@ -249,6 +249,71 @@ func TestNewParserComponentFlattensNestedSetups(t *testing.T) {
 	}
 }
 
+// TestNewParserComponent_CopiesVLMPromptIntoFamilySetups verifies that the
+// global VLM custom prompt is copied into family setups for vision
+// enhancement, while the global model ID remains separate.
+func TestNewParserComponent_CopiesVLMPromptIntoFamilySetups(t *testing.T) {
+	component, err := NewParserComponent(map[string]any{
+		"enable_vision_enhancement": true,
+		"vlm": map[string]any{
+			"llm_id": "vision-model-id",
+			"prompt": "custom technical drawing prompt",
+		},
+		"pdf": map[string]any{"parse_method": "deepdoc"},
+	})
+	if err != nil {
+		t.Fatalf("NewParserComponent: %v", err)
+	}
+	pc := component.(*ParserComponent)
+	vlm, ok := pc.setups["pdf"]["vlm"].(map[string]any)
+	if !ok {
+		t.Fatalf("pdf setup missing vlm config")
+	}
+	if got := vlm["prompt"]; got != "custom technical drawing prompt" {
+		t.Errorf("vlm.prompt = %v, want custom technical drawing prompt", got)
+	}
+	if got := vlm["llm_id"]; got != "vision-model-id" {
+		t.Errorf("vlm.llm_id = %v, want vision-model-id", got)
+	}
+}
+
+// TestNewParserComponent_PreservesFamilyVLMConfig verifies that a family with
+// its own VLM config is not overwritten by the global VLM model selection.
+func TestNewParserComponent_PreservesFamilyVLMConfig(t *testing.T) {
+	component, err := NewParserComponent(map[string]any{
+		"enable_vision_enhancement": true,
+		"vlm":                       map[string]any{"llm_id": "vision-model-id"},
+		"audio":                     map[string]any{"vlm": map[string]any{"llm_id": "asr-model"}},
+	})
+	if err != nil {
+		t.Fatalf("NewParserComponent: %v", err)
+	}
+	pc := component.(*ParserComponent)
+	vlm, ok := pc.setups["audio"]["vlm"].(map[string]any)
+	if !ok {
+		t.Fatalf("audio setup missing vlm config")
+	}
+	if got := vlm["llm_id"]; got != "asr-model" {
+		t.Errorf("audio vlm.llm_id = %v, want asr-model", got)
+	}
+}
+
+// TestNewParserComponent_AppliesZoomToPDFFamily verifies that a top-level zoom
+// setting flows into the PDF family setup for DeepDOC.
+func TestNewParserComponent_AppliesZoomToPDFFamily(t *testing.T) {
+	component, err := NewParserComponent(map[string]any{
+		"zoom": 5.0,
+		"pdf":  map[string]any{"parse_method": "deepdoc"},
+	})
+	if err != nil {
+		t.Fatalf("NewParserComponent: %v", err)
+	}
+	pc := component.(*ParserComponent)
+	if got := pc.setups["pdf"]["zoom"]; got != 5.0 {
+		t.Errorf("pdf zoom = %v, want 5.0", got)
+	}
+}
+
 // TestParserComponent_Invoke_TextInput covers the happy path:
 // UTF-8 text input, no form-feeds, default page_size. The
 // component must emit exactly one page carrying the full text

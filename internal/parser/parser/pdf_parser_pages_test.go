@@ -85,3 +85,31 @@ func TestConfigureFromSetup_Pages(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigureFromSetup_Zoom verifies ConfigureFromSetup reads the "zoom"
+// field and passes it through to the DeepDOC parser config.
+func TestConfigureFromSetup_Zoom(t *testing.T) {
+	t.Run("positive zoom is read", func(t *testing.T) {
+		p := &PDFParser{}
+		p.ConfigureFromSetup(map[string]any{"zoom": 5.0})
+		if p.Zoom != 5.0 {
+			t.Errorf("Zoom = %v, want 5.0", p.Zoom)
+		}
+	})
+
+	t.Run("zero zoom is ignored", func(t *testing.T) {
+		p := &PDFParser{Zoom: 3.0}
+		p.ConfigureFromSetup(map[string]any{"zoom": 0.0})
+		if p.Zoom != 3.0 {
+			t.Errorf("Zoom = %v, want 3.0", p.Zoom)
+		}
+	})
+
+	t.Run("missing zoom key leaves default", func(t *testing.T) {
+		p := NewPDFParser()
+		p.ConfigureFromSetup(map[string]any{"parse_method": "deepdoc"})
+		if p.Zoom != 0 {
+			t.Errorf("Zoom = %v, want 0", p.Zoom)
+		}
+	})
+}

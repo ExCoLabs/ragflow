@@ -76,7 +76,12 @@ type PDFParser struct {
 	// caller observes per-page parse progress (done/total). Only the deepdoc
 	// backend invokes it; remote engines poll opaque HTTP jobs and never call
 	// it, so the fraction simply stays where it was.
-	OnPageDone                        func(done, total int)
+	OnPageDone func(done, total int)
+	// Zoom controls the DeepDOC OCR render scale. Default (0) lets the
+	// parser use its built-in default. Values > 0 are passed through to
+	// DeepDOC's ParserConfig.Zoom and increase rendering DPI for scanned
+	// or low-resolution technical drawings.
+	Zoom                              float64
 	MinerUAPIServer                   string
 	MinerUAPIKey                      string
 	MinerUBackend                     string
@@ -279,6 +284,9 @@ func (p *PDFParser) ConfigureFromSetup(setup map[string]any) {
 			p.Pages = pages
 		}
 	}
+	if v, ok := setup["zoom"].(float64); ok && v > 0 {
+		p.Zoom = v
+	}
 }
 
 // pdfParseMethodSpellings is the single vocabulary of PDF parse methods:
@@ -377,6 +385,9 @@ func (p *PDFParser) ParseWithResult(ctx context.Context, filename string, data [
 	cfg.RemoveTOC = p.RemoveTOC
 	cfg.RemoveHeaderFooter = p.RemoveHeaderFooter
 	cfg.OnPageDone = p.OnPageDone
+	if p.Zoom > 0 {
+		cfg.Zoom = p.Zoom
+	}
 	res := parsePDFWithDeepDocOptions(ctx, filename, data, pdfPostProcessOptions{
 		outputFormat:       p.OutputFormat,
 		zoom:               cfg.Zoom,

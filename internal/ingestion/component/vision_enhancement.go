@@ -218,8 +218,14 @@ func maybeDispatchVisionEnhancement(
 			driver, modelName, apiConfig, _, err = resolveTenantModelByType(ctx, db, tenantID, entity.ModelTypeImage2Text)
 		}
 		if err == nil {
-			prompt, err = figureVisionPromptBuilder(language)
-			vlmReady = err == nil && driver != nil
+			customPrompt := extractCustomVisionPrompt(setup)
+			if customPrompt != "" {
+				prompt = renderFigureVisionLanguage(customPrompt, language)
+				vlmReady = driver != nil
+			} else {
+				prompt, err = figureVisionPromptBuilder(language)
+				vlmReady = err == nil && driver != nil
+			}
 		}
 		resolveErr = err
 	}
@@ -390,6 +396,20 @@ func appendItemText(item map[string]any, text string) {
 		return
 	}
 	item["text"] = existing + "\n" + text
+}
+
+// extractCustomVisionPrompt returns a per-dataset vision prompt configured
+// under setup["vlm"]["prompt"]. Empty string means "use the default file prompt".
+func extractCustomVisionPrompt(setup schema.ParserSetup) string {
+	if setup == nil {
+		return ""
+	}
+	vlm, ok := setup["vlm"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	prompt, _ := vlm["prompt"].(string)
+	return strings.TrimSpace(prompt)
 }
 
 func buildFigureVisionPrompt(language string) (string, error) {
