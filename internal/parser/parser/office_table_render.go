@@ -860,17 +860,27 @@ func isSubtotalRow(row []string) bool {
 	return false
 }
 
-// isFormSheet reports whether a sheet looks like a form/cover sheet rather
-// than a regular data table. Form sheets (e.g. Kros "Krycí list rozpočtu")
-// have most rows with only 1–2 filled cells (label–value pairs scattered
-// across wide columns), while table sheets have a consistent row width ≥ 5.
+// formSheetPrefixLen is the row window scanned for form-style cover pages.
+// Kros "Krycí list" occupies roughly the first 45 rows; the budget table
+// follows later and must not dilute the narrow-row signal.
+const formSheetPrefixLen = 50
+
+// isFormSheet reports whether the top rows of a sheet look like a form/cover
+// page rather than a regular data table. The check scans at most the first
+// formSheetPrefixLen rows so that a budget table below the cover does not
+// mask the form prefix (e.g. E1.2 - Statika has a 43-row cover page
+// followed by a 29-column budget).
 func isFormSheet(rows [][]string) bool {
-	if len(rows) < 6 {
+	limit := len(rows)
+	if limit > formSheetPrefixLen {
+		limit = formSheetPrefixLen
+	}
+	if limit < 6 {
 		return false
 	}
 	nonEmpty := 0
 	narrow := 0 // rows with ≤ 3 filled cells
-	for _, row := range rows {
+	for _, row := range rows[:limit] {
 		w := rowNonEmpty(row)
 		if w == 0 {
 			continue
@@ -883,12 +893,15 @@ func isFormSheet(rows [][]string) bool {
 	if nonEmpty < 4 {
 		return false
 	}
-	return narrow*2 > nonEmpty // majority of rows are narrow → form
+	return narrow*2 > nonEmpty // majority of prefix rows are narrow → form
 }
 
-// renderFormSheetKV extracts key-value pairs from a form-style sheet and
-// renders them as a plain-text chunk. The sheet name is placed at the top
+// renderFormSheetKV extracts key-value pairs from the form prefix of a sheet
+// and renders them as a plain-text chunk. The sheet name is placed at the top
 // as context so retrieval matches on it (e.g. "E1.2 - Statika").
+//
+// Only the first formSheetPrefixLen rows are scanned; wide-table rows that
+// follow the cover page are ignored.
 //
 // Heuristic: for each non-empty row, if a text cell and a numeric cell
 // coexist (possibly separated by empty columns), they form a label→value
@@ -899,7 +912,11 @@ func renderFormSheetKV(sheet string, rows [][]string) string {
 	b.WriteString(sheet)
 	b.WriteByte('\n')
 
-	for _, row := range rows {
+	limit := len(rows)
+	if limit > formSheetPrefixLen {
+		limit = formSheetPrefixLen
+	}
+	for _, row := range rows[:limit] {
 		var labels []string
 		var numbers []string
 		for _, cell := range row {

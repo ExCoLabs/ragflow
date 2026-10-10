@@ -835,6 +835,21 @@ func TestIsFormSheet(t *testing.T) {
 		t.Fatal("regular table should NOT be detected as form")
 	}
 
+	// Hybrid sheet: 30-row form prefix followed by 80 wide rows (like E1.2).
+	hybrid := make([][]string, 110)
+	for i := 0; i < 30; i++ {
+		hybrid[i] = []string{"", "", "", "label", "", "", "", "", "", "value"}
+	}
+	for i := 30; i < 110; i++ {
+		hybrid[i] = make([]string, 29)
+		for j := range hybrid[i] {
+			hybrid[i][j] = "data"
+		}
+	}
+	if !isFormSheet(hybrid) {
+		t.Fatal("hybrid sheet (form prefix + table body) should be detected as form")
+	}
+
 	// Too few rows.
 	if isFormSheet([][]string{{"a"}, {"b"}}) {
 		t.Fatal("tiny sheet should not be form")
