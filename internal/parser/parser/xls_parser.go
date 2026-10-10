@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,9 +122,18 @@ func (p *XLSParser) ParseWithResult(ctx context.Context, filename string, data [
 }
 
 func parseBIFF8Bytes(ctx context.Context, data []byte) ([]map[string]any, int, error) {
-	reader, err := excel.OpenXLS(bytes.NewReader(data), excel.WithErrorValues(true))
+	var reader biffSource
+	biff8, err := excel.OpenXLS(bytes.NewReader(data), excel.WithErrorValues(true))
 	if err != nil {
-		return nil, 0, fmt.Errorf("open BIFF workbook: %w", err)
+		// Excel 95 and older workbooks use BIFF≤5 records that the BIFF8-only
+		// reader rejects; xlrd covers the full BIFF2–8 range.
+		legacy, legacyErr := newXlrdBIFFSource(data)
+		if legacyErr != nil {
+			return nil, 0, fmt.Errorf("open BIFF workbook: %w", err)
+		}
+		reader = legacy
+	} else {
+		reader = biff8
 	}
 	defer reader.Close()
 
@@ -137,7 +147,18 @@ func parseBIFF8Bytes(ctx context.Context, data []byte) ([]map[string]any, int, e
 		if err := ctx.Err(); err != nil {
 			return nil, sheetCount, err
 		}
-		items = append(items, buildSheetItems(records, reader.SheetName(), sheetIndex+1, headerRow, dataRows, nil)...)
+		sheetName := reader.SheetName()
+		items = append(items, buildSheetItems(records, sheetName, sheetIndex+1, headerRow, dataRows, nil)...)
+		// Same cover-page KV chunk as the xlsx path: the sheet name and
+		// label→value pairs must stay searchable for legacy workbooks too.
+		if isFormSheet(records) {
+			if kvText := renderFormSheetKV(sheetName, records); len(kvText) > 0 {
+				kvItem := NewTextJSONItem(kvText)
+				kvItem["sheet"] = sheetName
+				kvItem["sheet_index"] = sheetIndex + 1
+				items = append(items, kvItem)
+			}
+		}
 	}
 	if err := reader.Err(); err != nil {
 		return nil, sheetCount, fmt.Errorf("read BIFF workbook: %w", err)
@@ -145,7 +166,7 @@ func parseBIFF8Bytes(ctx context.Context, data []byte) ([]map[string]any, int, e
 	return items, sheetCount, nil
 }
 
-func readBIFF8Records(ctx context.Context, reader excel.Reader) ([][]string, []int, int) {
+func readBIFF8Records(ctx context.Context, reader biffSource) ([][]string, []int, int) {
 	type numberedRow struct {
 		number int
 		cells  []string
@@ -185,6 +206,11 @@ func spreadsheetCellString(value any) string {
 		return ""
 	case time.Time:
 		return value.Format(time.RFC3339)
+	case float64:
+		// fmt.Sprint falls back to %v scientific notation for large
+		// magnitudes (5391273.95 → 5.39127395e+06); keep the decimal form
+		// so amounts stay searchable.
+		return strconv.FormatFloat(value, 'f', -1, 64)
 	default:
 		return fmt.Sprint(value)
 	}

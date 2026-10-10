@@ -620,6 +620,8 @@ github.com/xuri/excelize/v2 v2.11.0 h1:HxaEFl6sRN2+8J5a8HaKq+0M4FsjBGMnWWtjOCPSG
 github.com/xuri/excelize/v2 v2.11.0/go.mod h1:jxFLbzaIwGQ5ufFNvYfUOHqXhfPaNmP14KWfmNz2Uak=
 github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 h1:+C0TIdyyYmzadGaL/HBLbf3WdLgC29pgyhTjAT/0nuE=
 github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9/go.mod h1:WwHg+CVyzlv/TX9xqBFXEZAuxOPxn2k1GNHwG41IIUQ=
+github.com/yamitzky/xlrd-go v0.1.0 h1:WPrLvRMz/ob+ZmEWMmbg/TtrUVh2BTCGGzbqRzsrYBU=
+github.com/yamitzky/xlrd-go v0.1.0/go.mod h1:qH3XYtKvWAvhH87qmIDY6YgxAXKAyLD28jpum/PLS7k=
 github.com/yargevad/filepathx v1.0.0 h1:SYcT+N3tYGi+NvazubCNlvgIPbzAk7i7y2dwg3I5FYc=
 github.com/yargevad/filepathx v1.0.0/go.mod h1:BprfX/gpYNJHJfc35GjRRpVcwWXS89gGulUIU5tK3tA=
 github.com/yfedoseev/office_oxide/go v0.1.12 h1:QLsiB8Aj7LB42D9Vwu1rslRuZg/vSXc4IkVXCDKQv6o=
