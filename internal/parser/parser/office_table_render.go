@@ -860,6 +860,79 @@ func isSubtotalRow(row []string) bool {
 	return false
 }
 
+// isFormSheet reports whether a sheet looks like a form/cover sheet rather
+// than a regular data table. Form sheets (e.g. Kros "Krycí list rozpočtu")
+// have most rows with only 1–2 filled cells (label–value pairs scattered
+// across wide columns), while table sheets have a consistent row width ≥ 5.
+func isFormSheet(rows [][]string) bool {
+	if len(rows) < 6 {
+		return false
+	}
+	nonEmpty := 0
+	narrow := 0 // rows with ≤ 3 filled cells
+	for _, row := range rows {
+		w := rowNonEmpty(row)
+		if w == 0 {
+			continue
+		}
+		nonEmpty++
+		if w <= 3 {
+			narrow++
+		}
+	}
+	if nonEmpty < 4 {
+		return false
+	}
+	return narrow*2 > nonEmpty // majority of rows are narrow → form
+}
+
+// renderFormSheetKV extracts key-value pairs from a form-style sheet and
+// renders them as a plain-text chunk. The sheet name is placed at the top
+// as context so retrieval matches on it (e.g. "E1.2 - Statika").
+//
+// Heuristic: for each non-empty row, if a text cell and a numeric cell
+// coexist (possibly separated by empty columns), they form a label→value
+// pair. Rows with only text cells contribute metadata lines.
+func renderFormSheetKV(sheet string, rows [][]string) string {
+	var b strings.Builder
+	b.WriteString("Sheet: ")
+	b.WriteString(sheet)
+	b.WriteByte('\n')
+
+	for _, row := range rows {
+		var labels []string
+		var numbers []string
+		for _, cell := range row {
+			v := strings.TrimSpace(cell)
+			if v == "" {
+				continue
+			}
+			if isNumericCell(v) {
+				numbers = append(numbers, v)
+			} else {
+				labels = append(labels, v)
+			}
+		}
+		if len(labels) == 0 && len(numbers) == 0 {
+			continue
+		}
+		if len(labels) > 0 && len(numbers) > 0 {
+			b.WriteString(strings.Join(labels, " "))
+			b.WriteString(": ")
+			b.WriteString(strings.Join(numbers, ", "))
+			b.WriteByte('\n')
+		} else if len(labels) > 0 {
+			joined := strings.Join(labels, " ")
+			// Skip GUID-like and internal markers.
+			if len(joined) < 80 && !strings.ContainsAny(joined, "{}") {
+				b.WriteString(joined)
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String()
+}
+
 func readSpreadsheetRecords(f *excelize.File, sheet string) ([][]string, []int, int, []string, error) {
 	rows, err := f.GetRows(sheet)
 	if err != nil {
