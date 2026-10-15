@@ -305,12 +305,10 @@ func (s *PipelineExecutor) processOutput(ctx context.Context, pipelineOutput map
 		}
 	}
 
-	// Per-document compiled knowledge products (those emitted by the
-	// KnowledgeCompiler component and stamped with `compile_kwd`) are persisted
-	// as available_int=0: invisible to the normal retriever until the dataset-level
-	// post-processing consumer (§11) merges them into available_int=1 products.
-	// Ordinary source chunks stay available_int=1 (the index default) unless the
-	// document itself is disabled (status=0).
+	// Per-document wiki products are staged as available_int=0 until the
+	// dataset-level consumer merges them into available_int=1 products.
+	// Final per-document structures and ordinary source chunks are written with
+	// available_int=1 unless the document itself is disabled (status=0).
 	markCompiledProductsHidden(chunks)
 	// Reload status immediately before write: LoadFromIngestionTask copied a
 	// snapshot that may be stale if BatchUpdateDocumentStatus ran mid-pipeline.
@@ -532,7 +530,7 @@ func (s *PipelineExecutor) loadDocumentCompiledState(ctx context.Context) ([]str
 			KbIDs:        []string{s.taskCtx.Doc.KbID},
 			Offset:       offset,
 			Limit:        pageSize,
-			SelectFields: []string{"id", "compile_kwd", "compilation_template_kind_kwd"},
+			SelectFields: []string{"id", "compile_kwd", "compilation_template_kind_kwd", "type_kwd"},
 			Filter:       map[string]any{"doc_id": []string{s.taskCtx.Doc.ID}},
 		})
 		if err != nil {
@@ -542,7 +540,7 @@ func (s *PipelineExecutor) loadDocumentCompiledState(ctx context.Context) ([]str
 			break
 		}
 		for _, row := range result.Chunks {
-			if strings.TrimSpace(asCompiledKwd(row)) == "" {
+			if strings.TrimSpace(asCompiledKwd(row)) == "" || enginetypes.IsNavigationRow(row) {
 				continue
 			}
 			oldProducts = append(oldProducts, row)
@@ -613,22 +611,16 @@ func applyDocumentAvailability(chunks []map[string]any, status *string) {
 	}
 }
 
-// compiledVariants returns the sorted, de-duplicated set of compile types a
-// document's compiled products carry. It reads the authoritative
-// `compilation_template_kind_kwd` the KnowledgeCompiler component stamps on each
-// compiled product (the resolved template's kind) and maps it through
-// common.KindToVariant (O2a whitelist: unknown kinds are skipped). Products
-// without an authoritative kind fall back to their `compile_kwd`-derived variant.
-// This surfaces the compiler's runtime variant inference to PublishCompleted so
-// the consumer can route the dataset-level re-compile per compile type.
+// compiledVariants returns the sorted, de-duplicated execution variants needed
+// to route document completion to the dataset consumer.
 func compiledVariants(chunks []map[string]any) []string {
 	seen := map[string]struct{}{}
 	for _, ck := range chunks {
-		if _, ok := ck["compile_kwd"]; !ok {
+		if _, ok := ck["compile_kwd"]; !ok || enginetypes.IsNavigationRow(ck) {
 			continue
 		}
 		var v kccommon.Variant
-		if kind, ok := ck["compilation_template_kind_kwd"].(string); ok && kind != "" {
+		if kind := enginetypes.CompilationKind(ck); kind != "" {
 			mapped, err := kccommon.KindToVariant(kind)
 			if err != nil {
 				continue // unknown template kind (O2a): skip, do not mis-route
@@ -666,11 +658,11 @@ func compiledVariants(chunks []map[string]any) []string {
 func compiledTaskTypes(chunks []map[string]any) []string {
 	seen := map[string]struct{}{}
 	for _, ck := range chunks {
-		if _, ok := ck["compile_kwd"]; !ok {
+		if _, ok := ck["compile_kwd"]; !ok || enginetypes.IsNavigationRow(ck) {
 			continue
 		}
 		taskType := ""
-		if kind, ok := ck["compilation_template_kind_kwd"].(string); ok && strings.TrimSpace(kind) != "" {
+		if kind := enginetypes.CompilationKind(ck); kind != "" {
 			if mapped, err := kccommon.KindToTaskType(kind); err == nil {
 				taskType = mapped
 			}

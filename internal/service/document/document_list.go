@@ -8,7 +8,9 @@ import (
 
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
+	"ragflow/internal/engine/types"
 	"ragflow/internal/entity"
+	"ragflow/internal/permission"
 	"ragflow/internal/service"
 )
 
@@ -77,7 +79,7 @@ func (s *DocumentService) GetThumbnails(ctx context.Context, userID string, docI
 
 	result := make(map[string]string, len(documents))
 	for _, document := range documents {
-		if document == nil || !s.kbDAO.Accessible(ctx, dao.DB, document.KbID, userID) {
+		if document == nil || service.CheckDatasetAccess(ctx, permission.Subject{UserID: userID}, document.KbID, permission.OperationRead) != nil {
 			continue
 		}
 
@@ -146,9 +148,9 @@ func (s *DocumentService) GetDocumentFiltersByDatasetID(ctx context.Context, opt
 
 // metadataFacets is the doc store's aggregated facet for docIDs; a package
 // var so tests can drive both paths without a configured doc engine.
-var metadataFacets = func(ctx context.Context, metadataSvc *service.MetadataService, kbID string, docIDs []string) (map[string]map[string]int64, int64, bool) {
+var metadataFacets = func(ctx context.Context, metadataSvc *service.MetadataService, kbID string, docIDs []string) ([]types.MetaValueCount, int64, bool, error) {
 	if metadataSvc == nil {
-		return nil, 0, false
+		return nil, 0, false, nil
 	}
 	return metadataSvc.GetMetadataFacets(ctx, kbID, docIDs)
 }
@@ -158,15 +160,26 @@ var metadataFacets = func(ctx context.Context, metadataSvc *service.MetadataServ
 // The doc store aggregates it when it can: the counts are exactly what an
 // aggregation returns, and reading every document's metadata to tally them is
 // what made this the slowest request the file list makes. The aggregation is
-// scoped to docIDs, so the answer covers the same documents as the scan. When
-// the store cannot give an exact answer, the documents are counted here.
+// scoped to docIDs, and its values are labelled by metadataValueLabel like the
+// scan's, so a value picked in the filter resolves to the documents counted
+// for it. When the store cannot give an exact answer, the documents are
+// counted here.
 func (s *DocumentService) getDocumentMetadataFilter(ctx context.Context, kbID string, docIDs []string) (map[string]interface{}, error) {
-	if counts, carrying, ok := metadataFacets(ctx, s.metadataSvc, kbID, docIDs); ok {
-		metadataCounter := make(map[string]interface{}, len(counts)+1)
-		for key, values := range counts {
-			if len(values) > 0 {
-				metadataCounter[key] = values
+	facets, carrying, ok, err := metadataFacets(ctx, s.metadataSvc, kbID, docIDs)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		counters := map[string]map[string]int64{}
+		for _, facet := range facets {
+			if counters[facet.Key] == nil {
+				counters[facet.Key] = map[string]int64{}
 			}
+			counters[facet.Key][metadataValueLabel(facet.Value)] += facet.Docs
+		}
+		metadataCounter := make(map[string]interface{}, len(counters)+1)
+		for key, values := range counters {
+			metadataCounter[key] = values
 		}
 		// The rest of the documents in scope hold no metadata value at all.
 		metadataCounter["empty_metadata"] = map[string]int64{"true": max(0, int64(len(docIDs))-carrying)}

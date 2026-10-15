@@ -34,7 +34,7 @@ func TestXLSParser_BIFFWorkbookFormSheet(t *testing.T) {
 		t.Fatal("no items produced")
 	}
 	var sawKryci, sawKVValue, sawVykaz bool
-	for _, item := range res.JSON {
+	for _, item := range ItemsToMaps(res.JSON) {
 		text, _ := item["text"].(string)
 		if strings.Contains(text, "Sheet: Krycí list") {
 			sawKryci = true
@@ -42,8 +42,18 @@ func TestXLSParser_BIFFWorkbookFormSheet(t *testing.T) {
 				sawKVValue = true
 			}
 		}
-		if strings.Contains(text, "<th>Kód</th>") || strings.Contains(text, "<th>Množstvo</th>") {
-			sawVykaz = true
+	}
+	for _, item := range res.JSON {
+		table, ok := item.(TableItem)
+		if !ok || table.Table == nil {
+			continue
+		}
+		for _, row := range table.Table.Grid[:table.Table.HeaderRows] {
+			for _, cell := range row {
+				if cell.Text == "Kód" || cell.Text == "Množstvo" {
+					sawVykaz = true
+				}
+			}
 		}
 	}
 	if !sawKryci {

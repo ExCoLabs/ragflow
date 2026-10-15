@@ -188,9 +188,7 @@ func parseXLSXBytes(data []byte, mediaBudget *embeddedMediaBudget) ([]map[string
 		if rawErr == nil && isFormSheet(rawRows) {
 			kvText := renderFormSheetKV(sheet, rawRows)
 			if len(kvText) > 0 {
-				kvItem := NewTextJSONItem(kvText)
-				kvItem["sheet"] = sheet
-				kvItem["sheet_index"] = sheetIdx + 1
+				kvItem := TextItem{Text: kvText, Extra: map[string]any{"sheet": sheet, "sheet_index": sheetIdx + 1}}.ToMap()
 				items = append(items, kvItem)
 			}
 		}
@@ -202,7 +200,7 @@ func xlsxParseResult(filename string, items []map[string]any, warnings []string,
 	return ParseResult{
 		OutputFormat: spreadsheetOutputFormat,
 		File:         map[string]any{"name": filename, "format": "xlsx", "sheets": sheets},
-		JSON:         items,
+		JSON:         MapsToItems(items),
 		Warnings:     warnings,
 	}
 }

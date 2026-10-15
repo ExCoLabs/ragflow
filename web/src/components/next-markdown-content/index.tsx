@@ -44,6 +44,7 @@ import { useTranslation } from 'react-i18next';
 import 'katex/dist/katex.min.css'; // `rehype-katex` does not import the CSS for you
 
 import {
+  buildCitationDisplayMap,
   currentReg,
   escapeUnmatchedAngleBrackets,
   normalizeCitationMarkers,
@@ -252,6 +253,12 @@ function MarkdownContent({
           return;
         }
         if (!documentUrl) return;
+        // Web page documents carry their own url; opening the internal
+        // /document route for them lands on an empty page.
+        if (/^https?:\/\//i.test(documentUrl)) {
+          window.open(documentUrl, '_blank', 'noopener,noreferrer');
+          return;
+        }
         window.open(
           `/document/${documentId}?ext=${fileExtension}&resource=${'document'}`,
           '_blank',
@@ -406,14 +413,10 @@ function MarkdownContent({
       // its first occurrence, so the same ID always renders as the same [N]
       // chip. The actual chunk lookup uses that index against the positional
       // order of IReferenceObject.chunks (see getReferenceInfo).
-      const keyToDisplay = new Map<number | string, number>();
+      const keyToDisplay = buildCitationDisplayMap(text);
       const replacedText = reactStringReplace(text, currentReg, (match) => {
         const chunkKey = getChunkKey(match);
-        let displayIndex = keyToDisplay.get(chunkKey);
-        if (displayIndex === undefined) {
-          displayIndex = keyToDisplay.size;
-          keyToDisplay.set(chunkKey, displayIndex);
-        }
+        const displayIndex = keyToDisplay.get(chunkKey) ?? 0;
 
         return (
           <HoverCard key={`${String(chunkKey)}-${displayIndex}`}>

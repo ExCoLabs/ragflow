@@ -224,10 +224,6 @@ export interface ISearchAppDetailProps {
       boost?: Record<string, any>;
       instructions?: string;
     };
-    reference_metadata?: {
-      include?: boolean;
-      fields?: string[];
-    };
   };
   tenant_id: string;
   update_time: number;
@@ -400,9 +396,11 @@ export const useRenameSearch = () => {
       if (res && !search?.id) {
         navigateToSearch(res?.search_id)();
       }
-      callBack?.();
       setLoading(false);
-      handleHideModal();
+      if (res) {
+        callBack?.();
+        handleHideModal();
+      }
     },
     [search, createSearch, handleHideModal, navigateToSearch, updateSearch],
   );

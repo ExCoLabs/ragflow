@@ -28,7 +28,6 @@ import (
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
 	"ragflow/internal/service/oauth"
-	"ragflow/internal/utility"
 )
 
 // SyncTeamMemberships applies a group-sync plan to the user's team
@@ -70,7 +69,7 @@ func (s *UserService) SyncTeamMemberships(ctx context.Context, user *entity.User
 			if len(existing) == 0 {
 				status := "1"
 				if err := userTenantDAO.Create(ctx, tx, &entity.UserTenant{
-					ID:        utility.GenerateToken(),
+					ID:        common.GenerateToken(),
 					UserID:    user.ID,
 					TenantID:  tenantID,
 					Role:      TenantRoleNormal,

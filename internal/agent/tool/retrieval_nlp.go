@@ -73,6 +73,8 @@ import (
 	"ragflow/internal/engine"
 	"ragflow/internal/entity"
 	modelModule "ragflow/internal/entity/models"
+	"ragflow/internal/permission"
+	permissionresponse "ragflow/internal/permission/response"
 	"ragflow/internal/service/nlp"
 
 	"go.uber.org/zap"
@@ -103,30 +105,19 @@ type metadataScopeResolver interface {
 // beyond its docEngine + documentDAO handles, both of which the
 // nlp package treats as concurrent-safe.
 type NLPRetrievalAdapter struct {
-	svc                 *nlp.RetrievalService
-	kbDAO               knowledgebaseLookup
-	modelConfigResolver modelConfigResolver
-	enhancer            retrievalEnhancer
+	svc               *nlp.RetrievalService
+	kbDAO             knowledgebaseLookup
+	modelConstructors RetrievalModelConstructors
+	enhancer          retrievalEnhancer
 }
 
-// ResolvedModel is what a modelConfigResolver returns: the provider objects
-// plus the two token limits, kept apart because they are not
-// interchangeable. MaxTokens is the generation cap; ContextLength is the
-// model's context window, the budget a prompt is fitted to.
-type ResolvedModel struct {
-	Driver        modelModule.ModelDriver
-	Name          string
-	APIConfig     *modelModule.APIConfig
-	MaxTokens     int
-	ContextLength int
+// RetrievalModelConstructors constructs typed models for retrieval without
+// exposing provider drivers or API credentials to the agent-tool package.
+type RetrievalModelConstructors struct {
+	Embedding func(ctx context.Context, tenantID, modelRef string) (*modelModule.EmbeddingModel, error)
+	Chat      func(ctx context.Context, tenantID, modelRef string) (*modelModule.ChatModel, error)
+	Rerank    func(ctx context.Context, tenantID, modelRef string) (*modelModule.RerankModel, error)
 }
-
-type modelConfigResolver func(
-	ctx context.Context,
-	tenantID string,
-	modelType entity.ModelType,
-	modelRef string,
-) (*ResolvedModel, error)
 
 type knowledgebaseLookup interface {
 	GetByIDs(ctx context.Context, sqlDB *gorm.DB, ids []string) ([]*entity.Knowledgebase, error)
@@ -174,61 +165,34 @@ type retrievalEnhancer interface {
 // *nlp.RetrievalService.
 func NewNLPRetrievalAdapter(
 	svc *nlp.RetrievalService,
-	resolver modelConfigResolver,
+	constructors RetrievalModelConstructors,
 	enhancer retrievalEnhancer,
 ) *NLPRetrievalAdapter {
 	return &NLPRetrievalAdapter{
-		svc:                 svc,
-		kbDAO:               dao.NewKnowledgebaseDAO(),
-		modelConfigResolver: resolver,
-		enhancer:            enhancer,
+		svc:               svc,
+		kbDAO:             dao.NewKnowledgebaseDAO(),
+		modelConstructors: constructors,
+		enhancer:          enhancer,
 	}
 }
 
 // NewNLPRetrievalAdapterFromDeps is the convenience constructor
 // for the common boot path:
 //
-// The boot path supplies the model provider and service enhancement bridge so
-// the adapter can build a complete hybrid-retrieval request.
+// The boot path supplies typed model constructors and a service enhancement
+// bridge so the adapter can build a complete hybrid-retrieval request.
 func NewNLPRetrievalAdapterFromDeps(
 	docEngine engine.DocEngine,
 	documentDAO *dao.DocumentDAO,
-	resolver modelConfigResolver,
+	constructors RetrievalModelConstructors,
 	enhancer retrievalEnhancer,
 ) *NLPRetrievalAdapter {
 	return &NLPRetrievalAdapter{
-		svc:                 nlp.NewRetrievalService(docEngine, documentDAO),
-		kbDAO:               dao.NewKnowledgebaseDAO(),
-		modelConfigResolver: resolver,
-		enhancer:            enhancer,
+		svc:               nlp.NewRetrievalService(docEngine, documentDAO),
+		kbDAO:             dao.NewKnowledgebaseDAO(),
+		modelConstructors: constructors,
+		enhancer:          enhancer,
 	}
-}
-
-// SetModelConfigResolver installs modelRef-based resolution without coupling
-// the agent tool package to the parent service package.
-func (a *NLPRetrievalAdapter) SetModelConfigResolver(resolver modelConfigResolver) {
-	if a != nil {
-		a.modelConfigResolver = resolver
-	}
-}
-
-func (a *NLPRetrievalAdapter) resolveModelConfig(
-	ctx context.Context,
-	tenantID string,
-	modelType entity.ModelType,
-	modelRef string,
-) (*ResolvedModel, error) {
-	if a == nil || a.modelConfigResolver == nil {
-		return nil, fmt.Errorf("retrieval: model config resolver is not configured")
-	}
-	resolved, err := a.modelConfigResolver(ctx, tenantID, modelType, modelRef)
-	if err != nil {
-		return nil, err
-	}
-	if resolved == nil {
-		return nil, fmt.Errorf("retrieval: model config resolver returned no model")
-	}
-	return resolved, nil
 }
 
 // Search implements RetrievalService. The translation rules live
@@ -255,6 +219,26 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	}
 	if len(datasets.tenantIDs) != 1 {
 		return nil, fmt.Errorf("retrieval: datasets span multiple tenants")
+	}
+	// Dataset authorization must use the caller identity established by the
+	// agent run, not req.UserID, which is a configurable per-user memory filter.
+	userID := ""
+	if state, stateErr := runtime.GetStateFromContext(ctx); stateErr == nil && state != nil {
+		userID, _ = state.Sys["user_id"].(string)
+	}
+	userID = strings.TrimSpace(userID)
+	checker := permission.NewDatabaseChecker(db)
+	if err := CheckCanvasDependencies(ctx, db, permission.ResourceKindDataset, datasets.kbIDs); err != nil {
+		_, permissionErr := permissionresponse.Normalize(err)
+		return nil, permissionErr
+	}
+	for _, datasetID := range datasets.kbIDs {
+		if err := checker.CheckResource(ctx, permission.Subject{UserID: userID}, permission.ResourceRef{
+			Kind: permission.ResourceKindDataset, ID: datasetID,
+		}, permission.OperationUse); err != nil {
+			_, permissionErr := permissionresponse.Normalize(err)
+			return nil, permissionErr
+		}
 	}
 	if err := validateEmbeddingModels(ctx, db, datasets.kbs); err != nil {
 		return nil, err
@@ -553,32 +537,18 @@ func (a *NLPRetrievalAdapter) resolveEmbeddingModel(
 	ctx context.Context,
 	kb *entity.Knowledgebase,
 ) (*modelModule.EmbeddingModel, error) {
-	if a == nil {
-		return nil, fmt.Errorf("retrieval: embedding model resolver is not configured")
+	if a == nil || a.modelConstructors.Embedding == nil {
+		return nil, fmt.Errorf("retrieval: embedding model constructor is not configured")
 	}
-
-	var (
-		resolved *ResolvedModel
-		err      error
-	)
-	switch {
-	case kb.TenantEmbdID != nil && strings.TrimSpace(*kb.TenantEmbdID) != "":
-		resolved, err = a.resolveModelConfig(
-			ctx, kb.TenantID, entity.ModelTypeEmbedding, *kb.TenantEmbdID,
-		)
-	case strings.TrimSpace(kb.EmbdID) != "":
-		resolved, err = a.resolveModelConfig(
-			ctx, kb.TenantID, entity.ModelTypeEmbedding, kb.EmbdID,
-		)
-	default:
-		resolved, err = a.resolveModelConfig(
-			ctx, kb.TenantID, entity.ModelTypeEmbedding, "",
-		)
+	modelRef := kb.EmbdID
+	if kb.TenantEmbdID != nil && strings.TrimSpace(*kb.TenantEmbdID) != "" {
+		modelRef = *kb.TenantEmbdID
 	}
+	model, err := a.modelConstructors.Embedding(ctx, kb.TenantID, modelRef)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: resolve embedding model for dataset %s: %w", kb.ID, err)
 	}
-	return modelModule.NewEmbeddingModel(resolved.Driver, &resolved.Name, resolved.APIConfig, resolved.MaxTokens), nil
+	return model, nil
 }
 
 func (a *NLPRetrievalAdapter) resolveChatModel(
@@ -596,22 +566,14 @@ func (a *NLPRetrievalAdapter) resolveChatModel(
 	if !needsChatModel {
 		return nil, nil
 	}
-	if a == nil {
-		return nil, fmt.Errorf("retrieval: model resolver is not configured")
+	if a == nil || a.modelConstructors.Chat == nil {
+		return nil, fmt.Errorf("retrieval: chat model constructor is not configured")
 	}
-	resolved, err := a.resolveModelConfig(
-		ctx, tenantID, entity.ModelTypeChat, "",
-	)
+	model, err := a.modelConstructors.Chat(ctx, tenantID, "")
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: resolve default chat model: %w", err)
 	}
-	chatModel := modelModule.NewChatModel(resolved.Driver, &resolved.Name, resolved.APIConfig)
-	// The metadata filter renders the dataset's whole value space into its
-	// prompt, so it needs the model's context window to decide whether that
-	// prompt can be sent at all. A window that cannot be resolved stays 0, which
-	// message fitting reads as the 8192 default.
-	chatModel.ContextLength = resolved.ContextLength
-	return chatModel, nil
+	return model, nil
 }
 
 func (a *NLPRetrievalAdapter) resolveRerankModel(
@@ -622,16 +584,14 @@ func (a *NLPRetrievalAdapter) resolveRerankModel(
 	if req.RerankID == "" {
 		return nil, nil
 	}
-	if a == nil || a.modelConfigResolver == nil {
-		return nil, fmt.Errorf("retrieval: model resolver is not configured")
+	if a == nil || a.modelConstructors.Rerank == nil {
+		return nil, fmt.Errorf("retrieval: rerank model constructor is not configured")
 	}
-	resolved, err := a.resolveModelConfig(
-		ctx, tenantID, entity.ModelTypeRerank, req.RerankID,
-	)
+	model, err := a.modelConstructors.Rerank(ctx, tenantID, req.RerankID)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: resolve rerank model: %w", err)
 	}
-	return modelModule.NewRerankModel(resolved.Driver, &resolved.Name, resolved.APIConfig, resolved.MaxTokens), nil
+	return model, nil
 }
 
 // translateChunk converts one nlp chunk map into a RetrievalChunk.

@@ -451,9 +451,9 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 			if v, ok := chunk["doc_id"].(string); ok {
 				docID = v
 			}
-			kbID := ""
-			if v, ok := chunk["kb_id"].(string); ok {
-				kbID = v
+			kbID, _ := chunk["kb_id"].(string)
+			if docID != "" && docID == kbID {
+				continue
 			}
 			if entry, exists := docAggsMap[docName]; exists {
 				entry.count++
@@ -539,6 +539,9 @@ func stringField(chunk map[string]interface{}, key string) string {
 	return v
 }
 
+// scoreSearchResult computes the per-chunk term, vector, and fused
+// similarity scores for a search result, reranking through the configured
+// model when the engine does not fuse natively.
 func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *RetrievalRequest, searchResult *RetrievalSearchResult) ([]float64, []float64, []float64, error) {
 	// sim = tkWeight*tsim + vtWeight*vsim
 	vtWeight := *req.VectorSimilarityWeight
@@ -546,6 +549,9 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 	qb := GetQueryBuilder()
 	useInfinity := engine.GetEngineType() == "infinity"
 	useOceanBase := engine.IsOceanBaseFamily(s.docEngine.GetType())
+	// Vastbase fusion returns a single fused score per chunk, so the
+	// tsim/vsim decomposition below needs the local rerank — same as OB.
+	useVastbase := engine.IsVastbase(s.docEngine.GetType())
 
 	if req.RerankModel != nil && searchResult.Total > 0 {
 		return RerankByModel(
@@ -580,7 +586,7 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 		return sim, sim, sim, nil
 	}
 
-	if useOceanBase {
+	if useOceanBase || useVastbase {
 		sim, tsim, vsim := RerankStandard(
 			searchResult.Chunks,
 			nil,
@@ -819,6 +825,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		// displays, doc_type_kwd marks image/table chunks, mom_id is what promotes
 		// child fragments to their parent, row_id() the table row identity.
 		"content_with_weight", "doc_type_kwd", "mom_id", "row_id()",
+		"compile_kwd", "scope_kwd",
 		"_score",
 	}
 	// The boost scorer reads the chunk metadata fields back from each hit.
@@ -906,7 +913,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 			// Build source with vector column for ES
 			searchSrc := make([]string, len(searchRequest.SelectFields))
 			copy(searchSrc, searchRequest.SelectFields)
-			if engine.GetEngineType() == "elasticsearch" || engine.IsOceanBaseFamily(engine.GetEngineType()) {
+			if engine.GetEngineType() == "elasticsearch" || engine.IsOceanBaseFamily(engine.GetEngineType()) || engine.IsVastbase(engine.GetEngineType()) {
 				searchSrc = append(searchSrc, matchDense.VectorColumnName)
 			}
 
@@ -1198,7 +1205,7 @@ func RetrievalByChildren(chunks []map[string]interface{}, tenantIDs []string, do
 	for key, childList := range momChunks {
 		momID := key.momID
 		parentResult, err := docEngine.Search(ctx, &types.SearchRequest{
-			IndexNames:         []string{indexNames[0]},
+			IndexNames:         indexNames,
 			KbIDs:              []string{key.kbID},
 			Limit:              1,
 			IncludeUnavailable: true,
@@ -1319,6 +1326,9 @@ func (s *RetrievalService) PruneDeletedChunks(ctx context.Context, result *Retri
 	// Collect all doc_ids from chunks
 	chunkDocIDs := make([]string, 0, len(result.Field))
 	for _, chunk := range result.Field {
+		if isDatasetCompilationChunk(chunk) {
+			continue
+		}
 		if docID, ok := chunk["doc_id"].(string); ok && docID != "" {
 			chunkDocIDs = append(chunkDocIDs, docID)
 		}
@@ -1367,8 +1377,8 @@ func (s *RetrievalService) PruneDeletedChunks(ctx context.Context, result *Retri
 			continue
 		}
 		docID, ok := chunk["doc_id"].(string)
-		if !ok || docID == "" {
-			// Keep chunks without doc_id
+		if !ok || docID == "" || isDatasetCompilationChunk(chunk) {
+			// Dataset artifacts use the dataset ID instead of a source document ID.
 			filteredIDs = append(filteredIDs, chunkID)
 			filteredChunks = append(filteredChunks, chunk)
 			filteredField[chunkID] = chunk
@@ -1410,14 +1420,23 @@ func (s *RetrievalService) PruneDeletedChunks(ctx context.Context, result *Retri
 	}, nil
 }
 
-// buildIndexNames creates index names for the given tenant IDs.
+func isDatasetCompilationChunk(chunk map[string]interface{}) bool {
+	docID, _ := chunk["doc_id"].(string)
+	kbID, _ := chunk["kb_id"].(string)
+	compileKind, _ := chunk["compile_kwd"].(string)
+	return chunk["scope_kwd"] == "dataset" && compileKind != "" && docID != "" && docID == kbID
+}
+
+// buildIndexNames creates one index name per distinct tenant ID.
 // Each tenantID may be a comma-separated list.
 func buildIndexNames(tenantIDs []string) []string {
 	var indexNames []string
+	seen := make(map[string]bool)
 	for _, tid := range tenantIDs {
 		for part := range strings.SplitSeq(tid, ",") {
 			part = strings.TrimSpace(part)
-			if part != "" {
+			if part != "" && !seen[part] {
+				seen[part] = true
 				indexNames = append(indexNames, fmt.Sprintf("ragflow_%s", part))
 			}
 		}

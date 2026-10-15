@@ -129,7 +129,7 @@ func ensureUserLLMInstance(ctx context.Context, providers *ModelProviderService,
 	if _, err := providers.AddModelProvider(ctx, inst.factory, userID); err != nil {
 		return fmt.Errorf("add provider: %w", err)
 	}
-	owned, err := providers.userTenantDAO.GetByUserIDAndRole(ctx, dao.DB, userID, "owner")
+	owned, err := dao.NewUserTenantDAO().GetByUserIDAndRole(ctx, dao.DB, userID, "owner")
 	if err != nil || len(owned) == 0 {
 		return fmt.Errorf("user has no tenant: %w", err)
 	}

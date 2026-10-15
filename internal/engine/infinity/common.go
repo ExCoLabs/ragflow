@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"ragflow/internal/common"
+	"ragflow/internal/engine/types"
 	"regexp"
 	"strings"
 	"unicode"
@@ -377,9 +378,32 @@ func buildFilterFromCondition(condition map[string]interface{}, tableColumns map
 	Type    string
 	Default interface{}
 }) string {
+	return buildFilterFromConditionRaw(types.CompilationFilter(condition), tableColumns)
+}
+
+func buildFilterFromConditionRaw(condition map[string]interface{}, tableColumns map[string]struct {
+	Type    string
+	Default interface{}
+}) string {
 	var conditions []string
 
 	for k, v := range condition {
+		if k == "and" || k == "or" {
+			var children []string
+			for _, child := range types.FilterClauses(v) {
+				if expr := buildFilterFromConditionRaw(child, tableColumns); expr != "" {
+					children = append(children, "("+expr+")")
+				}
+			}
+			operator := " AND "
+			if k == "or" {
+				operator = " OR "
+			}
+			if len(children) > 0 {
+				conditions = append(conditions, joinBalanced(children, operator))
+			}
+			continue
+		}
 		if v == nil {
 			continue
 		}
@@ -389,14 +413,17 @@ func buildFilterFromCondition(condition map[string]interface{}, tableColumns map
 
 		// Handle must_not conditions -> NOT (...)
 		if k == "must_not" {
-			if mustNotMap, ok := v.(map[string]interface{}); ok {
-				for kk, vv := range mustNotMap {
-					if kk == "exists" {
-						if existsField, ok := vv.(string); ok {
-							conditions = append(conditions, fmt.Sprintf("NOT (%s)", existsCondition(existsField, tableColumns)))
-						}
-					}
+			if m, ok := v.(map[string]interface{}); ok {
+				if expr := buildFilterFromConditionRaw(m, tableColumns); expr != "" {
+					conditions = append(conditions, "NOT ("+expr+")")
 				}
+			}
+			continue
+		}
+
+		if k == "exists" {
+			if field, ok := v.(string); ok {
+				conditions = append(conditions, existsCondition(field, tableColumns))
 			}
 			continue
 		}
@@ -569,11 +596,11 @@ var analyzerLanguages = map[string]struct{}{
 // keywords, not prose.
 const ragAnalyzer = "rag"
 
-// analyzerForLanguage returns the analyzer to index and query a dataset in
-// language with. Infinity analyzes the query with the analyzer of the fulltext
-// index it matches against, so the language has to be baked into the index
-// when it is created -- there is no per-query analyzer to pass. Chunk tables
-// are per-dataset, which is what makes a per-dataset analyzer possible.
+// analyzerForLanguage returns the analyzer to index a dataset in language
+// with. Infinity analyzes a query with the analyzer of the fulltext index it
+// matches against, so the language has to be baked into the index when it is
+// created -- there is no per-query analyzer to pass. Chunk tables are
+// per-dataset, which is what makes a per-dataset analyzer possible.
 //
 // Languages outside analyzerLanguages, and analyzers outside the rag family,
 // are returned unchanged.
@@ -591,62 +618,10 @@ func analyzerForLanguage(analyzer, language string) string {
 // indexNamePartRe matches everything that cannot appear in an index name.
 var indexNamePartRe = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
-// fulltextIndexName is the name of the fulltext index on fieldName under
-// analyzer. Infinity analyzes a query with the first index it finds for a
-// field, ordered by name, so these names decide which of a field's analyzers a
-// query is analyzed with.
+// fulltextIndexName is the name of the fulltext index on fieldName for the
+// configured analyzer. Queries and filters name the index explicitly (see
+// convertMatchingField), so the name is the same in every language; the
+// dataset language only changes the analyzer behind it.
 func fulltextIndexName(fieldName, analyzer string) string {
 	return fmt.Sprintf("ft_%s_%s", indexNamePartRe.ReplaceAllString(fieldName, "_"), indexNamePartRe.ReplaceAllString(analyzer, "_"))
-}
-
-// wantedFulltextIndexes returns the fulltext indexes fieldName should have
-// under language, as name -> analyzer.
-func wantedFulltextIndexes(fieldName string, analyzers []string, language string) map[string]string {
-	wanted := make(map[string]string, len(analyzers))
-	for _, configured := range analyzers {
-		analyzer := analyzerForLanguage(configured, language)
-		wanted[fulltextIndexName(fieldName, analyzer)] = analyzer
-	}
-	return wanted
-}
-
-// hasForeignRagIndex reports whether fieldName already carries a rag fulltext
-// index under another language.
-//
-// A table's rag analyzer is settled when its first fulltext index is built:
-// Infinity analyzes a query with the field's first index by name, so adding
-// "ft_content_rag_coarse" next to "ft_content_rag_coarse_slovak" would win on
-// name order and silently undo the dataset's language -- and adding the slovak
-// one next to an existing default would silently do nothing. Either way the
-// table keeps what it has, and a dataset that needs the other analyzer has to
-// be reindexed into a fresh table.
-//
-// Indexes this language does want are not foreign, so a field missing one of
-// its variants still gets it.
-func hasForeignRagIndex(indexNames []string, fieldName string, wanted map[string]string) bool {
-	prefix := fmt.Sprintf("ft_%s_%s", indexNamePartRe.ReplaceAllString(fieldName, "_"), ragAnalyzer)
-	for _, name := range indexNames {
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		if _, ok := wanted[name]; !ok {
-			return true
-		}
-	}
-	return false
-}
-
-// listIndexNames returns the table's index names. The SDK types its response
-// as interface{} and the concrete type lives in its internal package, so read
-// it through the getter the thrift codegen provides.
-func listIndexNames(table *infinity.Table) ([]string, error) {
-	resp, err := table.ListIndexes()
-	if err != nil {
-		return nil, err
-	}
-	lister, ok := resp.(interface{ GetIndexNames() []string })
-	if !ok {
-		return nil, fmt.Errorf("unexpected ListIndexes response type: %T", resp)
-	}
-	return lister.GetIndexNames(), nil
 }

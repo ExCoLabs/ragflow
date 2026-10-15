@@ -39,7 +39,7 @@ import (
 	"ragflow/internal/service"
 	"ragflow/internal/service/oauth"
 	"ragflow/internal/service/oauth/oauthtest"
-	"ragflow/internal/utility"
+	"ragflow/internal/common"
 )
 
 const oauthTestSecretKey = "oauth-handler-test-secret-key"
@@ -151,7 +151,7 @@ func expectRedirect(t *testing.T, w *httptest.ResponseRecorder, key string) stri
 
 func userByToken(t *testing.T, db *gorm.DB, auth string) *entity.User {
 	t.Helper()
-	accessToken, err := utility.ExtractAccessToken(auth, oauthTestSecretKey)
+	accessToken, err := common.ExtractAccessToken(auth, oauthTestSecretKey)
 	if err != nil {
 		t.Fatalf("auth token does not verify: %v", err)
 	}
@@ -189,8 +189,8 @@ func TestOAuthLoginChannels(t *testing.T) {
 
 func TestOAuthCallbackExistingUser(t *testing.T) {
 	env := setupOAuthTest(t, "false", "")
-	oldToken := utility.GenerateToken()
-	existing := &entity.User{ID: utility.GenerateToken(), Email: env.provider.Email, Nickname: "alice", AccessToken: &oldToken, IsActive: "1"}
+	oldToken := common.GenerateToken()
+	existing := &entity.User{ID: common.GenerateToken(), Email: env.provider.Email, Nickname: "alice", AccessToken: &oldToken, IsActive: "1"}
 	if err := env.db.Create(existing).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -218,8 +218,8 @@ func TestOAuthCallbackExistingUser(t *testing.T) {
 
 func TestOAuthCallbackInactiveUser(t *testing.T) {
 	env := setupOAuthTest(t, "true", "")
-	token := utility.GenerateToken()
-	if err := env.db.Create(&entity.User{ID: utility.GenerateToken(), Email: env.provider.Email, Nickname: "alice", AccessToken: &token, IsActive: "0"}).Error; err != nil {
+	token := common.GenerateToken()
+	if err := env.db.Create(&entity.User{ID: common.GenerateToken(), Email: env.provider.Email, Nickname: "alice", AccessToken: &token, IsActive: "0"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	state, cookies := env.login(t)
@@ -331,12 +331,12 @@ user_default_llm:
 
 	teams := map[string]string{}
 	for _, owner := range []string{"eng-team@example.com", "everyone@example.com"} {
-		status, token := "1", utility.GenerateToken()
-		team := &entity.User{ID: utility.GenerateToken(), Email: owner, Nickname: owner, AccessToken: &token, IsActive: "1", Status: &status}
+		status, token := "1", common.GenerateToken()
+		team := &entity.User{ID: common.GenerateToken(), Email: owner, Nickname: owner, AccessToken: &token, IsActive: "1", Status: &status}
 		if err := env.db.Create(team).Error; err != nil {
 			t.Fatal(err)
 		}
-		if err := env.db.Create(&entity.UserTenant{ID: utility.GenerateToken(), UserID: team.ID, TenantID: team.ID, Role: "owner", InvitedBy: team.ID, Status: &status}).Error; err != nil {
+		if err := env.db.Create(&entity.UserTenant{ID: common.GenerateToken(), UserID: team.ID, TenantID: team.ID, Role: "owner", InvitedBy: team.ID, Status: &status}).Error; err != nil {
 			t.Fatal(err)
 		}
 		teams[owner] = team.ID

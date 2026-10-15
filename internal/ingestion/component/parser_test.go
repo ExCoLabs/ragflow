@@ -24,6 +24,7 @@ import (
 	"github.com/xuri/excelize/v2"
 	"ragflow/internal/agent/runtime"
 	"ragflow/internal/entity"
+	"ragflow/internal/parser/parser"
 )
 
 func TestReportParserWarningsAsProgressMessages(t *testing.T) {
@@ -249,10 +250,10 @@ func TestNewParserComponentFlattensNestedSetups(t *testing.T) {
 	}
 }
 
-// TestNewParserComponent_CopiesVLMPromptIntoFamilySetups verifies that the
-// global VLM custom prompt is copied into family setups for vision
-// enhancement, while the global model ID remains separate.
-func TestNewParserComponent_CopiesVLMPromptIntoFamilySetups(t *testing.T) {
+// TestNewParserComponent_ReadsLegacyVLMPrompt verifies that a custom figure
+// prompt stored as vlm.prompt becomes the vision system prompt when
+// vlm.system_prompt is absent.
+func TestNewParserComponent_ReadsLegacyVLMPrompt(t *testing.T) {
 	component, err := NewParserComponent(map[string]any{
 		"enable_vision_enhancement": true,
 		"vlm": map[string]any{
@@ -265,15 +266,8 @@ func TestNewParserComponent_CopiesVLMPromptIntoFamilySetups(t *testing.T) {
 		t.Fatalf("NewParserComponent: %v", err)
 	}
 	pc := component.(*ParserComponent)
-	vlm, ok := pc.setups["pdf"]["vlm"].(map[string]any)
-	if !ok {
-		t.Fatalf("pdf setup missing vlm config")
-	}
-	if got := vlm["prompt"]; got != "custom technical drawing prompt" {
-		t.Errorf("vlm.prompt = %v, want custom technical drawing prompt", got)
-	}
-	if got := vlm["llm_id"]; got != "vision-model-id" {
-		t.Errorf("vlm.llm_id = %v, want vision-model-id", got)
+	if pc.vision.systemPrompt != "custom technical drawing prompt" || pc.vision.modelID != "vision-model-id" {
+		t.Errorf("vision = %+v", pc.vision)
 	}
 }
 
@@ -331,7 +325,8 @@ func TestParserComponent_Invoke_TextInput(t *testing.T) {
 	if got, want := out["output_format"], "json"; got != want {
 		t.Errorf("output_format = %v, want %v", got, want)
 	}
-	jsonItems, ok := out["json"].([]map[string]any)
+	jsonDocs, ok := out["json"].([]parser.DocItem)
+	jsonItems := parser.ItemsToMaps(jsonDocs)
 	if !ok || len(jsonItems) != 1 {
 		t.Fatalf("json: got %T (len %d), want 1 item", out["json"], len(jsonItems))
 	}
@@ -362,7 +357,8 @@ func TestParserComponent_EmptyXLSXDoesNotBecomeRawText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	items, ok := out["json"].([]map[string]any)
+	jsonDocs, ok := out["json"].([]parser.DocItem)
+	items := parser.ItemsToMaps(jsonDocs)
 	if !ok {
 		t.Fatalf("json = %T, want []map[string]any", out["json"])
 	}
@@ -382,7 +378,8 @@ func TestParserComponent_Invoke_PageRangeFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	jsonItems, ok := out["json"].([]map[string]any)
+	jsonDocs, ok := out["json"].([]parser.DocItem)
+	jsonItems := parser.ItemsToMaps(jsonDocs)
 	if !ok {
 		t.Fatalf("json: got %T, want []map[string]any", out["json"])
 	}
@@ -556,7 +553,8 @@ func TestParserComponent_Invoke_ResolvesBinaryFromDocID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	jsonItems, ok := out["json"].([]map[string]any)
+	jsonDocs, ok := out["json"].([]parser.DocItem)
+	jsonItems := parser.ItemsToMaps(jsonDocs)
 	if !ok || len(jsonItems) != 2 {
 		t.Fatalf("json = %T/%v, want 2 items", out["json"], out["json"])
 	}
@@ -583,7 +581,8 @@ func TestParserComponent_Invoke_ResolvesBinaryFromBucketPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	jsonItems, ok := out["json"].([]map[string]any)
+	jsonDocs, ok := out["json"].([]parser.DocItem)
+	jsonItems := parser.ItemsToMaps(jsonDocs)
 	if !ok || len(jsonItems) != 1 {
 		t.Fatalf("json = %T/%v, want 1 item", out["json"], out["json"])
 	}
@@ -622,7 +621,8 @@ func TestParserComponent_Invoke_AcceptsBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	jsonItems, ok := out["json"].([]map[string]any)
+	jsonDocs, ok := out["json"].([]parser.DocItem)
+	jsonItems := parser.ItemsToMaps(jsonDocs)
 	if !ok {
 		t.Fatalf("json: got %T", out["json"])
 	}

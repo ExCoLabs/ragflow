@@ -19,7 +19,9 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"go.uber.org/zap"
@@ -92,17 +94,8 @@ func (s *MetadataService) GetTenantIDByKBID(ctx context.Context, kbID string) (s
 	return dao.GetTenantIDByKBID(ctx, dao.DB, kbID)
 }
 
-// GetTenantIDByKBIDs retrieves tenant ID from the first knowledge base ID in the list
-func (s *MetadataService) GetTenantIDByKBIDs(ctx context.Context, kbIDs []string) (string, error) {
-	if len(kbIDs) == 0 {
-		return "", fmt.Errorf("no kb_ids provided")
-	}
-	return dao.GetTenantIDByKBID(ctx, dao.DB, kbIDs[0])
-}
-
 // SearchMetadataResponse holds the result of a metadata search
 type SearchMetadataResponse struct {
-	IndexName       string
 	MetadataRecords []map[string]interface{}
 }
 
@@ -124,40 +117,38 @@ func (s *MetadataService) SearchMetadata(ctx context.Context, kbID, tenantID str
 	}
 
 	return &SearchMetadataResponse{
-		IndexName:       BuildMetadataIndexName(tenantID),
 		MetadataRecords: searchResult.MetadataRecords,
 	}, nil
 }
 
-// SearchMetadataByKBs searches the metadata index for multiple knowledge bases
+// SearchMetadataByKBs searches each tenant's metadata store, with size as the
+// per-tenant limit and the KB filter scoped to that tenant.
 func (s *MetadataService) SearchMetadataByKBs(ctx context.Context, kbIDs []string, size int) (*SearchMetadataResponse, error) {
 	if len(kbIDs) == 0 {
 		return &SearchMetadataResponse{MetadataRecords: []map[string]interface{}{}}, nil
 	}
 
-	tenantID, err := s.GetTenantIDByKBIDs(ctx, kbIDs)
+	groups, err := dao.GroupKBIDsByTenant(ctx, dao.DB, kbIDs)
 	if err != nil {
 		return nil, err
 	}
 
-	searchReq := &types.SearchMetadataRequest{
-		TenantID: tenantID,
-		Offset:   0,
-		Limit:    size,
-		Filter: map[string]interface{}{
-			"kb_id": kbIDs,
-		},
+	response := &SearchMetadataResponse{MetadataRecords: make([]map[string]interface{}, 0)}
+	for _, group := range groups {
+		searchReq := &types.SearchMetadataRequest{
+			TenantID: group.TenantID,
+			Limit:    size,
+			Filter: map[string]interface{}{
+				"kb_id": group.KBIDs,
+			},
+		}
+		searchResult, err := s.docEngine.SearchMetadata(ctx, searchReq)
+		if err != nil {
+			return nil, fmt.Errorf("metadata search for tenant %s failed: %w", group.TenantID, err)
+		}
+		response.MetadataRecords = append(response.MetadataRecords, searchResult.MetadataRecords...)
 	}
-
-	searchResult, err := s.docEngine.SearchMetadata(ctx, searchReq)
-	if err != nil {
-		return nil, fmt.Errorf("search failed: %w", err)
-	}
-
-	return &SearchMetadataResponse{
-		IndexName:       BuildMetadataIndexName(tenantID),
-		MetadataRecords: searchResult.MetadataRecords,
-	}, nil
+	return response, nil
 }
 
 // MetadataForDocIDs returns doc_id → its metadata fields, reading ONLY the given documents
@@ -220,87 +211,6 @@ func (s *MetadataService) DeclaredMetadataFields(ctx context.Context, kbIDs []st
 	return out, nil
 }
 
-// metaValueSpaceProvider is implemented by doc engines that can build the
-// metadata value space from an aggregation instead of a document scan. Kept out
-// of engine.DocEngine because only the Elasticsearch backend has it: the others
-// keep the flattened scan, unchanged.
-type metaValueSpaceProvider interface {
-	MetaValueSpace(ctx context.Context, tenantID string, kbIDs []string) (map[string][]string, error)
-}
-
-// GetMetaValueSpaceByKBs returns every distinct metadata value per key.
-//
-// Deliberately not GetFlattedMetaByKBs: that reads the doc-meta index with a
-// fixed size cap, so it stops at the doc store's result window and hands the
-// filter generator the metadata of an arbitrary prefix -- which it is then asked
-// to pick a value from that may not be in it. An aggregation sees every document
-// regardless of the window, and its cost scales with the metadata's cardinality
-// rather than the document count.
-//
-// Returns types.ErrMetaValueSpaceIncomplete when the doc store answers with
-// partial results. That is deliberately not softened into the flattened scan:
-// the scan is result-window limited, so substituting it would answer an
-// incomplete read with a differently incomplete one.
-//
-// Backends without an aggregation path fall back to flattening
-// GetFlattedMetaByKBs, so behaviour there is unchanged.
-func (s *MetadataService) GetMetaValueSpaceByKBs(ctx context.Context, kbIDs []string) (common.MetaValueSpace, error) {
-	if len(kbIDs) == 0 {
-		return common.MetaValueSpace{}, nil
-	}
-
-	provider, ok := s.docEngine.(metaValueSpaceProvider)
-	if !ok {
-		metas, err := s.GetFlattedMetaByKBs(ctx, kbIDs)
-		if err != nil {
-			return nil, err
-		}
-		return metas.ValueSpace(), nil
-	}
-
-	tenantID, err := s.GetTenantIDByKBIDs(ctx, kbIDs)
-	if err != nil {
-		return nil, err
-	}
-	space, err := provider.MetaValueSpace(ctx, tenantID, kbIDs)
-	if err != nil {
-		return nil, err
-	}
-	return common.MetaValueSpace(space), nil
-}
-
-// metaFacetProvider is implemented by doc engines that can count the file
-// list's metadata facet with aggregations instead of reading every document's
-// metadata. Like metaValueSpaceProvider, only the Elasticsearch backend has it.
-type metaFacetProvider interface {
-	MetaFacets(ctx context.Context, tenantID, kbID string, docIDs []string) (map[string]map[string]int64, int64, error)
-}
-
-// GetMetadataFacets counts, among docIDs, how many documents hold each metadata
-// value -- {key: {value: count}} -- and how many hold any metadata at all.
-//
-// ok=false means the doc store cannot give an exact answer: the backend has no
-// aggregation path, or the aggregation would have been partial or would have
-// missed values (types.ErrMetaValueSpaceIncomplete). A facet count is read as
-// exact, so the caller then counts the documents itself.
-func (s *MetadataService) GetMetadataFacets(ctx context.Context, kbID string, docIDs []string) (map[string]map[string]int64, int64, bool) {
-	provider, ok := s.docEngine.(metaFacetProvider)
-	if !ok {
-		return nil, 0, false
-	}
-	tenantID, err := s.GetTenantIDByKBID(ctx, kbID)
-	if err != nil {
-		common.Warn("metadata facets: tenant lookup failed; counting the documents instead", zap.String("kb_id", kbID), zap.Error(err))
-		return nil, 0, false
-	}
-	counts, carrying, err := provider.MetaFacets(ctx, tenantID, kbID, docIDs)
-	if err != nil {
-		common.Warn("metadata facets cannot be aggregated exactly; counting the documents instead", zap.String("kb_id", kbID), zap.Error(err))
-		return nil, 0, false
-	}
-	return counts, carrying, true
-}
-
 // GetFlattedMetaByKBs returns flattened metadata in the format:
 // {field_name: {value: [doc_ids]}}
 func (s *MetadataService) GetFlattedMetaByKBs(ctx context.Context, kbIDs []string) (common.MetaData, error) {
@@ -348,66 +258,155 @@ func (s *MetadataService) GetFlattedMetaByKBs(ctx context.Context, kbIDs []strin
 
 			valueMap := flattedMeta[fieldName]
 
-			// Handle string, number (float64/int), and list of string/number
-			switch v := fieldValue.(type) {
-			case string:
-				// Single string value (including time strings)
-				if v != "" {
-					if _, exists := valueMap[v]; !exists {
-						valueMap[v] = []string{docID}
-					} else {
-						valueMap[v] = appendDocID(valueMap[v], docID)
-					}
+			// A list contributes its elements.
+			items := []interface{}{fieldValue}
+			if list, ok := fieldValue.([]interface{}); ok {
+				items = list
+			}
+			for _, item := range items {
+				value, ok := flattedMetaValue(item)
+				if !ok {
+					continue
 				}
-			case float64:
-				// Numeric value - convert to string (matching Python's str())
-				strVal := strconv.FormatFloat(v, 'f', -1, 64)
-				if _, exists := valueMap[strVal]; !exists {
-					valueMap[strVal] = []string{docID}
+				if _, exists := valueMap[value]; !exists {
+					valueMap[value] = []string{docID}
 				} else {
-					valueMap[strVal] = appendDocID(valueMap[strVal], docID)
-				}
-			case int:
-				// Integer value - convert to string
-				strVal := fmt.Sprintf("%d", v)
-				if _, exists := valueMap[strVal]; !exists {
-					valueMap[strVal] = []string{docID}
-				} else {
-					valueMap[strVal] = appendDocID(valueMap[strVal], docID)
-				}
-			case []interface{}:
-				// List of values (string, number, or time)
-				for _, item := range v {
-					switch itemVal := item.(type) {
-					case string:
-						if itemVal != "" {
-							if _, exists := valueMap[itemVal]; !exists {
-								valueMap[itemVal] = []string{docID}
-							} else {
-								valueMap[itemVal] = appendDocID(valueMap[itemVal], docID)
-							}
-						}
-					case float64:
-						strVal := strconv.FormatFloat(itemVal, 'f', -1, 64)
-						if _, exists := valueMap[strVal]; !exists {
-							valueMap[strVal] = []string{docID}
-						} else {
-							valueMap[strVal] = appendDocID(valueMap[strVal], docID)
-						}
-					case int:
-						strVal := fmt.Sprintf("%d", itemVal)
-						if _, exists := valueMap[strVal]; !exists {
-							valueMap[strVal] = []string{docID}
-						} else {
-							valueMap[strVal] = appendDocID(valueMap[strVal], docID)
-						}
-					}
+					valueMap[value] = appendDocID(valueMap[value], docID)
 				}
 			}
 		}
 	}
 
 	return flattedMeta, nil
+}
+
+// flattedMetaValue renders one stored metadata value -- a scalar, or an element
+// of a list -- as the string GetFlattedMetaByKBs keys it by and metadata
+// filters compare against: a non-empty string as itself, a number the way
+// Python's str() writes it. Anything else (an empty string, a boolean, a
+// nested object or list) is not a filterable value.
+func flattedMetaValue(value interface{}) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		return v, v != ""
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), true
+	case int:
+		return strconv.Itoa(v), true
+	}
+	return "", false
+}
+
+// metaValueSpaceProvider is implemented by doc engines that can aggregate the
+// metadata value space instead of scanning documents. Only the Elasticsearch
+// backend has one; values come back typed the way encoding/json decodes them.
+type metaValueSpaceProvider interface {
+	MetaValueSpace(ctx context.Context, tenantID string, kbIDs []string) (map[string][]interface{}, error)
+}
+
+// metaFacetProvider is implemented by doc engines that can count the file
+// list's metadata facet with an aggregation instead of reading every
+// document's metadata. Only the Elasticsearch backend has one.
+type metaFacetProvider interface {
+	MetaFacets(ctx context.Context, tenantID, kbID string, docIDs []string) ([]types.MetaValueCount, int64, error)
+}
+
+// GetMetadataFacets counts, among docIDs, how many documents hold each
+// metadata value, and how many hold any metadata value at all.
+//
+// ok=false means the doc store cannot give an exact answer -- the backend has
+// no aggregation path, or the aggregation came back partial
+// (types.ErrMetaValueSpaceIncomplete) -- and the caller counts the documents
+// itself. Any other failure is returned: a doc store that cannot be reached
+// would fail the scan too.
+func (s *MetadataService) GetMetadataFacets(ctx context.Context, kbID string, docIDs []string) ([]types.MetaValueCount, int64, bool, error) {
+	provider, ok := s.docEngine.(metaFacetProvider)
+	if !ok {
+		return nil, 0, false, nil
+	}
+	tenantID, err := s.GetTenantIDByKBID(ctx, kbID)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	facets, carrying, err := provider.MetaFacets(ctx, tenantID, kbID, docIDs)
+	if errors.Is(err, types.ErrMetaValueSpaceIncomplete) {
+		common.Warn("metadata facets came back incomplete; counting the documents instead", zap.String("kb_id", kbID), zap.Error(err))
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return facets, carrying, true, nil
+}
+
+// GetMetaValueSpaceByKBs returns the distinct metadata values per key across
+// kbIDs -- what GenMetaFilter shows the model.
+//
+// GetFlattedMetaByKBs reads the doc-meta index with a fixed size cap, so past
+// the doc store's result window it covers an arbitrary prefix of the dataset
+// and the model is asked to pick a value that may not be in it. An
+// aggregation sees every document regardless of the window, and its cost
+// scales with the metadata's cardinality rather than the document count. Its
+// values go through flattedMetaValue like the scan's, so a value the model
+// picks is the string the metadata filters compare against.
+//
+// Each tenant has its own doc-meta index, so the datasets are aggregated per
+// tenant and the value spaces merged.
+//
+// Returns types.ErrMetaValueSpaceIncomplete when the doc store answers with
+// partial results. That is deliberately not softened into the flattened scan:
+// the scan is result-window limited, so substituting it would answer an
+// incomplete read with a differently incomplete one.
+//
+// Backends without an aggregation path fall back to flattening
+// GetFlattedMetaByKBs, so behaviour there is unchanged.
+func (s *MetadataService) GetMetaValueSpaceByKBs(ctx context.Context, kbIDs []string) (common.MetaValueSpace, error) {
+	if len(kbIDs) == 0 {
+		return common.MetaValueSpace{}, nil
+	}
+
+	provider, ok := s.docEngine.(metaValueSpaceProvider)
+	if !ok {
+		metas, err := s.GetFlattedMetaByKBs(ctx, kbIDs)
+		if err != nil {
+			return nil, err
+		}
+		return metas.ValueSpace(), nil
+	}
+
+	groups, err := dao.GroupKBIDsByTenant(ctx, dao.DB, kbIDs)
+	if err != nil {
+		return nil, err
+	}
+	merged := make(map[string]map[string]struct{})
+	for _, group := range groups {
+		space, err := provider.MetaValueSpace(ctx, group.TenantID, group.KBIDs)
+		if err != nil {
+			return nil, err
+		}
+		for key, values := range space {
+			for _, raw := range values {
+				value, ok := flattedMetaValue(raw)
+				if !ok {
+					continue
+				}
+				if merged[key] == nil {
+					merged[key] = make(map[string]struct{})
+				}
+				merged[key][value] = struct{}{}
+			}
+		}
+	}
+	result := make(common.MetaValueSpace, len(merged))
+	for key, values := range merged {
+		list := make([]string, 0, len(values))
+		for value := range values {
+			list = append(list, value)
+		}
+		sort.Strings(list)
+		result[key] = list
+	}
+	return result, nil
 }
 
 // FilterDocIDsByMetaPushdown runs ONLY the metadata-index push-down, which is the first

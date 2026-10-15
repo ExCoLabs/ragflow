@@ -23,6 +23,7 @@ import type { CompletionChunk } from '@/services/chat-completion-stream';
 import { omit } from 'lodash';
 import { v4 as uuid } from 'uuid';
 import {
+  buildCitationDisplayMap,
   citationMarkerReg,
   normalizeCitationDigits,
   normalizeCitationMarkers,
@@ -245,6 +246,7 @@ export function setChatVariableEnabledFieldValuePage() {
 
 export const currentReg = citationMarkerReg;
 export {
+  buildCitationDisplayMap,
   normalizeCitationDigits,
   normalizeCitationMarkers,
   parseCitationIndex,

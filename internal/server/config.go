@@ -174,6 +174,9 @@ func GetConfig() *config.Config {
 	return globalConfig
 }
 
+// GetAllConfigs collects backend connection settings for administrator inspection.
+// ExportConfigs intentionally retains plaintext credentials; the admin configuration
+// endpoint restricts access to superusers, while PrintAll masks credentials in logs.
 func GetAllConfigs() ([]map[string]interface{}, error) {
 	var allConfigs []map[string]interface{}
 
@@ -205,6 +208,9 @@ func GetAllConfigs() ([]map[string]interface{}, error) {
 	case "seekdb":
 		seekDBConfig := globalConfig.GetSeekDBConfig()
 		allConfigs = append(allConfigs, seekDBConfig.ExportConfigs())
+	case "vastbase":
+		vastbaseConfig := globalConfig.GetVastbaseConfig()
+		allConfigs = append(allConfigs, vastbaseConfig.ExportConfigs())
 	default:
 		return nil, fmt.Errorf("not supported doc engine: %s", docEngineType)
 	}
@@ -276,62 +282,65 @@ func GetAllConfigs() ([]map[string]interface{}, error) {
 	return allConfigs, nil
 }
 
-// PrintAll prints all configuration settings
+var sensitiveConfigKeys = map[string]struct{}{
+	"password":        {},
+	"mail_password":   {},
+	"secret":          {},
+	"secret_key":      {},
+	"client_secret":   {},
+	"api_key":         {},
+	"host_api_key":    {},
+	"http_app_key":    {},
+	"http_secret_key": {},
+	"access_key":      {},
+	"secret_id":       {},
+	"session_token":   {},
+	"sas_token":       {},
+
+	"open_dataloader_api_key": {},
+	"paddle_ocr_access_token": {},
+	"somark_api_key":          {},
+	"tcad_api_key":            {},
+	"docling_api_key":         {},
+	"mineru_api_key":          {},
+	"tavily_api_key":          {},
+	"querit_api_key":          {},
+}
+
+// PrintAll logs all configuration settings with credentials masked.
 func PrintAll() {
 	if globalViper == nil {
 		common.Info("Configuration not initialized")
 		return
 	}
 
-	allSettings := globalViper.AllSettings()
-	// The standalone MCP key grants every self-host client the same identity.
-	if mcp, ok := allSettings["mcp"].(map[string]interface{}); ok {
-		delete(mcp, "host_api_key")
-	}
+	allSettings := maskConfigCredentials(globalViper.AllSettings()).(map[string]any)
 	common.Info("=== All Configurations ===")
 	for key, value := range allSettings {
-		common.Info("config", zap.String("key", key), zap.Any("value", redactConfigValue(key, value)))
+		common.Info("config", zap.String("key", key), zap.Any("value", value))
 	}
 	common.Info("=== End Configurations ===")
 }
 
-// secretConfigKeyParts mark a config key whose value must not reach the log.
-// Matched as substrings of the lower-cased key, so "client_secret",
-// "S3_SECRET_KEY" and "api_key" are all caught.
-var secretConfigKeyParts = []string{"password", "passwd", "secret", "token", "api_key", "apikey", "access_key", "private_key", "credential"}
-
-func isSecretConfigKey(key string) bool {
-	key = strings.ToLower(key)
-	for _, part := range secretConfigKeyParts {
-		if strings.Contains(key, part) {
-			return true
+func maskConfigCredentials(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		settings := make(map[string]any, len(value))
+		for key, child := range value {
+			if _, sensitive := sensitiveConfigKeys[strings.ToLower(key)]; sensitive {
+				settings[key] = "******"
+				continue
+			}
+			settings[key] = maskConfigCredentials(child)
 		}
-	}
-	return false
-}
-
-// redactConfigValue returns a copy of value with every secret-looking leaf
-// replaced, so PrintAll can log the effective configuration without leaking
-// credentials into log shippers.
-func redactConfigValue(key string, value interface{}) interface{} {
-	switch v := value.(type) {
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(v))
-		for k, child := range v {
-			out[k] = redactConfigValue(k, child)
+		return settings
+	case []any:
+		settings := make([]any, len(value))
+		for i, child := range value {
+			settings[i] = maskConfigCredentials(child)
 		}
-		return out
-	case []interface{}:
-		out := make([]interface{}, len(v))
-		for i, child := range v {
-			out[i] = redactConfigValue(key, child)
-		}
-		return out
+		return settings
+	default:
+		return value
 	}
-	// Only non-empty strings: a numeric "max_tokens" is not a secret, and an
-	// empty secret shows that it is unset.
-	if s, ok := value.(string); ok && s != "" && isSecretConfigKey(key) {
-		return "[REDACTED]"
-	}
-	return value
 }

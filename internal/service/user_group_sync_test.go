@@ -26,7 +26,7 @@ import (
 
 	"ragflow/internal/entity"
 	"ragflow/internal/service/oauth"
-	"ragflow/internal/utility"
+	"ragflow/internal/common"
 )
 
 // setupSharedTestDB opens a named in-memory SQLite database (shared by all
@@ -49,7 +49,7 @@ func setupSharedTestDB(t *testing.T) *gorm.DB {
 func createTestAccount(t *testing.T, db *gorm.DB, email string) *entity.User {
 	t.Helper()
 	status := "1"
-	user := &entity.User{ID: utility.GenerateToken(), Email: email, Nickname: email, IsActive: "1", Status: &status}
+	user := &entity.User{ID: common.GenerateToken(), Email: email, Nickname: email, IsActive: "1", Status: &status}
 	name := email + "'s Kingdom"
 	if err := db.Create(user).Error; err != nil {
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func createTestAccount(t *testing.T, db *gorm.DB, email string) *entity.User {
 
 func addMembership(t *testing.T, db *gorm.DB, userID, tenantID, role, status string) {
 	t.Helper()
-	if err := db.Create(&entity.UserTenant{ID: utility.GenerateToken(), UserID: userID, TenantID: tenantID,
+	if err := db.Create(&entity.UserTenant{ID: common.GenerateToken(), UserID: userID, TenantID: tenantID,
 		Role: role, InvitedBy: tenantID, Status: &status}).Error; err != nil {
 		t.Fatal(err)
 	}

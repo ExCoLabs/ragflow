@@ -37,10 +37,9 @@ import (
 	"testing"
 
 	"ragflow/internal/common"
+	"ragflow/internal/dao"
 	"ragflow/internal/engine/types"
 	"ragflow/internal/entity"
-	modelModule "ragflow/internal/entity/models"
-	"ragflow/internal/tokenizer"
 )
 
 // cappedScanDocEngine answers SearchMetadata with at most req.Limit records,
@@ -63,14 +62,14 @@ func (e *cappedScanDocEngine) SearchMetadata(_ context.Context, req *types.Searc
 // aggregatingDocEngine additionally implements the aggregation path.
 type aggregatingDocEngine struct {
 	cappedScanDocEngine
-	space map[string][]string
+	space map[string][]interface{}
 	err   error
 
 	gotTenantID string
 	gotKBIDs    []string
 }
 
-func (e *aggregatingDocEngine) MetaValueSpace(_ context.Context, tenantID string, kbIDs []string) (map[string][]string, error) {
+func (e *aggregatingDocEngine) MetaValueSpace(_ context.Context, tenantID string, kbIDs []string) (map[string][]interface{}, error) {
 	e.gotTenantID = tenantID
 	e.gotKBIDs = kbIDs
 	if e.err != nil {
@@ -98,7 +97,7 @@ func seedValueSpaceKB(t *testing.T) {
 // and the capped scan is not consulted at all.
 func TestGetMetaValueSpaceByKBs_UsesAggregation(t *testing.T) {
 	seedValueSpaceKB(t)
-	docEngine := &aggregatingDocEngine{space: map[string][]string{
+	docEngine := &aggregatingDocEngine{space: map[string][]interface{}{
 		"project": {"alpha", "beta"},
 		"phase":   {"draft"},
 	}}
@@ -117,6 +116,54 @@ func TestGetMetaValueSpaceByKBs_UsesAggregation(t *testing.T) {
 	}
 	if docEngine.gotTenantID != "tenant-1" {
 		t.Errorf("tenant id: got %q, want tenant-1", docEngine.gotTenantID)
+	}
+}
+
+// perTenantDocEngine answers MetaValueSpace from a per-tenant table, the way
+// separate per-tenant metadata indexes do.
+type perTenantDocEngine struct {
+	cappedScanDocEngine
+	spaces map[string]map[string][]interface{}
+	calls  map[string][]string
+}
+
+func (e *perTenantDocEngine) MetaValueSpace(_ context.Context, tenantID string, kbIDs []string) (map[string][]interface{}, error) {
+	if e.calls == nil {
+		e.calls = map[string][]string{}
+	}
+	e.calls[tenantID] = append(e.calls[tenantID], kbIDs...)
+	return e.spaces[tenantID], nil
+}
+
+// Datasets of different tenants live in different metadata indexes, so each
+// tenant is asked for its own datasets and the value spaces are merged.
+func TestGetMetaValueSpaceByKBs_MergesTenants(t *testing.T) {
+	seedValueSpaceKB(t)
+	if err := dao.DB.Create(&entity.Knowledgebase{
+		ID:        "kb-2",
+		TenantID:  "tenant-2",
+		Name:      "kb-2",
+		CreatedBy: "tenant-2",
+		EmbdID:    "embd",
+	}).Error; err != nil {
+		t.Fatalf("insert kb: %v", err)
+	}
+	docEngine := &perTenantDocEngine{spaces: map[string]map[string][]interface{}{
+		"tenant-1": {"project": {"beta", "alpha"}},
+		"tenant-2": {"project": {"gamma", "alpha"}, "phase": {"draft"}},
+	}}
+
+	space, err := NewMetadataServiceForTest(nil, docEngine).GetMetaValueSpaceByKBs(t.Context(), []string{"kb-1", "kb-2"})
+	if err != nil {
+		t.Fatalf("GetMetaValueSpaceByKBs: %v", err)
+	}
+	want := common.MetaValueSpace{"project": {"alpha", "beta", "gamma"}, "phase": {"draft"}}
+	if !reflect.DeepEqual(space, want) {
+		t.Errorf("space: got %v, want %v", space, want)
+	}
+	wantCalls := map[string][]string{"tenant-1": {"kb-1"}, "tenant-2": {"kb-2"}}
+	if !reflect.DeepEqual(docEngine.calls, wantCalls) {
+		t.Errorf("per-tenant reads: got %v, want %v", docEngine.calls, wantCalls)
 	}
 }
 
@@ -149,7 +196,7 @@ func TestGetMetaValueSpaceByKBs_AggregationSeesPastTheScanCap(t *testing.T) {
 
 	aggregating := &aggregatingDocEngine{
 		cappedScanDocEngine: cappedScanDocEngine{records: records},
-		space:               map[string][]string{"phase": {"early", "late-phase"}},
+		space:               map[string][]interface{}{"phase": {"early", "late-phase"}},
 	}
 	space, err := NewMetadataServiceForTest(nil, aggregating).GetMetaValueSpaceByKBs(t.Context(), []string{"kb-1"})
 	if err != nil {
@@ -157,6 +204,53 @@ func TestGetMetaValueSpaceByKBs_AggregationSeesPastTheScanCap(t *testing.T) {
 	}
 	if got := space["phase"]; !reflect.DeepEqual(got, []string{"early", "late-phase"}) {
 		t.Errorf("aggregated phase values: got %v, want [early late-phase]", got)
+	}
+}
+
+// The aggregated values are what metadata filters compare against, so they
+// must render exactly as the flattened scan renders the same stored values:
+// GenMetaFilter's pick is looked up in the scan's value map.
+func TestGetMetaValueSpaceByKBs_RendersValuesLikeTheScan(t *testing.T) {
+	seedValueSpaceKB(t)
+	stored := map[string]interface{}{
+		"price":  float64(1234567),
+		"score":  0.1,
+		"label":  "1234567",
+		"tags":   []interface{}{"red", float64(2), true, "", map[string]interface{}{"x": 1.0}},
+		"draft":  true,
+		"blank":  "",
+		"nested": map[string]interface{}{"x": 1.0},
+	}
+	scanned, err := NewMetadataServiceForTest(nil, &cappedScanDocEngine{records: []map[string]interface{}{
+		{"id": "doc-1", "meta_fields": stored},
+	}}).GetFlattedMetaByKBs(t.Context(), []string{"kb-1"})
+	if err != nil {
+		t.Fatalf("GetFlattedMetaByKBs: %v", err)
+	}
+	want := scanned.ValueSpace()
+	for key, values := range want {
+		if len(values) == 0 {
+			delete(want, key)
+		}
+	}
+
+	aggregated := map[string][]interface{}{}
+	for key, value := range stored {
+		if list, ok := value.([]interface{}); ok {
+			aggregated[key] = list
+			continue
+		}
+		aggregated[key] = []interface{}{value}
+	}
+	space, err := NewMetadataServiceForTest(nil, &aggregatingDocEngine{space: aggregated}).GetMetaValueSpaceByKBs(t.Context(), []string{"kb-1"})
+	if err != nil {
+		t.Fatalf("GetMetaValueSpaceByKBs: %v", err)
+	}
+	if !reflect.DeepEqual(space, want) {
+		t.Errorf("aggregated space %v, want the scan's %v", space, want)
+	}
+	if got := space["price"]; !reflect.DeepEqual(got, []string{"1234567"}) {
+		t.Errorf("price renders as %v, want [1234567]", got)
 	}
 }
 
@@ -208,7 +302,7 @@ func TestGetMetaValueSpaceByKBs_PropagatesIncomplete(t *testing.T) {
 }
 
 func TestGetMetaValueSpaceByKBs_NoKBs(t *testing.T) {
-	docEngine := &aggregatingDocEngine{space: map[string][]string{"project": {"alpha"}}}
+	docEngine := &aggregatingDocEngine{space: map[string][]interface{}{"project": {"alpha"}}}
 	svc := NewMetadataServiceForTest(nil, docEngine)
 
 	space, err := svc.GetMetaValueSpaceByKBs(t.Context(), nil)
@@ -234,39 +328,6 @@ func TestMetaDataValueSpace(t *testing.T) {
 	if got := metas.ValueSpace(); !reflect.DeepEqual(got, want) {
 		t.Errorf("ValueSpace: got %v, want %v", got, want)
 	}
-}
-
-// capturingFilterDriver records the system prompt gen_meta_filter sends and
-// answers with an empty filter, so a test can assert what the model was shown.
-type capturingFilterDriver struct {
-	*modelModule.DummyModel
-	calls  int
-	system string
-}
-
-func (d *capturingFilterDriver) ChatWithMessages(
-	_ context.Context,
-	_ string,
-	messages []modelModule.Message,
-	_ *modelModule.APIConfig,
-	_ *modelModule.ChatConfig,
-	_ *common.ModelUsage,
-) (*modelModule.ChatResponse, error) {
-	d.calls++
-	if len(messages) > 0 {
-		if s, ok := messages[0].Content.(string); ok {
-			d.system = s
-		}
-	}
-	answer := `{"conditions": [], "logic": "and"}`
-	return &modelModule.ChatResponse{Answer: &answer}, nil
-}
-
-func newCapturingFilterModel(t *testing.T) (*modelModule.ChatModel, *capturingFilterDriver) {
-	t.Helper()
-	driver := &capturingFilterDriver{DummyModel: modelModule.NewDummyModel(nil, modelModule.URLSuffix{})}
-	name := "fake-model"
-	return &modelModule.ChatModel{ModelDriver: driver, ModelName: &name, APIConfig: &modelModule.APIConfig{}}, driver
 }
 
 // stubValueSpaceLoader swaps the value-space loader for one test.
@@ -335,131 +396,5 @@ func TestApplyMetaDataFilter_FallsBackToFlattenedMetaOnLookupError(t *testing.T)
 	}
 	if !strings.Contains(driver.system, "early") {
 		t.Errorf("the flattened metadata did not reach the prompt: %q", driver.system)
-	}
-}
-
-// bigValueSpace returns a value space of n distinct values under one key, which
-// is how a real high-cardinality metadata key renders into the prompt.
-func bigValueSpace(n int) common.MetaValueSpace {
-	values := make([]string, 0, n)
-	for i := range n {
-		values = append(values, fmt.Sprintf("value-%06d", i))
-	}
-	return common.MetaValueSpace{"project": values}
-}
-
-// requireTokenCounts skips when the cl100k BPE table is absent: without it
-// NumTokensFromString returns 0, every prompt "fits", and a budget assertion
-// would be meaningless rather than wrong. The table is a local asset fetched by
-// ragflow_deps/download_deps.py, not an external service.
-func requireTokenCounts(t *testing.T) {
-	t.Helper()
-	if tokenizer.NumTokensFromString("hello world") == 0 {
-		t.Skip("cl100k BPE table missing (run `uv run ragflow_deps/download_deps.py`); token counts are 0")
-	}
-}
-
-// The value space is the whole dataset's, so it can exceed the model's context
-// on its own. A filter picked from a value list that lost entries is applied as
-// a hard document scope, and the model cannot report that it only saw part of
-// the metadata -- so no conditions at all, and no model call.
-func TestGenMetaFilter_RefusesAnOversizedValueSpace(t *testing.T) {
-	requireTokenCounts(t)
-	chatModel, driver := newCapturingFilterModel(t)
-	chatModel.ContextLength = 256
-
-	result, err := GenMetaFilter(t.Context(), chatModel, bigValueSpace(2000), "which project?", nil, nil)
-	if err != nil {
-		t.Fatalf("GenMetaFilter: %v", err)
-	}
-	if len(result.Conditions) != 0 || result.Logic != "and" {
-		t.Errorf("result: got %+v, want no conditions with logic and", result)
-	}
-	if driver.calls != 0 {
-		t.Errorf("the model was called %d times with a prompt that does not fit its context", driver.calls)
-	}
-}
-
-// A value space that fits is sent untouched.
-func TestGenMetaFilter_SendsAValueSpaceThatFits(t *testing.T) {
-	requireTokenCounts(t)
-	chatModel, driver := newCapturingFilterModel(t)
-	chatModel.ContextLength = 128000
-
-	if _, err := GenMetaFilter(t.Context(), chatModel, common.MetaValueSpace{"project": {"alpha", "beta"}}, "which project?", nil, nil); err != nil {
-		t.Fatalf("GenMetaFilter: %v", err)
-	}
-	if driver.calls != 1 {
-		t.Fatalf("model calls: got %d, want 1", driver.calls)
-	}
-	if !strings.Contains(driver.system, "alpha") {
-		t.Errorf("the value space did not reach the prompt: %q", driver.system)
-	}
-}
-
-// A context window that could not be resolved is 0, which must mean
-// tokenizer.Fit's 8192 default and NOT "no budget at all".
-func TestGenMetaFilter_UnresolvedContextLengthUsesTheDefaultBudget(t *testing.T) {
-	requireTokenCounts(t)
-
-	t.Run("under the default budget the prompt is sent", func(t *testing.T) {
-		chatModel, driver := newCapturingFilterModel(t)
-		chatModel.ContextLength = 0
-
-		if _, err := GenMetaFilter(t.Context(), chatModel, common.MetaValueSpace{"project": {"alpha"}}, "which project?", nil, nil); err != nil {
-			t.Fatalf("GenMetaFilter: %v", err)
-		}
-		if driver.calls != 1 {
-			t.Errorf("model calls: got %d, want 1", driver.calls)
-		}
-	})
-
-	t.Run("over the default budget the prompt is refused", func(t *testing.T) {
-		chatModel, driver := newCapturingFilterModel(t)
-		chatModel.ContextLength = 0
-		space := bigValueSpace(4000)
-		if got := tokenizer.NumTokensFromString(fmt.Sprint(space)); got <= 8192 {
-			t.Fatalf("fixture is only %d tokens; it must exceed the 8192 default to test the budget", got)
-		}
-
-		result, err := GenMetaFilter(t.Context(), chatModel, space, "which project?", nil, nil)
-		if err != nil {
-			t.Fatalf("GenMetaFilter: %v", err)
-		}
-		if len(result.Conditions) != 0 {
-			t.Errorf("conditions: got %+v, want none", result.Conditions)
-		}
-		if driver.calls != 0 {
-			t.Errorf("the model was called %d times past the default budget", driver.calls)
-		}
-	})
-}
-
-// End to end at the caller: an oversized value space produces the same
-// whole-corpus signal as a value space that could not be read in full.
-func TestApplyMetaDataFilter_OversizedValueSpaceLeavesTheSearchUnscoped(t *testing.T) {
-	requireTokenCounts(t)
-	for _, method := range []string{"auto", "semi_auto"} {
-		t.Run(method, func(t *testing.T) {
-			stubValueSpaceLoader(t, bigValueSpace(2000), nil)
-			chatModel, driver := newCapturingFilterModel(t)
-			chatModel.ContextLength = 256
-			filter := map[string]interface{}{"method": method}
-			if method == "semi_auto" {
-				filter["semi_auto"] = []interface{}{"project"}
-			}
-
-			docIDs := ApplyMetaDataFilter(t.Context(), filter, common.MetaData{}, "which project?", chatModel, []string{"doc-1"}, []string{"kb-1"})
-
-			if driver.calls != 0 {
-				t.Errorf("the model was asked to pick from a prompt that does not fit (%d calls)", driver.calls)
-			}
-			if docIDs != nil {
-				t.Errorf("got %v, want nil (no metadata narrowing), not a scope that matches nothing", docIDs)
-			}
-			if len(docIDs) == 1 && docIDs[0] == NoMatchDocIDSentinel {
-				t.Errorf("a refused value space must not degrade to the no-match sentinel")
-			}
-		})
 	}
 }

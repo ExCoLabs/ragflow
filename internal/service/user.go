@@ -134,8 +134,8 @@ func (s *UserService) Register(ctx context.Context, req *RegisterRequest) (*enti
 		return nil, common.CodeServerError, fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	userID := utility.GenerateToken()
-	accessToken := utility.GenerateToken()
+	userID := common.GenerateToken()
+	accessToken := common.GenerateToken()
 	status := "1"
 	loginChannel := "password"
 	isSuperuser := false
@@ -220,7 +220,7 @@ func (s *UserService) createUserWithTenant(ctx context.Context, user *entity.Use
 		ParserIDs: "naive:General,qa:Q&A,manual:Manual,table:Table,paper:Research Paper,book:Book,laws:Laws,presentation:Presentation,picture:Picture,one:One,audio:Audio,email:Email,tag:Tag",
 		Status:    &status,
 	}
-	userTenantID := utility.GenerateToken()
+	userTenantID := common.GenerateToken()
 	userTenant := &entity.UserTenant{
 		ID:        userTenantID,
 		UserID:    user.ID,
@@ -229,7 +229,7 @@ func (s *UserService) createUserWithTenant(ctx context.Context, user *entity.Use
 		InvitedBy: user.ID,
 		Status:    &status,
 	}
-	fileID := utility.GenerateToken()
+	fileID := common.GenerateToken()
 	file__ := ""
 	rootFile := &entity.File{
 		ID:        fileID,
@@ -294,7 +294,7 @@ func (s *UserService) Login(ctx context.Context, req *LoginRequest) (*entity.Use
 	}
 
 	// Generate new access token
-	token := utility.GenerateToken()
+	token := common.GenerateToken()
 	user.AccessToken = &token
 	now := time.Now().Truncate(time.Second)
 	user.LastLoginTime = &now
@@ -331,7 +331,7 @@ func (s *UserService) LoginByEmail(ctx context.Context, req *EmailLoginRequest) 
 	}
 
 	// Generate new access token
-	token := utility.GenerateToken()
+	token := common.GenerateToken()
 	user.AccessToken = &token
 	now := time.Now().Truncate(time.Second)
 	user.LastLoginTime = &now
@@ -517,7 +517,7 @@ func (s *UserService) GetUserByToken(ctx context.Context, authorization string) 
 
 	// Extract access token from authorization header
 	// Equivalent to: access_token = str(jwt.loads(authorization)) in Python
-	accessToken, err := utility.ExtractAccessToken(authorization, secretKey)
+	accessToken, err := common.ExtractAccessToken(authorization, secretKey)
 	if err != nil {
 		return nil, common.CodeUnauthorized, fmt.Errorf("invalid authorization token: %w", err)
 	}
@@ -545,7 +545,7 @@ func (s *UserService) UpdateUserAccessToken(ctx context.Context, user *entity.Us
 func (s *UserService) Logout(ctx context.Context, user *entity.User) (common.ErrorCode, error) {
 	// Invalidate token by setting it to an invalid value
 	// Similar to Python implementation: "INVALID_" + secrets.token_hex(16)
-	invalidToken := "INVALID_" + utility.GenerateToken()
+	invalidToken := "INVALID_" + common.GenerateToken()
 	err := s.UpdateUserAccessToken(ctx, user, invalidToken)
 	if err != nil {
 		return common.CodeServerError, err
@@ -685,7 +685,7 @@ func (s *UserService) UpdateUserSettings(ctx context.Context, user *entity.User,
 				return common.CodeExceptionError, err
 			}
 			user.Password = &hashedPassword
-			invalidToken := "INVALID_" + utility.GenerateToken()
+			invalidToken := "INVALID_" + common.GenerateToken()
 			user.AccessToken = &invalidToken
 		}
 	}
@@ -733,7 +733,7 @@ func (s *UserService) ChangePassword(ctx context.Context, user *entity.User, req
 			return common.CodeServerError, fmt.Errorf("failed to hash new password: %w", err)
 		}
 		user.Password = &hashedPassword
-		invalidToken := "INVALID_" + utility.GenerateToken()
+		invalidToken := "INVALID_" + common.GenerateToken()
 		user.AccessToken = &invalidToken
 	}
 
@@ -985,7 +985,7 @@ func (s *UserService) ForgotIssueCaptcha(ctx context.Context, email string) (cap
 	if err != nil {
 		return "", "", common.CodeServerError, err
 	}
-	captchaID = utility.GenerateToken()
+	captchaID = common.GenerateToken()
 	if ok := kvrocks.Get().Set(ctx, utility.CaptchaIDRedisKey(captchaID), text, 60*time.Second); !ok {
 		return "", "", common.CodeServerError, fmt.Errorf("failed to store captcha")
 	}
@@ -1206,7 +1206,7 @@ func (s *UserService) ForgotResetPassword(ctx context.Context, req *ForgotResetP
 
 	// Auto-login: rotate the access token like LoginByEmail does so the
 	// handler can immediately mint an Authorization header.
-	token := utility.GenerateToken()
+	token := common.GenerateToken()
 	user.AccessToken = &token
 	now := time.Now().Truncate(time.Second)
 	user.LastLoginTime = &now

@@ -19,9 +19,11 @@ package service
 import (
 	"context"
 	"sort"
+	"strings"
 	"testing"
 
 	"ragflow/internal/common"
+	modelModule "ragflow/internal/entity/models"
 )
 
 func TestApplyMetaDataFilterWithDiagnosticsGenerationErrors(t *testing.T) {
@@ -50,6 +52,25 @@ func TestApplyMetaDataFilterWithDiagnosticsGenerationErrors(t *testing.T) {
 				t.Fatalf("diagnostic = %+v, want method %q and status not_generated", diagnostic, method)
 			}
 		})
+	}
+}
+
+func TestRenderMetaFilterTemplate(t *testing.T) {
+	t.Chdir(t.TempDir())
+	prompt, err := renderMetaFilterTemplate("2026-10-13", `{"author":["Alice"]}`, "Find Alice's documents", "", "", MetaFilterPromptOptions{})
+	if err != nil {
+		t.Fatalf("renderMetaFilterTemplate: %v", err)
+	}
+	for _, want := range []string{"2026-10-13", `{"author":["Alice"]}`, "Find Alice's documents"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("rendered prompt missing %q", want)
+		}
+	}
+	if strings.Contains(prompt, "{{") || strings.Contains(prompt, "{%") {
+		t.Error("rendered prompt contains unresolved template syntax")
+	}
+	if strings.Contains(prompt, "- Operator constraints:") {
+		t.Error("rendered prompt contains operator constraints when none were provided")
 	}
 }
 
@@ -609,4 +630,51 @@ func TestApplyMetaDataFilter_SeparatesNoNarrowingFromNoMatch(t *testing.T) {
 			t.Fatalf("got %v, want [doc-1]", got)
 		}
 	})
+}
+
+// capturingFilterDriver records the system prompt gen_meta_filter sends and
+// answers with answer, or an empty filter when it is unset, so a test can
+// assert what the model was shown and choose what it generates.
+type capturingFilterDriver struct {
+	*modelModule.DummyModel
+	calls  int
+	system string
+	answer string
+}
+
+func (d *capturingFilterDriver) ChatWithMessages(
+	_ context.Context,
+	_ string,
+	messages []modelModule.Message,
+	_ *modelModule.APIConfig,
+	_ *modelModule.ChatConfig,
+	_ *common.ModelUsage,
+) (*modelModule.ChatResponse, error) {
+	d.calls++
+	if len(messages) > 0 {
+		if s, ok := messages[0].Content.(string); ok {
+			d.system = s
+		}
+	}
+	answer := d.answer
+	if answer == "" {
+		answer = `{"conditions": [], "logic": "and"}`
+	}
+	return &modelModule.ChatResponse{Answer: &answer}, nil
+}
+
+func newCapturingFilterModel(t *testing.T) (*modelModule.ChatModel, *capturingFilterDriver) {
+	t.Helper()
+	driver := &capturingFilterDriver{DummyModel: modelModule.NewDummyModel(nil, modelModule.URLSuffix{})}
+	name := "fake-model"
+	return &modelModule.ChatModel{ModelDriver: driver, ModelName: &name, APIConfig: &modelModule.APIConfig{}}, driver
+}
+
+// newCapturingFilterModelWithContext is newCapturingFilterModel for a model
+// whose resolved metadata declares contextLength; 0 is an unresolved window.
+func newCapturingFilterModelWithContext(t *testing.T, contextLength int) (*modelModule.ChatModel, *capturingFilterDriver) {
+	t.Helper()
+	driver := &capturingFilterDriver{DummyModel: modelModule.NewDummyModel(nil, modelModule.URLSuffix{})}
+	name := "fake-model"
+	return modelModule.NewChatModelWithInfo(driver, &name, &modelModule.APIConfig{}, &modelModule.ModelInfo{ContextLength: contextLength}), driver
 }

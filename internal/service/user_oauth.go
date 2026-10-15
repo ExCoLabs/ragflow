@@ -29,7 +29,6 @@ import (
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
 	"ragflow/internal/service/oauth"
-	"ragflow/internal/utility"
 
 	"go.uber.org/zap"
 )
@@ -69,7 +68,7 @@ func (s *UserService) LoginOAuthUser(ctx context.Context, channel string, info *
 	if user.IsActive == "0" {
 		return nil, false, ErrOAuthUserInactive
 	}
-	token := utility.GenerateToken()
+	token := common.GenerateToken()
 	user.AccessToken = &token
 	now := time.Now().Truncate(time.Second)
 	user.LastLoginTime = &now
@@ -84,7 +83,7 @@ func newOAuthUser(ctx context.Context, channel string, info *oauth.UserInfo) *en
 	if nickname == "" {
 		nickname, _, _ = strings.Cut(info.Email, "@")
 	}
-	accessToken := utility.GenerateToken()
+	accessToken := common.GenerateToken()
 	status := "1"
 	isSuperuser := false
 	language := defaultUserLanguage()
@@ -92,7 +91,7 @@ func newOAuthUser(ctx context.Context, channel string, info *oauth.UserInfo) *en
 	timezone := "UTC+8\tAsia/Shanghai"
 	now := time.Now().Truncate(time.Second)
 	user := &entity.User{
-		ID:              utility.GenerateToken(),
+		ID:              common.GenerateToken(),
 		AccessToken:     &accessToken,
 		Email:           info.Email,
 		Nickname:        nickname,
