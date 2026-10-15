@@ -1021,7 +1021,7 @@ func (c *AgentComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[str
 // invokeNow contains the original eager Agent execution path. Deferred
 // Message consumption calls this function later with an invocation-local
 // delta sink, so the same ReAct/citation/tool behavior is reused once.
-func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[string]any) (map[string]any, error) {
+func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[string]any) (out map[string]any, outErr error) {
 	runtime.ResetAgentMessageEmission(ctx)
 	defer runtime.FinalizeAgentMessage(ctx)
 
@@ -1035,6 +1035,29 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	if v, ok := stringFrom(inputs, "user_prompt"); ok {
 		hasRuntimeUserPrompt = !shouldFallbackToSysQuery(v)
 	}
+
+	var sessionID, tenantID string
+	if s, sErr := runtime.GetStateFromContext(ctx); sErr == nil && s != nil {
+		sessionID, _ = s.Sys["session_id"].(string)
+		tenantID, _ = s.Sys["tenant_id"].(string)
+	}
+	defer func() {
+		llm, tools, grounding, llmCalls, toolCalls := timings.Snapshot()
+		groundingStatus, _ := out["grounding_status"].(string)
+		outcome := "ok"
+		switch {
+		case outErr != nil:
+			outcome = "error"
+		case out["_ERROR"] != nil:
+			outcome = "agent_error"
+		}
+		common.Info(fmt.Sprintf(
+			"agent_run_timings outcome=%s total_ms=%d llm_ms=%d tools_ms=%d grounding_ms=%d "+
+				"llm_calls=%d tool_calls=%d grounding_status=%q model=%s session=%s tenant=%s",
+			outcome, time.Since(runStart).Milliseconds(), llm.Milliseconds(),
+			tools.Milliseconds(), grounding.Milliseconds(), llmCalls, toolCalls,
+			groundingStatus, p.ModelID, sessionID, tenantID))
+	}()
 
 	var err error
 	p.ModelID, p.Driver, p.APIKey, p.BaseURL, err = resolveChatModelRef(ctx, db, p.ModelID, p.Driver, p.APIKey, p.BaseURL)
@@ -1152,7 +1175,9 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 		if len(chunks) == 0 {
 			groundingStatus = "no_chunks"
 		} else {
+			gStart := time.Now()
 			grounded, gErr := applyCitationGrounding(ctx, db, p, content, chunks)
+			timings.AddGrounding(time.Since(gStart))
 			if gErr == nil {
 				if grounded != content {
 					content = grounded
@@ -1170,7 +1195,7 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	}
 	artifacts := collectArtifactsFromToolCalls(ctx, msg)
 	artifactMD := formatArtifactMarkdown(artifacts, content)
-	out := map[string]any{
+	out = map[string]any{
 		"content":    content + artifactMD,
 		"thinking":   thinking,
 		"tool_calls": extractToolCalls(msg),
