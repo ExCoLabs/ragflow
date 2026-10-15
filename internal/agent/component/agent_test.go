@@ -1417,3 +1417,32 @@ func TestAgent_MultipleRetrievalToolsUseFunctionName(t *testing.T) {
 		t.Fatalf("expected distinct retrieval tool names, got %v", names)
 	}
 }
+
+// TestBuildAgentTools_SubAgentNameCollisionRenamed verifies that two sub-agents
+// whose names normalize to the same identifier receive distinct tool names.
+func TestBuildAgentTools_SubAgentNameCollisionRenamed(t *testing.T) {
+	p := AgentParam{
+		SubAgents: []SubAgentTool{
+			{Name: "Data Analyst"},
+			{Name: "data-analyst"},
+		},
+	}
+	tools, err := buildAgentTools(t.Context(), p)
+	if err != nil {
+		t.Fatalf("buildAgentTools: %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("len(tools) = %d, want 2", len(tools))
+	}
+	names := make(map[string]bool)
+	for _, tool := range tools {
+		info, err := tool.Info(t.Context())
+		if err != nil {
+			t.Fatalf("tool.Info: %v", err)
+		}
+		names[info.Name] = true
+	}
+	if len(names) != 2 {
+		t.Fatalf("expected 2 distinct names, got %v", names)
+	}
+}
