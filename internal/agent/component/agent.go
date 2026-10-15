@@ -172,7 +172,6 @@ var agentRunner = runEinoReActAgent
 // runEinoReActAgent creates an eino react agent and runs it against the
 // model built from p.
 func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, error) {
-	timings := runtime.PhaseTimingsFromContext(ctx)
 	chatModel, err := buildAgentChatModel(ctx, p)
 	if err != nil {
 		return nil, fmt.Errorf("build model: %w", err)
@@ -180,11 +179,6 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 	tools, err := buildAgentTools(ctx, p)
 	if err != nil {
 		return nil, fmt.Errorf("build tools: %w", err)
-	}
-	if timings != nil {
-		for i, t := range tools {
-			tools[i] = wrapTimedTool(t, timings)
-		}
 	}
 	toolAliases, err := indexedToolNameAliases(ctx, tools)
 	if err != nil {
@@ -213,14 +207,7 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 		// response before deciding whether the round contains a tool call.
 		// Eino's default checker only inspects the first non-empty chunk,
 		// which can miss a ToolCall emitted after explanatory text.
-		StreamToolCallChecker: func(cctx context.Context, stream *schema.StreamReader[*schema.Message]) (bool, error) {
-			start := time.Now()
-			ok, cerr := scanAllStreamForToolCall(cctx, stream)
-			if timings != nil {
-				timings.AddLLM(time.Since(start))
-			}
-			return ok, cerr
-		},
+		StreamToolCallChecker: scanAllStreamForToolCall,
 		MessageModifier: func(_ context.Context, msgs []*schema.Message) []*schema.Message {
 			if p.SystemPrompt != "" {
 				return append([]*schema.Message{schema.SystemMessage(p.SystemPrompt)}, msgs...)
@@ -1024,10 +1011,6 @@ func (c *AgentComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[str
 func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[string]any) (out map[string]any, outErr error) {
 	runtime.ResetAgentMessageEmission(ctx)
 	defer runtime.FinalizeAgentMessage(ctx)
-
-	timings := &runtime.PhaseTimings{}
-	ctx = runtime.WithPhaseTimings(ctx, timings)
-	runStart := time.Now()
 
 	p := mergeAgentParam(c.param, inputs)
 	originalModelID := p.ModelID
