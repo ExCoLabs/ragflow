@@ -21,8 +21,10 @@ import (
 	"fmt"
 
 	"ragflow/internal/agent/runtime"
+	"ragflow/internal/dao"
 	"ragflow/internal/engine"
 	enginetypes "ragflow/internal/engine/types"
+	"ragflow/internal/entity"
 )
 
 // Bm25Adapter backs search_bm25_chunks with pure lexical full-text (BM25)
@@ -42,29 +44,29 @@ type Bm25Adapter struct {
 	// "mineralization") can therefore NEVER match its own indexed token
 	// without this tokenization step.
 	queryTokenizer QueryTokenizer
-	// datasetLanguage, when set, names the tokenizer language of the datasets
-	// a search covers, so the query is analyzed the way their chunks were.
-	datasetLanguage DatasetLanguageFunc
 }
 
 // QueryTokenizer converts a raw query string into a tokenized match
-// expression over the tokenized fields. Implemented by the service/nlp
-// QueryBuilder (the same tokenizer family the ingestion pipeline used).
+// expression over the tokenized fields, using the dataset language ("" =
+// English). Implemented by the service/nlp QueryBuilder (the same tokenizer
+// family the ingestion pipeline used).
 type QueryTokenizer interface {
 	Question(txt string, tbl string, minMatch float64, language string) (*enginetypes.MatchTextExpr, []string)
 }
 
-// DatasetLanguageFunc returns the tokenizer language shared by the given
-// datasets, or "" for the default analyzer.
-type DatasetLanguageFunc func(ctx context.Context, datasetIDs []string) string
-
-// SetDatasetLanguage attaches the dataset language lookup used to tokenize
-// queries. Without it queries are tokenized with the default language.
-func (b *Bm25Adapter) SetDatasetLanguage(fn DatasetLanguageFunc) {
-	if b == nil {
-		return
+// resolveDatasetsLanguage returns the language the searched datasets were
+// indexed with (see entity.KnowledgebasesLanguage), or "" when it cannot be
+// read. It is a package-level variable so unit tests can stub it without a
+// database.
+var resolveDatasetsLanguage = func(ctx context.Context, datasetIDs []string) string {
+	if dao.DB == nil || len(datasetIDs) == 0 {
+		return ""
 	}
-	b.datasetLanguage = fn
+	kbs, err := dao.NewKnowledgebaseDAO().GetByIDs(ctx, dao.DB, datasetIDs)
+	if err != nil {
+		return ""
+	}
+	return entity.KnowledgebasesLanguage(kbs)
 }
 
 // SetQueryBuilder attaches the query tokenizer. Called at boot, after
@@ -115,8 +117,8 @@ func (b *Bm25Adapter) SearchBm25(ctx context.Context, req runtime.Bm25Request) (
 	defer ecancel()
 
 	language := ""
-	if b.datasetLanguage != nil {
-		language = b.datasetLanguage(ctx, req.DatasetIDs)
+	if b.queryTokenizer != nil {
+		language = resolveDatasetsLanguage(ctx, req.DatasetIDs)
 	}
 
 	seen := map[string]struct{}{}

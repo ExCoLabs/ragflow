@@ -36,6 +36,8 @@ import (
 	"ragflow/internal/dao"
 	"ragflow/internal/engine"
 	"ragflow/internal/entity"
+	"ragflow/internal/permission"
+	permissionresponse "ragflow/internal/permission/response"
 
 	"go.uber.org/zap"
 )
@@ -76,13 +78,14 @@ func chunkMetadataBackfillSnapshot(datasetID string) *chunkMetadataBackfillState
 	return nil
 }
 
-func (d *DatasetService) accessibleDataset(ctx context.Context, datasetID, userID string) (*entity.Knowledgebase, common.ErrorCode, error) {
+func (d *DatasetService) accessibleDataset(ctx context.Context, datasetID, userID string, operation permission.Operation) (*entity.Knowledgebase, common.ErrorCode, error) {
 	datasetID = strings.TrimSpace(datasetID)
 	if datasetID == "" {
 		return nil, common.CodeDataError, errors.New(`Lack of "Dataset ID"`)
 	}
-	if !d.Accessible(ctx, datasetID, userID) {
-		return nil, common.CodeDataError, errors.New("no authorization")
+	if err := d.CheckAccess(ctx, permission.Subject{UserID: userID}, datasetID, operation); err != nil {
+		code, permissionErr := permissionresponse.NormalizeHidden(err)
+		return nil, code, permissionErr
 	}
 	kb, err := d.kbDAO.GetByID(ctx, dao.DB, datasetID)
 	if err != nil || kb == nil {
@@ -116,7 +119,7 @@ func (d *DatasetService) chunkMetadataStatus(kb *entity.Knowledgebase) map[strin
 // dataset's configuration, whether filters and boosts are active, and the
 // last backfill run on this server.
 func (d *DatasetService) GetChunkMetadata(ctx context.Context, datasetID, userID string) (map[string]any, common.ErrorCode, error) {
-	kb, code, err := d.accessibleDataset(ctx, datasetID, userID)
+	kb, code, err := d.accessibleDataset(ctx, datasetID, userID, permission.OperationRead)
 	if err != nil {
 		return nil, code, err
 	}
@@ -158,7 +161,7 @@ func sortedCopy(in []string) []string {
 
 // UpdateChunkMetadata sets parser_config.chunk_metadata.enabled/fields.
 func (d *DatasetService) UpdateChunkMetadata(ctx context.Context, datasetID, userID string, req *ChunkMetadataConfigRequest) (map[string]any, common.ErrorCode, error) {
-	kb, code, err := d.accessibleDataset(ctx, datasetID, userID)
+	kb, code, err := d.accessibleDataset(ctx, datasetID, userID, permission.OperationUpdate)
 	if err != nil {
 		return nil, code, err
 	}
@@ -185,7 +188,7 @@ func (d *DatasetService) UpdateChunkMetadata(ctx context.Context, datasetID, use
 // onto every existing chunk of the dataset. It runs in the background on this
 // server; when it completes, parser_config.chunk_metadata.ready is set.
 func (d *DatasetService) RunChunkMetadataBackfill(ctx context.Context, datasetID, userID string) (map[string]any, common.ErrorCode, error) {
-	kb, code, err := d.accessibleDataset(ctx, datasetID, userID)
+	kb, code, err := d.accessibleDataset(ctx, datasetID, userID, permission.OperationUpdate)
 	if err != nil {
 		return nil, code, err
 	}

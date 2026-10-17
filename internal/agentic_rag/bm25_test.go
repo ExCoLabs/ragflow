@@ -219,13 +219,17 @@ func (s *bm25StubService) SearchBm25(_ context.Context, req runtime.Bm25Request)
 }
 
 // fakeQueryTokenizer stands in for the service/nlp QueryBuilder: it "tokenizes"
-// the raw query into the word forms the ingestion pipeline would have indexed.
-type fakeQueryTokenizer struct{}
+// the raw query into the word forms the ingestion pipeline would have indexed,
+// and records the language it was asked to tokenize with.
+type fakeQueryTokenizer struct {
+	language string
+}
 
-func (fakeQueryTokenizer) Question(txt string, _ string, _ float64, language string) (*enginetypes.MatchTextExpr, []string) {
+func (f *fakeQueryTokenizer) Question(txt string, _ string, _ float64, language string) (*enginetypes.MatchTextExpr, []string) {
+	f.language = language
 	return &enginetypes.MatchTextExpr{
 		Fields:       []string{"content_ltks^2"},
-		MatchingText: "tokenized[" + language + "](" + txt + ")",
+		MatchingText: "tokenized(" + txt + ")",
 		TopN:         100,
 	}, []string{"tokenized", txt}
 }
@@ -237,7 +241,7 @@ func (fakeQueryTokenizer) Question(txt string, _ string, _ float64, language str
 func TestBm25Adapter_TokenizedMatchExpr(t *testing.T) {
 	fe := &grepFakeEngine{}
 	adapter := NewBm25Adapter(fe)
-	adapter.SetQueryBuilder(fakeQueryTokenizer{})
+	adapter.SetQueryBuilder(&fakeQueryTokenizer{})
 
 	if _, err := adapter.SearchBm25(context.Background(), runtime.Bm25Request{
 		TenantID:   "t",
@@ -250,38 +254,40 @@ func TestBm25Adapter_TokenizedMatchExpr(t *testing.T) {
 	if !ok {
 		t.Fatalf("MatchExprs[0] is %T, want *MatchTextExpr", fe.lastReq.MatchExprs[0])
 	}
-	if mt.MatchingText != "tokenized[](mineralizer)" {
-		t.Fatalf("MatchingText = %q, want tokenized[](mineralizer)", mt.MatchingText)
+	if mt.MatchingText != "tokenized(mineralizer)" {
+		t.Fatalf("MatchingText = %q, want tokenized(mineralizer)", mt.MatchingText)
 	}
 	if mt.TopN != 12 {
 		t.Fatalf("TopN = %d, want caller topN 12 (tokenizer's 100 overridden)", mt.TopN)
 	}
 }
 
-// TestBm25Adapter_TokenizesWithDatasetLanguage: the query is analyzed in the
-// language of the datasets it searches, the way their chunks were indexed.
+// TestBm25Adapter_TokenizesWithDatasetLanguage: the query is tokenized with
+// the language the searched datasets were indexed with, so a Slovak dataset's
+// folded index tokens are matched by a folded query.
 func TestBm25Adapter_TokenizesWithDatasetLanguage(t *testing.T) {
-	fe := &grepFakeEngine{}
-	adapter := NewBm25Adapter(fe)
-	adapter.SetQueryBuilder(fakeQueryTokenizer{})
+	orig := resolveDatasetsLanguage
+	t.Cleanup(func() { resolveDatasetsLanguage = orig })
 	var gotIDs []string
-	adapter.SetDatasetLanguage(func(_ context.Context, ids []string) string {
+	resolveDatasetsLanguage = func(_ context.Context, ids []string) string {
 		gotIDs = ids
 		return "Slovak"
-	})
+	}
 
+	qt := &fakeQueryTokenizer{}
+	adapter := NewBm25Adapter(&grepFakeEngine{})
+	adapter.SetQueryBuilder(qt)
 	if _, err := adapter.SearchBm25(context.Background(), runtime.Bm25Request{
 		TenantID:   "t",
-		Queries:    []string{"zmluva"},
-		DatasetIDs: []string{"kb1", "kb2"},
+		Queries:    []string{"škola"},
+		DatasetIDs: []string{"kb1"},
 	}); err != nil {
 		t.Fatalf("SearchBm25: %v", err)
 	}
-	mt := fe.lastReq.MatchExprs[0].(*enginetypes.MatchTextExpr)
-	if mt.MatchingText != "tokenized[Slovak](zmluva)" {
-		t.Fatalf("MatchingText = %q, want tokenized[Slovak](zmluva)", mt.MatchingText)
+	if len(gotIDs) != 1 || gotIDs[0] != "kb1" {
+		t.Fatalf("language resolved for %v, want [kb1]", gotIDs)
 	}
-	if len(gotIDs) != 2 || gotIDs[0] != "kb1" || gotIDs[1] != "kb2" {
-		t.Fatalf("language looked up for %v, want [kb1 kb2]", gotIDs)
+	if qt.language != "Slovak" {
+		t.Fatalf("Question language = %q, want Slovak", qt.language)
 	}
 }

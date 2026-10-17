@@ -22,11 +22,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/engine"
 	"ragflow/internal/engine/types"
+	"ragflow/internal/entity"
+	"ragflow/internal/rag/prompts"
 	"ragflow/internal/tokenizer"
 	"regexp"
 
@@ -125,41 +126,6 @@ type ManualValueResolver func(map[string]interface{}) map[string]interface{}
 // NoMatchDocIDSentinel forces retrieval to return no documents when filters match nothing.
 const NoMatchDocIDSentinel = "-999"
 
-// metaFilterTemplateCache caches the template content
-var metaFilterTemplateCache string
-
-// getMetaFilterTemplate loads and caches the meta_filter.md template
-func getMetaFilterTemplate() (string, error) {
-	if metaFilterTemplateCache != "" {
-		return metaFilterTemplateCache, nil
-	}
-
-	// Try to find meta_filter.md relative to the rag module
-	// Look for it in rag/prompts/ directory
-	possiblePaths := []string{
-		"rag/prompts/meta_filter.md",
-		"../rag/prompts/meta_filter.md",
-		"../../rag/prompts/meta_filter.md",
-	}
-
-	var templateContent string
-	for _, path := range possiblePaths {
-		content, err := os.ReadFile(path)
-		if err == nil {
-			templateContent = string(content)
-			break
-		}
-	}
-
-	if templateContent == "" {
-		// Fallback: return error
-		return "", fmt.Errorf("could not find meta_filter.md template")
-	}
-
-	metaFilterTemplateCache = templateContent
-	return templateContent, nil
-}
-
 // metaFilterIfBlock matches one {% if name %}...{% endif %} block of
 // meta_filter.md. Blocks do not nest within the same name; a block nested in
 // another (allow_soft inside instructions) is resolved first.
@@ -218,7 +184,7 @@ func renderTemplateIf(tmpl string, re *regexp.Regexp, keep bool) string {
 
 // renderMetaFilterTemplate renders the Jinja2-like template from meta_filter.md
 func renderMetaFilterTemplate(currentDate, metadataKeys, question, constraints, descriptions string, opts MetaFilterPromptOptions) (string, error) {
-	templateContent, err := getMetaFilterTemplate()
+	templateContent, err := (prompts.EmbeddedPromptLoader{}).Load("meta_filter")
 	if err != nil {
 		return "", err
 	}
@@ -363,13 +329,17 @@ func GenMetaFilter(ctx context.Context, chatModel *modelModule.ChatModel, valueS
 	//
 	// A ContextLength of 0 means it could not be resolved; tokenizer.Fit reads
 	// that as its 8192 default, never as "no budget".
+	contextLength := 0
+	if info := chatModel.Info(); info != nil {
+		contextLength = info.ContextLength
+	}
 	fitted, _, _ := tokenizer.Fit([]tokenizer.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userMessage},
-	}, chatModel.ContextLength)
+	}, contextLength)
 	if len(fitted) != 2 || fitted[0].Content != systemPrompt {
 		common.Warn("GenMetaFilter: the metadata value space does not fit the model context; returning no conditions so the search stays unscoped rather than filtered on a partial value list",
-			zap.Int("context_length", chatModel.ContextLength),
+			zap.Int("context_length", contextLength),
 			zap.Int("keys", len(valueSpace)))
 		return &MetaFilterResult{Conditions: []MetaFilterCondition{}, Logic: "and"}, nil
 	}
@@ -444,7 +414,7 @@ func ApplyMetaFilter(metaData common.MetaData, filters []MetaFilterCondition, lo
 }
 
 // convertToMetaCondition converts a MetaFilterCondition to common.MetaCondition,
-// normalizing operator symbols and value types for compatibility with common.MetaFilter.
+// normalizing operator symbols and value types for common.MetaFilter.
 //
 // Operator normalization:
 //   - "==" = "="    "!=" = "≠"
@@ -453,8 +423,10 @@ func ApplyMetaFilter(metaData common.MetaData, filters []MetaFilterCondition, lo
 //     (see common.metadata_utils.operatorMapping for the full list)
 //
 // Value conversion:
-//   - "in" / "not in": comma-separated string → []interface{} (as expected by common.MetaFilter)
-//   - all other operators: passed through as-is (string)
+//   - "in" / "not in": comma-separated strings become []interface{};
+//     arrays are preserved only when every member is a string. Arrays with
+//     non-string members become nil so the condition matches no documents.
+//   - all other operators: passed through as-is.
 func convertToMetaCondition(f MetaFilterCondition) common.MetaCondition {
 	mc := common.MetaCondition{
 		Key:      f.Key,
@@ -463,7 +435,19 @@ func convertToMetaCondition(f MetaFilterCondition) common.MetaCondition {
 	}
 	switch f.Op {
 	case "in", "not in":
-		strVal, _ := f.Value.(string)
+		if values, ok := f.Value.([]interface{}); ok {
+			for _, value := range values {
+				if _, ok := value.(string); !ok {
+					mc.Value = nil
+					return mc
+				}
+			}
+			return mc
+		}
+		strVal, ok := f.Value.(string)
+		if !ok {
+			return mc
+		}
 		parts := strings.Split(strVal, ",")
 		arr := make([]interface{}, 0, len(parts))
 		for _, p := range parts {
@@ -1147,6 +1131,33 @@ func recordGenerated(record func(string, []MetaFilterCondition, string, int), fi
 	default:
 		record("applied", filters.Conditions, filters.Logic, matched)
 	}
+}
+
+// chatMetadataScope is shared by standard retrieval and the agent's corpus
+// tools. It applies the chat's meta_data_filter to docIDs and returns
+// the document scope (docIDs unchanged when the filter does not narrow it) and,
+// when chunkMeta is active on every dataset, the filter and boost to run on the
+// metadata stored on chunks.
+func (s *ChatPipelineService) chatMetadataScope(ctx context.Context, chat *entity.Chat, question string, model *modelModule.ChatModel, docIDs, kbIDs []string, chunkMeta *common.ChunkMetadataConfig) ([]string, *common.ChunkMetaScope) {
+	if chat.MetaDataFilter == nil || len(*chat.MetaDataFilter) == 0 || len(kbIDs) == 0 || question == "" {
+		return docIDs, nil
+	}
+	var meta common.MetaData
+	var err error
+	if s.MetadataSvc != nil {
+		meta, err = s.MetadataSvc.GetFlattedMetaByKBs(ctx, kbIDs)
+	}
+	if err != nil {
+		common.Warn("loadMetaData failed; skipping meta_data_filter", zap.Error(err))
+		return docIDs, nil
+	}
+	scope := ApplyMetaDataScope(ctx, *chat.MetaDataFilter, meta, question, model, docIDs, kbIDs, chunkMeta)
+	// nil means no metadata narrowing: keep the caller's scope.
+	if scope.DocIDs != nil {
+		common.Debug("meta_data_filter applied", zap.Int("filtered_count", len(scope.DocIDs)), zap.Int("pre_filter_count", len(docIDs)))
+		return scope.DocIDs, scope.ChunkMeta
+	}
+	return docIDs, scope.ChunkMeta
 }
 
 func constrainDocIDs(baseDocIDs, filteredDocIDs []string) []string {

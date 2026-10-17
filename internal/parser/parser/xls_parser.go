@@ -116,7 +116,7 @@ func (p *XLSParser) ParseWithResult(ctx context.Context, filename string, data [
 	return ParseResult{
 		OutputFormat: spreadsheetOutputFormat,
 		File:         map[string]any{"name": filename, "format": "xls", "sheets": sheetsCount},
-		JSON:         items,
+		JSON:         MapsToItems(items),
 		Warnings:     warnings,
 	}
 }
@@ -153,9 +153,7 @@ func parseBIFF8Bytes(ctx context.Context, data []byte) ([]map[string]any, int, e
 		// label→value pairs must stay searchable for legacy workbooks too.
 		if isFormSheet(records) {
 			if kvText := renderFormSheetKV(sheetName, records); len(kvText) > 0 {
-				kvItem := NewTextJSONItem(kvText)
-				kvItem["sheet"] = sheetName
-				kvItem["sheet_index"] = sheetIndex + 1
+				kvItem := TextItem{Text: kvText, Extra: map[string]any{"sheet": sheetName, "sheet_index": sheetIndex + 1}}.ToMap()
 				items = append(items, kvItem)
 			}
 		}
@@ -197,7 +195,8 @@ func readBIFF8Records(ctx context.Context, reader biffSource) ([][]string, []int
 		records = append(records, row.cells)
 		dataRows = append(dataRows, row.number)
 	}
-	return cleanIllegalControlChars(records), dataRows, rows[0].number
+	records = trimTrailingEmptyColumns(cleanIllegalControlChars(records))
+	return records, dataRows, rows[0].number
 }
 
 func spreadsheetCellString(value any) string {

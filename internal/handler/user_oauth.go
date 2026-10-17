@@ -31,7 +31,6 @@ import (
 	"ragflow/internal/server/local"
 	"ragflow/internal/service"
 	"ragflow/internal/service/oauth"
-	"ragflow/internal/utility"
 	"strings"
 	"time"
 
@@ -212,7 +211,7 @@ func (h *UserHandler) oauthCallback(c *gin.Context, channel string) {
 	operationLog.UserID = user.ID
 	syncGroups(ctx, h.userService, channel, channelCfg, user, info)
 
-	authToken, err := utility.DumpAccessToken(*user.AccessToken, secretKey)
+	authToken, err := common.DumpAccessToken(*user.AccessToken, secretKey)
 	if err != nil {
 		common.Error("OAuth callback: failed to generate auth token", err)
 		fail("login_failed")

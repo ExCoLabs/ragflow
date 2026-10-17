@@ -398,3 +398,67 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// TestCitationGroundingHasSubstantiveText: marker-only strings are rejected;
+// real answer text (with or without markers) is accepted.
+func TestCitationGroundingHasSubstantiveText(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"", false},
+		{"   ", false},
+		{"[ID:0]", false},
+		{"[ID:0] [ID:1]", false},
+		{"[ID: 0]\n[ID:1]", false},
+		{"[ID:simple-0]", false},
+		{"[ID:ck-1]", false},
+		{"[ID:simple-0] [ID:ck-1]", false},
+		{"[ID: simple-0]", false},
+		{"[2026]", true},
+		{"  [2026]  ", true},
+		{"The reimbursement request requires manager approval.", true},
+		{"The reimbursement request requires manager approval. [ID:0]", true},
+		{"The reimbursement request requires manager approval. [ID:simple-0]", true},
+		{"答案[ID:0]", true},
+		{"答案[ID:ck-1]", true},
+	}
+	for _, tc := range cases {
+		if got := citationGroundingHasSubstantiveText(tc.in); got != tc.want {
+			t.Errorf("citationGroundingHasSubstantiveText(%q)=%v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestGrounding_MarkerOnlyFallsBack: non-streaming grounding that returns
+// only [ID:…] markers must keep the first-pass answer (#20613).
+func TestGrounding_MarkerOnlyFallsBack(t *testing.T) {
+	inv := &groundingTestInvoker{responses: []string{"[ID:0] [ID:1]"}}
+	prev := getDefaultChatInvoker()
+	SetDefaultChatInvoker(inv)
+	defer SetDefaultChatInvoker(prev)
+
+	withAgentRunner(t, func(_ context.Context, _ AgentParam) (*schema.Message, error) {
+		return &schema.Message{Role: schema.Assistant, Content: "The reimbursement request requires manager approval."}, nil
+	})
+
+	state := canvas.NewCanvasState("r1", "t1")
+	state.SetRetrievalChunks([]map[string]any{{"id": "0", "content": "policy text"}})
+	ctx := runtime.WithState(t.Context(), state)
+
+	c := NewAgentComponent(AgentParam{ModelID: "stub", Cite: true})
+	out, err := c.Invoke(ctx, nil, map[string]any{"user_prompt": "q"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	want := "The reimbursement request requires manager approval."
+	if got, _ := out["content"].(string); got != want {
+		t.Errorf("content=%q, want %q (marker-only grounding must not replace original)", got, want)
+	}
+	if got := out["grounding_status"]; got == "applied" {
+		t.Errorf("grounding_status=%v, want not applied for marker-only response", got)
+	}
+	if inv.calls != 1 {
+		t.Errorf("expected 1 grounding call, got %d", inv.calls)
+	}
+}

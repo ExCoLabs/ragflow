@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"ragflow/internal/dao"
+	"slices"
 
 	"go.uber.org/zap"
 
 	"ragflow/internal/common"
 	"ragflow/internal/entity"
 	modelModule "ragflow/internal/entity/models"
+	"ragflow/internal/permission"
+	permissionresponse "ragflow/internal/permission/response"
 	"ragflow/internal/service"
 	"ragflow/internal/service/nlp"
 )
@@ -27,6 +30,9 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	}
 	if len(req.DatasetIDs) == 0 {
 		return nil, fmt.Errorf("dataset_ids is required")
+	}
+	if err := service.ValidateKnowledgeCompilationScope(req.KnowledgeCompilationScope); err != nil {
+		return nil, err
 	}
 	common.Info("SearchDatasets started", zap.String("userID", userID), zap.Any("datasets", req.DatasetIDs), zap.String("question", req.Question))
 
@@ -108,16 +114,17 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 		documentIDs = req.DocIDs
 	}
 
-	modelSolver := service.NewModelSolver()
+	modelFactory := service.NewModelFactory()
 
 	// Access check for all datasets
 	var tenantIDs []string
 	var kbRecords []*entity.Knowledgebase
 	seenTenants := make(map[string]bool)
 	for _, datasetID := range datasetIDs {
-		if !d.kbDAO.Accessible(ctx, dao.DB, datasetID, userID) {
+		if err := service.CheckDatasetAccess(ctx, permission.Subject{UserID: userID}, datasetID, permission.OperationUse); err != nil {
 			common.Warn("SearchDatasets access denied", zap.String("datasetID", datasetID), zap.String("userID", userID))
-			return nil, fmt.Errorf("only owner of dataset %s is authorized for this operation", datasetID)
+			_, permissionErr := permissionresponse.Normalize(err)
+			return nil, permissionErr
 		}
 
 		kb, err := d.kbDAO.GetByID(ctx, dao.DB, datasetID)
@@ -151,10 +158,13 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 			common.Warn("Search service is not initialized for search_id", zap.String("searchID", searchID))
 			return nil, fmt.Errorf("invalid search_id")
 		}
-		searchDetail, err := d.searchService.GetDetail(ctx, searchID)
+		searchDetail, err := d.searchService.GetDetail(ctx, userID, searchID)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			if permissionresponse.IsPermissionError(err) {
+				return nil, err
 			}
 			common.Warn("Invalid search_id", zap.String("searchID", searchID), zap.Error(err))
 			return nil, fmt.Errorf("invalid search_id")
@@ -163,12 +173,6 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 			common.Warn("Invalid search_id", zap.String("searchID", searchID))
 			return nil, fmt.Errorf("invalid search_id")
 		}
-		searchTenantID, ok := searchDetail["tenant_id"].(string)
-		if !ok || searchTenantID != userID {
-			common.Warn("Invalid search_id", zap.String("searchID", searchID))
-			return nil, fmt.Errorf("invalid search_id")
-		}
-
 		if searchConfig, ok := searchDetail["search_config"].(map[string]interface{}); ok && searchConfig != nil {
 			rerankCandidatesCount = 100
 			if scMetadataFilter, ok := searchConfig["meta_data_filter"].(map[string]interface{}); ok {
@@ -228,13 +232,14 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	getChatModel := func() *modelModule.ChatModel {
 		if !chatModelResolved {
 			chatModelResolved = true
-			cachedChatModel = resolveRetrievalChatModel(ctx, modelSolver, userID, tenantIDs[0], chatID)
+			cachedChatModel = resolveRetrievalChatModel(ctx, modelFactory, userID, tenantIDs[0], chatID)
 		}
 		return cachedChatModel
 	}
 
 	// If meta_data_filter method is auto/semi_auto, get chat model
 	var chatModelForFilter *modelModule.ChatModel
+	var err error
 	if metadataFilter != nil {
 		// The model the request names (chat_id, or the saved search's), so a
 		// retrieval test filters with the same model as the chat it reproduces.
@@ -312,21 +317,19 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	// Determine embedding model
 	var embeddingModel *modelModule.EmbeddingModel
 	if kbRecords[0].EmbdID != "" {
-		target, embErr := modelSolver.ResolveModelConfig(ctx, tenantIDs[0], entity.ModelTypeEmbedding, kbRecords[0].EmbdID)
-		if embErr != nil {
-			return nil, fmt.Errorf("failed to get embedding model by embd_id: %w", embErr)
+		embeddingModel, err = modelFactory.NewEmbeddingModel(ctx, service.ModelAccess{TenantID: tenantIDs[0]}, kbRecords[0].EmbdID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get embedding model by embd_id: %w", err)
 		}
-		embeddingModel = modelModule.NewEmbeddingModel(target.Driver, &target.ModelName, target.APIConfig, target.MaxTokens)
 	}
 
 	// Get rerank model if rerankID is specified
 	var rerankModel *modelModule.RerankModel
 	if rerankID != "" {
-		target, rErr := modelSolver.ResolveModelConfig(ctx, tenantIDs[0], entity.ModelTypeRerank, rerankID)
-		if rErr != nil {
-			return nil, fmt.Errorf("failed to get rerank model by rerank_id: %w", rErr)
+		rerankModel, err = modelFactory.NewRerankModel(ctx, service.ModelAccess{TenantID: tenantIDs[0]}, rerankID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get rerank model by rerank_id: %w", err)
 		}
-		rerankModel = modelModule.NewRerankModel(target.Driver, &target.ModelName, target.APIConfig, target.MaxTokens)
 	}
 
 	retrievalReq := &nlp.RetrievalRequest{
@@ -348,8 +351,10 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 		ChunkMeta:              chunkMeta,
 		Language:               entity.KnowledgebasesLanguage(kbRecords),
 	}
-	if req.IncludeCompiledChunks != nil && !*req.IncludeCompiledChunks {
-		retrievalReq.Filter = map[string]interface{}{"must_not": map[string]interface{}{"exists": "compile_kwd"}}
+	retrievalReq.Filter = knowledgeCompilationFilter(req.IncludeCompiledChunks, req.KnowledgeCompilationScope)
+	if len(docIDs) > 0 && (req.IncludeCompiledChunks == nil || *req.IncludeCompiledChunks) && req.KnowledgeCompilationScope != "document" {
+		// Dataset artifacts use dataset IDs instead of source document IDs.
+		retrievalReq.DocIDs = append(slices.Clone(docIDs), datasetIDs...)
 	}
 
 	retrievalResult, err := nlp.NewRetrievalService(d.docEngine, d.documentDAO).Retrieval(ctx, retrievalReq)
@@ -376,25 +381,7 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 	}
 
 	filteredChunks = nlp.RetrievalByChildren(filteredChunks, tenantIDs, d.docEngine, ctx)
-
-	keyMapping := map[string]string{
-		"chunk_id":            "id",
-		"content_with_weight": "content",
-		"doc_id":              "document_id",
-		"important_kwd":       "important_keywords",
-		"question_kwd":        "questions",
-		"docnm_kwd":           "document_keyword",
-		"kb_id":               "dataset_id",
-	}
-	for i := range filteredChunks {
-		delete(filteredChunks[i], "vector")
-		for oldKey, newKey := range keyMapping {
-			if value, ok := filteredChunks[i][oldKey]; ok {
-				filteredChunks[i][newKey] = value
-				delete(filteredChunks[i], oldKey)
-			}
-		}
-	}
+	formatDatasetSearchChunks(filteredChunks, req.IncludeCompiledChunks)
 
 	common.Info("SearchDatasets completed", zap.String("userID", userID), zap.Any("kbID", datasetIDs), zap.String("question", question), zap.Int64("chunkCount", int64(len(filteredChunks))))
 
@@ -407,6 +394,47 @@ func (d *DatasetService) SearchDatasets(ctx context.Context, req *service.Search
 		Total:      retrievalResult.Total,
 		MetaFilter: metaFilterDiagnostic,
 	}, nil
+}
+
+// formatDatasetSearchChunks applies API field names and compilation visibility after parent promotion.
+func formatDatasetSearchChunks(filteredChunks []map[string]interface{}, includeCompiledChunks *bool) {
+	keyMapping := map[string]string{
+		"chunk_id":            "id",
+		"content_with_weight": "content",
+		"doc_id":              "document_id",
+		"important_kwd":       "important_keywords",
+		"question_kwd":        "questions",
+		"docnm_kwd":           "document_keyword",
+		"kb_id":               "dataset_id",
+	}
+	for i := range filteredChunks {
+		if includeCompiledChunks != nil && !*includeCompiledChunks {
+			delete(filteredChunks[i], "compile_kwd")
+		}
+		delete(filteredChunks[i], "vector")
+		for oldKey, newKey := range keyMapping {
+			if value, ok := filteredChunks[i][oldKey]; ok {
+				filteredChunks[i][newKey] = value
+				delete(filteredChunks[i], oldKey)
+			}
+		}
+	}
+}
+
+func knowledgeCompilationFilter(include *bool, scope string) map[string]interface{} {
+	ordinary := map[string]interface{}{"must_not": map[string]interface{}{"exists": "compile_kwd"}}
+	if include != nil && !*include {
+		return ordinary
+	}
+	switch scope {
+	case "all":
+		return nil
+	case "document":
+		scope = "doc"
+	default:
+		scope = "dataset"
+	}
+	return map[string]interface{}{"or": []map[string]interface{}{ordinary, {"scope_kwd": scope}}}
 }
 
 // chatModelTenantID returns the tenant a chat model id is resolved under. A
@@ -422,27 +450,19 @@ func chatModelTenantID(userID, datasetTenantID, chatID string) string {
 // resolveRetrievalChatModel returns the chat model named by chatID, falling
 // back to the dataset tenant's default chat model. It returns nil when neither
 // resolves.
-func resolveRetrievalChatModel(ctx context.Context, modelSolver *service.ModelSolver, userID, datasetTenantID, chatID string) *modelModule.ChatModel {
+func resolveRetrievalChatModel(ctx context.Context, modelFactory *service.ModelFactory, userID, datasetTenantID, chatID string) *modelModule.ChatModel {
 	if chatID != "" {
-		target, err := modelSolver.ResolveModelConfig(ctx, chatModelTenantID(userID, datasetTenantID, chatID), entity.ModelTypeChat, chatID)
+		access := service.ModelAccess{UserID: userID, TenantID: chatModelTenantID(userID, datasetTenantID, chatID)}
+		chatModel, err := modelFactory.NewChatModel(ctx, access, chatID)
 		if err == nil {
-			return newRetrievalChatModel(target)
+			return chatModel
 		}
 		common.Warn("Failed to get chat model config from chat_id, using tenant default", zap.String("chatID", chatID), zap.Error(err))
 	}
-	target, err := modelSolver.ResolveDefaultModelConfig(ctx, datasetTenantID, entity.ModelTypeChat)
+	chatModel, err := modelFactory.NewDefaultChatModel(ctx, service.ModelAccess{TenantID: datasetTenantID})
 	if err != nil {
 		common.Warn("Failed to get tenant default chat model for retrieval", zap.Error(err))
 		return nil
 	}
-	return newRetrievalChatModel(target)
-}
-
-// newRetrievalChatModel builds the chat model with its context window, not
-// the max_output the target carries alongside it: the metadata filter's
-// prompt budget is measured against the model's total context.
-func newRetrievalChatModel(target *service.ModelTarget) *modelModule.ChatModel {
-	chatModel := modelModule.NewChatModel(target.Driver, &target.ModelName, target.APIConfig)
-	chatModel.ContextLength = target.ContextLength
 	return chatModel
 }

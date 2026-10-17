@@ -25,6 +25,7 @@ import {
 } from '@/interfaces/database/mcp';
 import {
   IImportMcpServersRequestBody,
+  IMcpServerListRequestBody,
   ITestMcpRequestBody,
 } from '@/interfaces/request/mcp';
 import i18n from '@/locales/config';
@@ -53,11 +54,38 @@ export const enum McpApiAction {
 }
 
 const McpKeys = {
-  list: (keywords: string, page: number, pageSize: number, mcpIds: string[]) =>
-    [McpApiAction.ListMcpServer, keywords, page, pageSize, mcpIds] as const,
+  list: (
+    keywords: string,
+    page: number,
+    pageSize: number,
+    tenantId?: string,
+    mcpIds?: string[],
+  ) =>
+    [
+      McpApiAction.ListMcpServer,
+      keywords,
+      page,
+      pageSize,
+      tenantId,
+      mcpIds,
+    ] as const,
 };
 
-export const useListMcpServer = (mcpIds: string[] = []) => {
+export const useListMcpServer = (
+  tenantIdOrMcpIds?: string | string[],
+  enabledOrMcpIds?: boolean | string[],
+  enabled = true,
+) => {
+  const tenantId =
+    typeof tenantIdOrMcpIds === 'string' ? tenantIdOrMcpIds : undefined;
+  const mcpIds = Array.isArray(tenantIdOrMcpIds)
+    ? tenantIdOrMcpIds
+    : Array.isArray(enabledOrMcpIds)
+      ? enabledOrMcpIds
+      : [];
+  const queryEnabled =
+    typeof enabledOrMcpIds === 'boolean' ? enabledOrMcpIds : enabled;
+
   const { searchString, setSearchString, handleInputChange } =
     useHandleSearchChange();
   const { pagination, setPagination } = useGetPaginationWithRouter();
@@ -74,19 +102,25 @@ export const useListMcpServer = (mcpIds: string[] = []) => {
       requestKeywords,
       requestPage,
       requestPageSize,
+      tenantId,
       mcpIds,
     ),
     initialData: { total: 0, mcp_servers: [] },
     gcTime: 0,
+    enabled: queryEnabled,
     queryFn: async () => {
-      const { data } = await listMcpServers(
-        {
-          keywords: requestKeywords,
-          page_size: requestPageSize,
-          page: requestPage,
-        },
-        isSelectedMcpLookup ? { mcp_ids: mcpIds.join(',') } : undefined,
-      );
+      const params: IMcpServerListRequestBody = {
+        keywords: requestKeywords,
+        page_size: requestPageSize,
+        page: requestPage,
+      };
+      if (tenantId) {
+        params.tenant_id = tenantId;
+      }
+      if (mcpIds.length > 0) {
+        params.mcp_ids = mcpIds.join(',');
+      }
+      const { data } = await listMcpServers(params);
       return data?.data;
     },
   });
