@@ -150,4 +150,17 @@ func TestAgentUploadAndAttachmentDownloadOnBetaAuth(t *testing.T) {
 			t.Fatalf("status=%d body=%s; want the JWT-only AuthMiddleware to keep guarding the preview route", resp.Code, resp.Body.String())
 		}
 	})
+
+	t.Run("agent attachment by ref uses API-key auth", func(t *testing.T) {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/agents/attachments/by_ref", nil)
+		engine.ServeHTTP(resp, req)
+
+		if resp.Code == http.StatusNotFound {
+			t.Fatal("POST /api/v1/agents/attachments/by_ref was not registered")
+		}
+		if resp.Code != http.StatusUnauthorized {
+			t.Fatalf("status=%d body=%s; want AuthMiddleware (JWT or API key) to guard the by-ref route", resp.Code, resp.Body.String())
+		}
+	})
 }

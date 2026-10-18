@@ -41,9 +41,11 @@ import (
 	agenttool "ragflow/internal/agent/tool"
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
+	"ragflow/internal/engine/kvrocks"
 	"ragflow/internal/entity"
 	"ragflow/internal/permission"
 	permissionresponse "ragflow/internal/permission/response"
+	"ragflow/internal/server"
 	"ragflow/internal/tokenizer"
 
 	dslpkg "ragflow/internal/agent/dsl"
@@ -2148,7 +2150,13 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 			// Only used for ParseAgentUploads (read-only); nil DocRemover means
 			// this FileService MUST NOT be used for DeleteFiles.
 			fileSvc := file.NewFileService(nil)
-			files, ferr := fileSvc.ParseAgentUploads(ctx, userID, rawFiles, beginLayoutRecognize(c))
+			// Without the secret the run still works; tools just get no attachment refs.
+			refSecret, serr := server.GetSecretKey(ctx, kvrocks.Get())
+			if serr != nil {
+				common.Warn("agent run: attachment refs disabled", zap.Error(serr))
+				refSecret = ""
+			}
+			files, ferr := fileSvc.ParseAgentUploads(ctx, userID, rawFiles, beginLayoutRecognize(c), refSecret)
 			if ferr != nil {
 				s.markAgentSessionFailed(ctx2, canvasID, userID, sessionID, "parse files: "+ferr.Error())
 				s.markRunFailed(ctx2, runID, "parse files: "+ferr.Error())

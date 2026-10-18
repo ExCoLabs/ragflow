@@ -13,6 +13,7 @@ import (
 	"ragflow/internal/storage"
 	"ragflow/internal/utility"
 	"strings"
+	"time"
 )
 
 // GetFileContent gets file metadata and checks permission for download
@@ -155,8 +156,10 @@ func (s *FileService) GetFileContents(ctx context.Context, uid string, fileDicts
 }
 
 // ParseAgentUploads resolves descriptors returned by upload_info from the
-// caller's downloads bucket and converts them to sys.files values.
-func (s *FileService) ParseAgentUploads(ctx context.Context, userID string, fileDicts []map[string]interface{}, layoutRecognize string) ([]string, error) {
+// caller's downloads bucket and converts them to sys.files values. A
+// non-empty refSecret adds a signed AttachmentRef to each non-image file so
+// tools (e.g. an MCP server) can fetch the original bytes.
+func (s *FileService) ParseAgentUploads(ctx context.Context, userID string, fileDicts []map[string]interface{}, layoutRecognize, refSecret string) ([]string, error) {
 	storageImpl := storage.GetStorageFactory().GetStorage()
 	if storageImpl == nil {
 		return nil, fmt.Errorf("storage not initialized")
@@ -189,7 +192,14 @@ func (s *FileService) ParseAgentUploads(ctx context.Context, userID string, file
 			continue
 		}
 
-		content, err := parseAgentUploadContent(ctx, name, data, layoutRecognize)
+		ref := ""
+		if refSecret != "" {
+			ar := AttachmentRef{Owner: createdBy, ID: id, Name: name, MimeType: mediaType, Expires: time.Now().Add(AttachmentRefTTL).Unix()}
+			if ref, err = ar.Encode(refSecret); err != nil {
+				return nil, fmt.Errorf("file %q: sign attachment ref: %w", name, err)
+			}
+		}
+		content, err := parseAgentUploadContent(ctx, name, data, layoutRecognize, ref)
 		if err != nil {
 			return nil, fmt.Errorf("file %q: parse upload: %w", name, err)
 		}
@@ -198,7 +208,7 @@ func (s *FileService) ParseAgentUploads(ctx context.Context, userID string, file
 	return contents, nil
 }
 
-func parseAgentUploadContent(ctx context.Context, filename string, data []byte, layoutRecognize string) (string, error) {
+func parseAgentUploadContent(ctx context.Context, filename string, data []byte, layoutRecognize, ref string) (string, error) {
 	content := string(data)
 	fileType := utility.GetFileType(filename)
 	if fileType != utility.FileTypeOTHER {
@@ -218,6 +228,9 @@ func parseAgentUploadContent(ctx context.Context, filename string, data []byte, 
 			return "", err
 		}
 		content = parsed
+	}
+	if ref != "" {
+		return fmt.Sprintf("\n -----------------\nFile: %s\nAttachment ref: %s\nContent as following: \n%s", filename, ref, content), nil
 	}
 	return fmt.Sprintf("\n -----------------\nFile: %s\nContent as following: \n%s", filename, content), nil
 }
