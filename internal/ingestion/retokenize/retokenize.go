@@ -62,6 +62,8 @@ import (
 	"ragflow/internal/engine/elasticsearch"
 	"ragflow/internal/ingestion/component"
 	"ragflow/internal/tokenizer"
+
+	"gorm.io/gorm"
 )
 
 // TokenFields are the chunk fields a run may rewrite.
@@ -365,17 +367,17 @@ func RunDataset(ctx context.Context, store ChunkStore, ds Dataset, opts Options,
 	return res, nil
 }
 
-// Run converts every dataset in opts with the global document engine and
-// database, which the caller has initialized along with the tokenizer pool.
-func Run(ctx context.Context, opts Options, out io.Writer) error {
-	store, ok := engine.Get().(*elasticsearch.Engine)
+// Run converts every dataset in opts with docEngine and db; the caller has
+// initialized the tokenizer pool.
+func Run(ctx context.Context, docEngine engine.DocEngine, db *gorm.DB, opts Options, out io.Writer) error {
+	store, ok := docEngine.(*elasticsearch.Engine)
 	if !ok {
-		return fmt.Errorf("document engine %q is not Elasticsearch", engine.GetEngineType())
+		return fmt.Errorf("document engine %T is not Elasticsearch", docEngine)
 	}
 	kbDAO := dao.NewKnowledgebaseDAO()
 	failed := 0
 	for _, id := range opts.DatasetIDs {
-		kb, err := kbDAO.GetByID(ctx, dao.DB, id)
+		kb, err := kbDAO.GetByID(ctx, db, id)
 		if err != nil {
 			return fmt.Errorf("dataset %s: %w", id, err)
 		}
