@@ -123,6 +123,11 @@ private:
     // afterwards. Mirrors _normalize_token() in Infinity's rag_tokenizer.py.
     std::string NormalizeTerm(const std::string& lowercase_term);
 
+    // ASCII-lowercases term into lowercase_string_buffer_, growing it first:
+    // ToLower() ignores its out_limit, so a token longer than the buffer
+    // (long accented runs under the Slovak/Czech split) overflowed the heap.
+    const char* LowercaseTerm(const std::string& term);
+
     static void BuildPositionMapping(const std::string& original, const std::string& converted,
                                      std::vector<unsigned>& pos_mapping);
 
