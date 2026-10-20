@@ -62,13 +62,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The Dockerfile stamps VERSION with `git describe --tags --match=v*`, and
-      # the Go server refuses a database migrated by a newer version. The fork
-      # carries no tags, so take upstream's release tags.
+      # The Dockerfile stamps VERSION with `git describe --tags --match=v*`
+      # (fork *-archa* tags excluded), and the Go server refuses a database
+      # migrated by a newer version, so take upstream's release tags.
       - name: Fetch upstream release tags
         run: |
           git fetch --no-tags https://github.com/infiniflow/ragflow.git 'refs/tags/v*:refs/tags/v*'
-          git describe --tags --match='v*' --first-parent --always
+          git describe --tags --match='v*' --exclude='*-archa*' --first-parent --always
 
       # The Dockerfile defaults GOPROXY to goproxy.cn first, which drops connections
       # from GitHub-hosted runners (http2 GOAWAY mid-download fails `go mod download`
