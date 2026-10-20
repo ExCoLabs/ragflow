@@ -119,10 +119,14 @@ type AgentParam struct {
 	// renders prompts.CitationPlusPrompt, and makes a second LLM
 	// call to insert [ID:N] tags into the final content. Mirrors
 	// Python's `_generate_with_citation` flow.
-	Cite    bool
-	Driver  string
-	APIKey  string
-	BaseURL string
+	Cite bool
+	// GroundingLLMID selects the model for the post-stream citation
+	// grounding call; empty falls back to ModelID. The composite
+	// llm_id is resolved once per grounding run, not per batch.
+	GroundingLLMID string
+	Driver         string
+	APIKey         string
+	BaseURL        string
 
 	// MaxTokensDisabled, TopPDisabled and TemperatureDisabled record a DSL
 	// *Enabled switch set to false, so runtime inputs that carry the value
@@ -576,6 +580,13 @@ func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, cont
 	batches := citationBatches(chunks, citationGroundingBatchChars)
 	if len(batches) > citationGroundingMaxBatches {
 		batches = batches[:citationGroundingMaxBatches]
+	}
+	if p.GroundingLLMID != "" {
+		modelID, driver, apiKey, baseURL, err := resolveChatModelRef(ctx, db, p.GroundingLLMID, "", "", "")
+		if err != nil {
+			return content, fmt.Errorf("resolve grounding_llm_id %q: %w", p.GroundingLLMID, err)
+		}
+		p.ModelID, p.Driver, p.APIKey, p.BaseURL = modelID, driver, apiKey, baseURL
 	}
 	grounded := content
 	var firstErr error
@@ -1162,10 +1173,10 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 		}
 		common.Info(fmt.Sprintf(
 			"agent_run_timings outcome=%s total_ms=%d llm_ms=%d tools_ms=%d grounding_ms=%d "+
-				"llm_calls=%d tool_calls=%d grounding_status=%q model=%s session=%s tenant=%s",
+				"llm_calls=%d tool_calls=%d grounding_status=%q model=%s grounding_model=%s session=%s tenant=%s",
 			outcome, time.Since(runStart).Milliseconds(), llm.Milliseconds(),
 			tools.Milliseconds(), grounding.Milliseconds(), llmCalls, toolCalls,
-			groundingStatus, p.ModelID, sessionID, tenantID))
+			groundingStatus, p.ModelID, p.GroundingLLMID, sessionID, tenantID))
 	}()
 
 	var err error
@@ -1365,6 +1376,7 @@ func (c *AgentComponent) Inputs() map[string]string {
 		"api_key":                 "Override API key for this call.",
 		"base_url":                "Override the driver default endpoint URL.",
 		"cite":                    "When true, make a post-stream citation-grounding call (reads chunks from state.Retrieval).",
+		"grounding_llm_id":        "Optional model for the citation-grounding call; defaults to llm_id.",
 	}
 }
 
@@ -1838,6 +1850,9 @@ func mergeAgentParam(base AgentParam, inputs map[string]any) AgentParam {
 	}
 	if v, ok := boolFrom(inputs, "cite"); ok {
 		p.Cite = v
+	}
+	if v, ok := stringFrom(inputs, "grounding_llm_id"); ok {
+		p.GroundingLLMID = v
 	}
 	return p
 }
