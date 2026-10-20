@@ -591,7 +591,12 @@ func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, cont
 	grounded := content
 	var firstErr error
 	for i, batch := range batches {
+		bStart := time.Now()
 		out, err := citationGroundingCall(ctx, db, p, grounded, batch, i > 0)
+		common.Info(fmt.Sprintf(
+			"citation_grounding_batch idx=%d/%d batch_ms=%d chunks=%d model=%s changed=%t err=%v",
+			i+1, len(batches), time.Since(bStart).Milliseconds(), len(batch),
+			p.ModelID, err == nil && out != grounded, err))
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("citation grounding batch %d/%d: %w", i+1, len(batches), err)
