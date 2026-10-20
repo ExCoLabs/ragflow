@@ -151,12 +151,12 @@ func expectRedirect(t *testing.T, w *httptest.ResponseRecorder, key string) stri
 
 func userByToken(t *testing.T, db *gorm.DB, auth string) *entity.User {
 	t.Helper()
-	accessToken, err := common.ExtractAccessToken(auth, oauthTestSecretKey)
+	tokenCtx, err := common.ExtractAccessTokenContext(auth, oauthTestSecretKey)
 	if err != nil {
 		t.Fatalf("auth token does not verify: %v", err)
 	}
 	var user entity.User
-	if err := db.Where("access_token = ?", accessToken).First(&user).Error; err != nil {
+	if err := db.Where("access_token = ?", tokenCtx.AccessToken).First(&user).Error; err != nil {
 		t.Fatalf("no user holds the issued access token: %v", err)
 	}
 	return &user

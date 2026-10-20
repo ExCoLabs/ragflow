@@ -17,7 +17,9 @@
 package handler
 
 import (
+	"fmt"
 	"ragflow/internal/common"
+	"ragflow/internal/entity"
 
 	"github.com/gin-gonic/gin"
 )
@@ -86,4 +88,11 @@ func (h *UserHandler) GetLoginChannels(c *gin.Context) {
 		return
 	}
 	common.SuccessWithData(c, channels, "success")
+}
+
+func issueUserAccessToken(user *entity.User, secretKey string) (string, error) {
+	if user == nil || user.AccessToken == nil {
+		return "", fmt.Errorf("user access token is missing")
+	}
+	return common.DumpAccessToken(*user.AccessToken, "", secretKey)
 }

@@ -39,10 +39,10 @@ var storedDocMetadataFunc = storedDocMetadata
 // path once the dataset is re-backfilled, they never fail the ingestion.
 func (s *PipelineExecutor) stampChunkMetadata(ctx context.Context, chunks []map[string]any) {
 	cfg := common.ParseChunkMetadataConfig(map[string]any(s.taskCtx.KB.ParserConfig))
-	if cfg == nil || !cfg.Enabled || len(cfg.Fields) == 0 || len(chunks) == 0 {
+	if cfg == nil || !cfg.Enabled || len(cfg.Fields) == 0 || len(chunks) == 0 || s.deps == nil {
 		return
 	}
-	docEngine := engine.Get()
+	docEngine := s.deps.Engine
 	if _, ok := engine.AsChunkMetadataStore(docEngine); !ok {
 		return
 	}
