@@ -1294,9 +1294,18 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	var groundingStatus string
 	if p.Cite {
 		chunks := chunksFromState(ctx)
-		if len(chunks) == 0 {
+		switch {
+		case len(chunks) == 0:
 			groundingStatus = "no_chunks"
-		} else {
+		case strings.TrimSpace(content) == "":
+			// Reasoning-only finish: the model consumed its token budget on
+			// thinking and produced no answer text. Logged separately from
+			// "unchanged" so empty-content runs stay addressable in metrics.
+			groundingStatus = "empty_content"
+			common.Info(fmt.Sprintf(
+				"agent_empty_content model=%s think_len=%d session=%s tenant=%s",
+				p.ModelID, len(thinking), sessionID, tenantID))
+		default:
 			gStart := time.Now()
 			grounded, gErr := applyCitationGrounding(ctx, db, p, content, chunks)
 			timings.AddGrounding(time.Since(gStart))
