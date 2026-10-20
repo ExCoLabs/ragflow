@@ -866,11 +866,11 @@ std::string RAGAnalyzer::StrQ2B(const std::string &input) {
         if (c < 0x80) {
             codepoint = c;
             i += 1;
-        } else if ((c & 0xE0) == 0xC0) {
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < input.size()) {
             codepoint = (c & 0x1F) << 6;
             codepoint |= (input[i + 1] & 0x3F);
             i += 2;
-        } else if ((c & 0xF0) == 0xE0) {
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < input.size()) {
             codepoint = (c & 0x0F) << 12;
             codepoint |= (input[i + 1] & 0x3F) << 6;
             codepoint |= (input[i + 2] & 0x3F);
@@ -1568,6 +1568,14 @@ void RAGAnalyzer::MergeWithPosition(const std::vector<std::string> &tokens,
     merged_positions = std::move(res_positions);
 }
 
+const char *RAGAnalyzer::LowercaseTerm(const std::string &term) {
+    if (lowercase_string_buffer_.size() < term.size() + 1) {
+        lowercase_string_buffer_.resize(term.size() + 1);
+    }
+    ToLower(term.c_str(), term.size(), lowercase_string_buffer_.data(), lowercase_string_buffer_.size());
+    return lowercase_string_buffer_.data();
+}
+
 std::string RAGAnalyzer::NormalizeTerm(const std::string &lowercase_term) {
     if (stem_and_fold_) {
         std::string stem_term = lowercase_term;
@@ -1586,9 +1594,7 @@ std::string RAGAnalyzer::NormalizeTerm(const std::string &lowercase_term) {
 void RAGAnalyzer::EnglishNormalize(const std::vector<std::string> &tokens, std::vector<std::string> &res) {
     for (auto &t : tokens) {
         if (re2::RE2::PartialMatch(t, pattern1_)) { //"[a-zA-Z_-]+$"
-            char *lowercase_term = lowercase_string_buffer_.data();
-            ToLower(t.c_str(), t.size(), lowercase_term, term_string_buffer_limit_);
-            res.push_back(NormalizeTerm(lowercase_term));
+            res.push_back(NormalizeTerm(LowercaseTerm(t)));
         } else {
             res.push_back(t);
         }
@@ -1960,9 +1966,7 @@ std::string RAGAnalyzer::Tokenize(const std::string &line) {
                 NLTKWordTokenizer::GetInstance().Tokenize(sentence, term_list);
             }
             for (unsigned i = 0; i < term_list.size(); ++i) {
-                char *lowercase_term = lowercase_string_buffer_.data();
-                ToLower(term_list[i].c_str(), term_list[i].size(), lowercase_term, term_string_buffer_limit_);
-                res.push_back(NormalizeTerm(lowercase_term));
+                res.push_back(NormalizeTerm(LowercaseTerm(term_list[i])));
             }
             continue;
         }
@@ -2096,9 +2100,7 @@ std::pair<std::vector<std::string>, std::vector<std::pair<unsigned, unsigned>>> 
                         unsigned start_pos = sentence_start_pos + static_cast<unsigned>(pos_in_sentence);
                         unsigned end_pos = start_pos + static_cast<unsigned>(term.size());
                         // Apply lowercase before lemmatization to match Python NLTK behavior
-                        char *lowercase_term = lowercase_string_buffer_.data();
-                        ToLower(term.c_str(), term.size(), lowercase_term, term_string_buffer_limit_);
-                        tokens.push_back(NormalizeTerm(lowercase_term));
+                        tokens.push_back(NormalizeTerm(LowercaseTerm(term)));
 
                         // Map positions back to original string using final_pos_mapping
                         if (start_pos < final_pos_mapping.size()) {
@@ -2416,9 +2418,7 @@ void RAGAnalyzer::EnglishNormalizeWithPosition(const std::vector<std::string> &t
         const auto &[start_pos, end_pos] = positions[i];
 
         if (re2::RE2::PartialMatch(token, pattern1_)) { //"[a-zA-Z_-]+$"
-            char *lowercase_term = lowercase_string_buffer_.data();
-            ToLower(token.c_str(), token.size(), lowercase_term, term_string_buffer_limit_);
-            normalize_tokens.push_back(NormalizeTerm(lowercase_term));
+            normalize_tokens.push_back(NormalizeTerm(LowercaseTerm(token)));
             normalize_positions.emplace_back(start_pos, end_pos);
         } else {
             normalize_tokens.push_back(token);
