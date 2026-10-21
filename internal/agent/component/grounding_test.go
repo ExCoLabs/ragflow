@@ -34,6 +34,7 @@ import (
 	"gorm.io/gorm"
 
 	"ragflow/internal/agent/canvas"
+	"ragflow/internal/agent/component/prompts"
 	"ragflow/internal/agent/runtime"
 )
 
@@ -46,6 +47,7 @@ type groundingTestInvoker struct {
 	lastReq   ChatInvokeRequest
 	responses []string
 	calls     int
+	failAt    int
 }
 
 type groundingStreamingInvoker struct {
@@ -86,6 +88,9 @@ func (g *groundingTestInvoker) Invoke(_ context.Context, _ *gorm.DB, req ChatInv
 	defer g.mu.Unlock()
 	g.lastReq = req
 	g.calls++
+	if g.failAt == g.calls {
+		return nil, errors.New("grounding provider failed")
+	}
 	if len(g.responses) == 0 {
 		return &ChatInvokeResponse{Content: "grounded"}, nil
 	}
@@ -99,7 +104,7 @@ func (g *groundingTestInvoker) Invoke(_ context.Context, _ *gorm.DB, req ChatInv
 // TestGrounding_Applied: Cite=true + state has chunks → second
 // LLM call is made and the grounded content replaces the original.
 func TestGrounding_Applied(t *testing.T) {
-	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"grounded answer [ID:0]"}}}
+	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"original answer [ID:0]"}}}
 	prev := getDefaultChatInvoker()
 	SetDefaultChatInvoker(inv)
 	defer SetDefaultChatInvoker(prev)
@@ -125,7 +130,7 @@ func TestGrounding_Applied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	if got, want := out["content"], "grounded answer [ID:0]"; got != want {
+	if got, want := out["content"], "original answer [ID:0]"; got != want {
 		t.Errorf("content=%v, want %v", got, want)
 	}
 	if got := out["grounding_status"]; got != "applied" {
@@ -136,8 +141,8 @@ func TestGrounding_Applied(t *testing.T) {
 	}
 	// Grounded deltas are buffered: the client sees only the final
 	// emission of the grounded answer, once.
-	if inv.streamCalls != 1 || deltas != 1 || streamed != "grounded answer [ID:0]" {
-		t.Errorf("stream calls=%d, deltas=%d, streamed=%q, want 1 / 1 / grounded answer [ID:0]", inv.streamCalls, deltas, streamed)
+	if inv.streamCalls != 1 || deltas != 1 || streamed != "original answer [ID:0]" {
+		t.Errorf("stream calls=%d, deltas=%d, streamed=%q, want 1 / 1 / original answer [ID:0]", inv.streamCalls, deltas, streamed)
 	}
 	// System message should contain the citation prompt + sources block.
 	if got := inv.lastReq.Messages[0].Role; got != schema.System {
@@ -145,6 +150,9 @@ func TestGrounding_Applied(t *testing.T) {
 	}
 	if !contains(inv.lastReq.Messages[0].Content, "ID: 0") {
 		t.Errorf("system prompt missing source block: %q", inv.lastReq.Messages[0].Content)
+	}
+	if !strings.Contains(inv.lastReq.Messages[0].Content, "Return that same answer with citation insertions only.") {
+		t.Error("grounding prompt must prohibit answer rewriting")
 	}
 }
 
@@ -266,7 +274,7 @@ func TestGrounding_EmptyContent(t *testing.T) {
 // the client and is not duplicated at the end.
 func TestGrounding_HeldContentEmittedOnce(t *testing.T) {
 	prev := getDefaultChatInvoker()
-	SetDefaultChatInvoker(&groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"[ID:0] answer"}}})
+	SetDefaultChatInvoker(&groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"answer without citations [ID:0]"}}})
 	defer SetDefaultChatInvoker(prev)
 
 	withAgentRunner(t, func(_ context.Context, _ AgentParam) (*schema.Message, error) {
@@ -291,12 +299,12 @@ func TestGrounding_HeldContentEmittedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	if got, want := out["content"], "[ID:0] answer"; got != want {
+	if got, want := out["content"], "answer without citations [ID:0]"; got != want {
 		t.Errorf("content=%v, want %v", got, want)
 	}
 	joined := strings.Join(contentEvents, "")
-	if joined != "[ID:0] answer" {
-		t.Errorf("content events=%v, joined=%q, want [ID:0] answer", contentEvents, joined)
+	if joined != "answer without citations [ID:0]" {
+		t.Errorf("content events=%v, joined=%q, want answer without citations [ID:0]", contentEvents, joined)
 	}
 }
 
@@ -343,7 +351,7 @@ func TestGrounding_PartialStreamFailure_FallsBack(t *testing.T) {
 // is grounded through multiple sequential calls, each feeding its output
 // to the next.
 func TestGrounding_BatchedChunks(t *testing.T) {
-	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"batch1", "batch2", "batch3"}}}
+	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"original [ID:0]", "original [ID:0][ID:13]", "original [ID:0][ID:13][ID:26]"}}}
 	prev := getDefaultChatInvoker()
 	SetDefaultChatInvoker(inv)
 	defer SetDefaultChatInvoker(prev)
@@ -369,11 +377,129 @@ func TestGrounding_BatchedChunks(t *testing.T) {
 	if inv.calls < 2 {
 		t.Fatalf("expected multiple grounding calls, got %d", inv.calls)
 	}
-	if got := out["content"]; got != "batch3" {
-		t.Errorf("content=%v, want last batch output 'batch3'", got)
+	if got := out["content"]; got != "original [ID:0][ID:13][ID:26]" {
+		t.Errorf("content=%v, want original answer with citations from all batches", got)
 	}
 	if got := out["grounding_status"]; got != "applied" {
 		t.Errorf("grounding_status=%v, want 'applied'", got)
+	}
+}
+
+func TestCitationGroundingAnchorsMatchCanonicalPrefixes(t *testing.T) {
+	for _, text := range []string{
+		"Prvá veta [ID:0].\nDruhá veta [ID:1].",
+		"a[ID:0] [ID:1]b", "a[ID:0]\u00a0[ID:1]b", "a \n [ID:0]b [ID:1]",
+		"甲 乙 [ID:0]。 丙 [ID:1]", "[ID:0]\t text [ID: 1 ] [ID:0]",
+	} {
+		want := make(map[string]int)
+		for _, span := range citationGroundingMarkerRe.FindAllStringIndex(text, -1) {
+			id := citationGroundingIDRe.FindStringSubmatch(text[span[0]:span[1]])[1]
+			want[fmt.Sprintf("%d:%s", len(citationGroundingText(text[:span[0]])), id)]++
+		}
+		got := citationGroundingAnchors(text, map[string]bool{"0": true, "1": true})
+		if len(got) != len(want) {
+			t.Fatalf("anchors=%v want=%v", got, want)
+		}
+		for anchor, count := range want {
+			if got[anchor] != count {
+				t.Fatalf("anchors=%v want=%v", got, want)
+			}
+		}
+	}
+}
+
+func TestGroundingDoesNotReuseUnseenPriorSourceForNewClaims(t *testing.T) {
+	validation := validateCitationGrounding("Prvá veta [ID:1]. Druhá veta.", "Prvá veta [ID:1]. Druhá veta [ID:1][ID:0].",
+		[]prompts.CitationSource{{ID: "0", Content: "Current source"}}, map[string]bool{"0": true, "1": true})
+	if validation.Reason != "source_not_in_batch" || validation.AddedCitations != 0 {
+		t.Fatalf("validation=%+v", validation)
+	}
+}
+
+func TestGroundingPreservesTextAndCitationIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, original, candidate, want, status string
+	}{
+		{"valid_addition", "Ochrana je potrebná.", "Ochrana je potrebná [ID:0].", "Ochrana je potrebná [ID:0].", "applied"},
+		{"valid_hex", "Áno.", "Áno [ID:e52600578f031081].", "Áno [ID:e52600578f031081].", "applied"},
+		{"rewritten_number", "Výška je 136,200 m.", "Výška je 136,20 m [ID:0].", "Výška je 136,200 m.", "rejected: content_changed"},
+		{"changed_fact", "Ochrana je potrebná.", "Ochrana nie je potrebná [ID:0].", "Ochrana je potrebná.", "rejected: content_changed"},
+		{"meta_reply", "Ochrana je potrebná.", "Please share the text you'd like me to cite.", "Ochrana je potrebná.", "rejected: content_changed"},
+		{"appended_note", "Požiadavky sú A a B.", "Požiadavky sú A a B [ID:0].\n\nPoznámka: niektoré ID neboli nájdené.", "Požiadavky sú A a B.", "rejected: content_changed"},
+		{"unknown_id", "Ochrana je potrebná.", "Ochrana je potrebná [ID:unknown].", "Ochrana je potrebná.", "rejected: unknown_citation"},
+		{"merged_ids", "Ochrana je potrebná.", "Ochrana je potrebná [ID:0, ID:1].", "Ochrana je potrebná.", "rejected: malformed_citation"},
+		{"marker_only", "Ochrana je potrebná.", "[ID:0]", "Ochrana je potrebná.", "rejected: empty_response"},
+		{"format_only", "Ochrana je potrebná.", "Ochrana  je potrebná.", "Ochrana je potrebná.", "unchanged"},
+		{"changed_layout_with_citation", "Prvá veta.\n\nDruhá veta.", "Prvá veta. Druhá veta [ID:0].", "Prvá veta.\n\nDruhá veta.", "rejected: format_changed"},
+		{"removed_existing", "Prvá veta [ID:0]. Druhá veta.", "Prvá veta. Druhá veta [ID:1].", "Prvá veta [ID:0]. Druhá veta.", "rejected: existing_citation_changed"},
+		{"moved_existing", "Prvá veta [ID:0]. Druhá veta.", "Prvá veta. Druhá veta [ID:0][ID:1].", "Prvá veta [ID:0]. Druhá veta.", "rejected: existing_citation_changed"},
+		{"lost_duplicate", "Prvá veta [ID:0]. Druhá veta [ID:0].", "Prvá veta [ID:0]. Druhá veta [ID:1].", "Prvá veta [ID:0]. Druhá veta [ID:0].", "rejected: existing_citation_changed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{tc.candidate}}}
+			previous := getDefaultChatInvoker()
+			SetDefaultChatInvoker(inv)
+			t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+			withAgentRunner(t, func(context.Context, AgentParam) (*schema.Message, error) {
+				return schema.AssistantMessage(tc.original, nil), nil
+			})
+			state := canvas.NewCanvasState("run", "session")
+			state.SetRetrievalChunks([]map[string]any{{"id": "0", "content": "First source"}, {"id": "1", "content": "Second source"}, {"id": "e52600578f031081", "content": "Hash source"}})
+			ctx := runtime.WithState(t.Context(), state)
+			var emitted string
+			ctx = runtime.WithAgentMessageEmitter(ctx, func(content, _ string) { emitted += content })
+			out, err := NewAgentComponent(AgentParam{ModelID: "stub", Cite: true}).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out["content"] != tc.want || out["grounding_status"] != tc.status || emitted != tc.want {
+				t.Fatalf("content=%q status=%q emitted=%q; want %q / %q", out["content"], out["grounding_status"], emitted, tc.want, tc.status)
+			}
+		})
+	}
+}
+
+func TestGroundingBatchFailurePreservesAcceptedContent(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second, want, status string
+		failAt, calls                     int
+	}{
+		{"rejected_later", "original [ID:0]", "A different answer [ID:13]", "original [ID:0]", "rejected: content_changed", 0, 2},
+		{"provider_error_later", "original [ID:0]", "", "original [ID:0]", "error:", 2, 2},
+		{"future_source_not_visible", "original [ID:13]", "", "original", "rejected: unknown_citation", 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{tc.first, tc.second}, failAt: tc.failAt}}
+			previous := getDefaultChatInvoker()
+			SetDefaultChatInvoker(inv)
+			t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+			withAgentRunner(t, func(context.Context, AgentParam) (*schema.Message, error) {
+				return schema.AssistantMessage("original", nil), nil
+			})
+			state := canvas.NewCanvasState("run", "session")
+			var chunks []map[string]any
+			for i := 0; i < 30; i++ {
+				chunks = append(chunks, map[string]any{"id": fmt.Sprint(i), "content": strings.Repeat("x", 3000)})
+			}
+			state.SetRetrievalChunks(chunks)
+			var emitted []string
+			ctx := runtime.WithAgentMessageEmitter(runtime.WithState(t.Context(), state), func(content, _ string) {
+				if content != "" {
+					emitted = append(emitted, content)
+				}
+			})
+			out, err := NewAgentComponent(AgentParam{ModelID: "stub", Cite: true}).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, _ := out["grounding_status"].(string)
+			if out["content"] != tc.want || !strings.HasPrefix(status, tc.status) || inv.calls != tc.calls {
+				t.Fatalf("content=%q status=%q calls=%d", out["content"], status, inv.calls)
+			}
+			if len(emitted) != 1 || emitted[0] != tc.want {
+				t.Fatalf("emitted=%q, want exactly one accepted answer", emitted)
+			}
+		})
 	}
 }
 
