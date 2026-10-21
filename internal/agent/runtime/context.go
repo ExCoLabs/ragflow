@@ -313,13 +313,17 @@ func AgentMessageEventsEmittedRun(ctx context.Context) bool {
 // service layer to inject a fallback answer when the agent exhausts
 // its rounds without producing content.
 func AgentContentEventsEmittedRun(ctx context.Context) bool {
+	return strings.TrimSpace(GetAgentStreamedContent(ctx)) != ""
+}
+
+func GetAgentStreamedContent(ctx context.Context) string {
 	state, ok := ctx.Value(agentMessageEmitterCtxKey{}).(*agentMessageEmitterState)
 	if !ok || state == nil {
-		return false
+		return ""
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return strings.TrimSpace(state.agentContent.String()) != ""
+	return state.agentContent.String()
 }
 
 // AgentMessageEventsSuppressedRun reports whether any Agent invocation
