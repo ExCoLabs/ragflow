@@ -752,6 +752,206 @@ type citationGroundingValidation struct {
 	AddedCitations   int
 }
 
+type citationInsertion struct {
+	Quote string
+	ID    string
+}
+
+func decodeCitationInsertions(raw string) ([]citationInsertion, error) {
+	invalid := &citationGroundingRejectionError{reason: "invalid_proposal"}
+	if strings.TrimSpace(raw) == "" {
+		return nil, &citationGroundingRejectionError{reason: "empty_response"}
+	}
+	if len(raw) > citationGroundingBatchChars || !utf8.ValidString(raw) {
+		return nil, invalid
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	expect := func(expected any) bool {
+		token, err := decoder.Token()
+		return err == nil && token == expected
+	}
+	if !expect(json.Delim('{')) || !expect("citations") || !expect(json.Delim('[')) {
+		return nil, invalid
+	}
+	var insertions []citationInsertion
+	for decoder.More() {
+		if len(insertions) >= 128 {
+			return nil, &citationGroundingRejectionError{reason: "too_many_insertions"}
+		}
+		if !expect(json.Delim('{')) {
+			return nil, invalid
+		}
+		entry := citationInsertion{}
+		seen := map[string]bool{}
+		for decoder.More() {
+			key, err := decoder.Token()
+			name, ok := key.(string)
+			if err != nil || !ok || seen[name] || (name != "quote" && name != "id") {
+				return nil, invalid
+			}
+			value, err := decoder.Token()
+			text, ok := value.(string)
+			if err != nil || !ok {
+				return nil, invalid
+			}
+			seen[name] = true
+			if name == "quote" {
+				entry.Quote = text
+			} else {
+				entry.ID = text
+			}
+		}
+		if len(seen) != 2 || !expect(json.Delim('}')) {
+			return nil, invalid
+		}
+		insertions = append(insertions, entry)
+	}
+	if !expect(json.Delim(']')) || !expect(json.Delim('}')) {
+		return nil, invalid
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, invalid
+	}
+	return insertions, nil
+}
+
+type citationInsertionStats struct {
+	Parsed     bool
+	Count      int
+	ValidIDs   int
+	InvalidIDs int
+}
+
+func applyCitationInsertions(content, raw string, batch []prompts.CitationSource) (string, citationInsertionStats, error) {
+	insertions, err := decodeCitationInsertions(raw)
+	stats := citationInsertionStats{Parsed: err == nil, Count: len(insertions)}
+	if err != nil {
+		return content, stats, err
+	}
+	if len(insertions) == 0 {
+		return content, stats, nil
+	}
+	if !utf8.ValidString(content) {
+		return content, stats, &citationGroundingRejectionError{reason: "invalid_anchor"}
+	}
+	ids := make(map[string]bool)
+	for _, source := range batch {
+		if source.ID != "" && source.Content != "" {
+			ids[source.ID] = true
+		}
+	}
+	for _, insertion := range insertions {
+		match := citationGroundingIDRe.FindStringSubmatch("[ID:" + insertion.ID + "]")
+		if len(match) == 2 && match[1] == insertion.ID && ids[insertion.ID] {
+			stats.ValidIDs++
+		} else {
+			stats.InvalidIDs++
+		}
+	}
+	ranges, _ := finalCitationTextRanges([]byte(content))
+	markers := finalCitationMarkerRe.FindAllStringIndex(content, -1)
+	urls := finalCitationURLRe.FindAllStringIndex(content, -1)
+	type edit struct {
+		position int
+		id       string
+		grouped  bool
+	}
+	var edits []edit
+	seen := make(map[string]bool)
+	counts := make(map[int]int)
+	for _, insertion := range insertions {
+		reject := func(reason string) (string, citationInsertionStats, error) {
+			return content, stats, &citationGroundingRejectionError{reason: reason}
+		}
+		idMatch := citationGroundingIDRe.FindStringSubmatch("[ID:" + insertion.ID + "]")
+		if len(idMatch) != 2 || idMatch[1] != insertion.ID {
+			return reject("malformed_citation")
+		}
+		if !ids[insertion.ID] {
+			return reject("unknown_citation")
+		}
+		if strings.TrimSpace(insertion.Quote) == "" || strings.TrimRightFunc(insertion.Quote, unicode.IsSpace) != insertion.Quote {
+			return reject("invalid_anchor")
+		}
+		start := strings.Index(content, insertion.Quote)
+		if start < 0 {
+			return reject("anchor_not_found")
+		}
+		if strings.Index(content[start+1:], insertion.Quote) >= 0 {
+			return reject("ambiguous_anchor")
+		}
+		position := start + len(insertion.Quote)
+		index := sort.Search(len(ranges), func(i int) bool { return ranges[i][1] >= position })
+		if index == len(ranges) || ranges[index][0] > position {
+			return reject("unsafe_anchor")
+		}
+		for _, span := range markers {
+			if position > span[0] && position < span[1] {
+				return reject("unsafe_anchor")
+			}
+		}
+		for _, span := range urls {
+			if position > span[0] && position < span[1] {
+				return reject("unsafe_anchor")
+			}
+		}
+		last, _ := utf8.DecodeLastRuneInString(content[:position])
+		if position < len(content) {
+			next, _ := utf8.DecodeRuneInString(content[position:])
+			regionalPair := last >= '\U0001f1e6' && last <= '\U0001f1ff' && next >= '\U0001f1e6' && next <= '\U0001f1ff'
+			if unicode.IsLetter(next) || unicode.IsDigit(next) || unicode.IsMark(next) || unicode.Is(unicode.Cf, next) || regionalPair || (next >= '\U0001f3fb' && next <= '\U0001f3ff') {
+				return reject("unsafe_anchor")
+			}
+		}
+		if last == '\u200d' {
+			return reject("unsafe_anchor")
+		}
+		grouped, duplicate := false, false
+		existing := 0
+		for {
+			tail := content[position:]
+			trimmed := strings.TrimLeftFunc(tail, func(r rune) bool { return r == '\t' || unicode.Is(unicode.Zs, r) })
+			span := finalCitationMarkerRe.FindStringIndex(trimmed)
+			if len(span) != 2 || span[0] != 0 {
+				break
+			}
+			match := finalCitationIDRe.FindStringSubmatch(trimmed[:span[1]])
+			if len(match) != 3 {
+				break
+			}
+			grouped = true
+			existing++
+			duplicate = duplicate || match[1]+match[2] == insertion.ID
+			position += len(tail) - len(trimmed) + span[1]
+		}
+		key := fmt.Sprintf("%d:%s", position, insertion.ID)
+		if !duplicate && !seen[key] {
+			if _, ok := counts[position]; !ok {
+				counts[position] = existing
+			}
+			if counts[position] >= 4 {
+				return reject("citation_limit")
+			}
+			edits = append(edits, edit{position: position, id: insertion.ID, grouped: grouped})
+			seen[key] = true
+			counts[position]++
+		}
+	}
+	sort.SliceStable(edits, func(i, j int) bool { return edits[i].position < edits[j].position })
+	var out strings.Builder
+	offset, previous := 0, -1
+	for _, edit := range edits {
+		out.WriteString(content[offset:edit.position])
+		if edit.position != previous && !edit.grouped {
+			out.WriteByte(' ')
+		}
+		fmt.Fprintf(&out, "[ID:%s]", edit.id)
+		offset, previous = edit.position, edit.position
+	}
+	out.WriteString(content[offset:])
+	return out.String(), stats, nil
+}
+
 type citationGroundingRejectionError struct {
 	reason string
 }
@@ -927,9 +1127,13 @@ func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, cont
 	var firstErr error
 	for i, batch := range batches {
 		bStart := time.Now()
-		out, err := citationGroundingCall(ctx, db, p, grounded, batch, i > 0)
+		out, proposal, err := citationGroundingCall(ctx, db, p, grounded, batch)
 		verdict, reason, errorKind := "error", "provider_error", "provider_error"
 		validation := citationGroundingValidation{}
+		var rejection *citationGroundingRejectionError
+		if errors.As(err, &rejection) {
+			verdict, reason, errorKind = "rejected", rejection.reason, "validation_rejected"
+		}
 		if err == nil {
 			// Marker-only grounding must not silently replace the first-pass answer
 			// (#20613). Deltas are buffered, so falling back never repeats text the
@@ -948,9 +1152,11 @@ func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, cont
 		}
 		common.Info(fmt.Sprintf(
 			"citation_grounding_batch idx=%d/%d batch_ms=%d chunks=%d model=%q changed=%t err=%q "+
-				"verdict=%s validation_reason=%s valid_citations=%d invalid_citations=%d added_citations=%d session=%q tenant=%q",
+				"verdict=%s validation_reason=%s valid_citations=%d invalid_citations=%d added_citations=%d session=%q tenant=%q "+
+				"format=insertions_json proposal_parsed=%t proposal_count=%d proposal_valid_ids=%d proposal_invalid_ids=%d",
 			i+1, len(batches), time.Since(bStart).Milliseconds(), len(batch), p.ModelID, verdict == "accepted", errorKind,
-			verdict, reason, validation.ValidCitations, validation.InvalidCitations, validation.AddedCitations, sessionID, tenantID))
+			verdict, reason, validation.ValidCitations, validation.InvalidCitations, validation.AddedCitations, sessionID, tenantID,
+			proposal.Parsed, proposal.Count, proposal.ValidIDs, proposal.InvalidIDs))
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("citation grounding batch %d/%d: %w", i+1, len(batches), err)
@@ -986,14 +1192,10 @@ func citationBatches(chunks []prompts.CitationSource, budget int) [][]prompts.Ci
 
 // citationGroundingCall makes one buffered grounding invocation over a
 // single batch of chunks.
-func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, content string, batch []prompts.CitationSource, keepExisting bool) (string, error) {
+func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, content string, batch []prompts.CitationSource) (string, citationInsertionStats, error) {
 	systemPrompt, _ := prompts.CitationPlusPrompt(batch)
-	systemPrompt += "\nThe user message is the complete answer to cite. Return that same answer with citation insertions only. Do not rewrite, summarize, translate, add explanations, or ask for more text. Use source IDs exactly as provided in this context.\n"
-	if keepExisting {
-		// Later batches see text already tagged by earlier ones; without
-		// this instruction models tend to strip prior [ID:] citations.
-		systemPrompt += "\nThe text already contains [ID:<ID>] citation tags; keep every existing tag unchanged.\n"
-	}
+	// Later batches receive earlier citations but return insertion proposals only.
+	// Existing markers are never regenerated and the strict guard rechecks them.
 	inv := getDefaultChatInvoker()
 	req := ChatInvokeRequest{
 		Driver:    p.Driver,
@@ -1019,12 +1221,12 @@ func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, conte
 		resp, err = inv.Invoke(ctx, db, req)
 	}
 	if err != nil {
-		return "", err
+		return "", citationInsertionStats{}, err
 	}
 	if resp == nil {
-		return "", fmt.Errorf("citation grounding returned no response")
+		return "", citationInsertionStats{}, fmt.Errorf("citation grounding returned no response")
 	}
-	return resp.Content, nil
+	return applyCitationInsertions(content, resp.Content, batch)
 }
 
 // chunksFromState extracts the recorded retrieval chunks from
