@@ -22,6 +22,27 @@ import (
 	"time"
 )
 
+func TestAgentVisibleContentIgnoresWhitespace(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		ctx := WithAgentMessageEmitter(t.Context(), func(string, string) {})
+		if deferred {
+			ctx = WithAgentDeltaSink(ctx, func(string, string) {})
+		}
+		EmitAgentMessage(ctx, " \n\t", "")
+		if AgentContentEventsEmittedRun(ctx) {
+			t.Fatalf("whitespace counted as visible content, deferred=%v", deferred)
+		}
+		EmitAgentMessage(ctx, "", "reasoning")
+		if AgentContentEventsEmittedRun(ctx) {
+			t.Fatalf("reasoning counted as visible content, deferred=%v", deferred)
+		}
+		EmitAgentMessage(ctx, "answer", "")
+		if !AgentContentEventsEmittedRun(ctx) {
+			t.Fatalf("answer did not count as visible content, deferred=%v", deferred)
+		}
+	}
+}
+
 func TestAgentMessageCallbacksRunOutsideStateLocks(t *testing.T) {
 	assertCompletes := func(name string, fn func()) {
 		t.Helper()

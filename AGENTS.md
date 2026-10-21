@@ -149,6 +149,7 @@ npm run type-check
 - Do not default to raw `go test`, `go build`, or IDE Run/Debug for Go in this repo. They often miss the required CGO flags and native static libraries (`office_oxide`, `pdfium-static`, `pdf_oxide`) that `build.sh` wires correctly.
 - After a Go build, execute the resulting binary's help command for each changed server mode; a successful link alone does not prove the binary starts. On this host, the original `build.sh` selected default LLD 18 and produced binaries that crashed before Go `main`; linking with LLD 20 started successfully. Verify the linker actually selected on Linux before trusting a new binary.
 - If Go native builds fail, inspect `build.sh` and `internal/development.md` before changing code. Common environment issues are missing downloaded native dependencies or an incompatible `ld.lld` on Linux.
+- A fresh worktree also needs its own `internal/binding/cpp/cmake-build-release/librag_tokenizer_c_api.a`; the shared native-library cache does not supply this archive. Build the current worktree's C++ target with CMake >= 4 before native Go tests instead of borrowing a tokenizer archive from another branch.
 
 ## Default review checklist
 - Remove instead of retaining `deprecated`, `legacy`, or compatibility-only code.
