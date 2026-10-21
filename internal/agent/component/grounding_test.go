@@ -416,6 +416,149 @@ func TestGroundingDoesNotReuseUnseenPriorSourceForNewClaims(t *testing.T) {
 	}
 }
 
+func TestFinalAnswerCitationValidation(t *testing.T) {
+	refs := []map[string]any{{"id": "9f3f90ff9766dcff", "chunk_id": "9f3f90ff9766dcff", "content": "Source"}, {"id": "0", "content": ""}, {"chunk_id": "alias", "content": "Source"}}
+	for _, tc := range []struct {
+		name, input, want, status        string
+		noRefs                           bool
+		removed, valid, literal, pending int
+	}{
+		{"observed_typo", "Áno [ID:9f3f90ff9766dcff][ID:9f3f90ff90ff9766dcff].", "Áno [ID:9f3f90ff9766dcff].", "invalid_removed", false, 1, 1, 0, 0},
+		{"valid_alias_and_empty_content", "Text [ID:alias][ID:0].", "Text [ID:alias][ID:0].", "valid", false, 0, 2, 0, 0},
+		{"fullwidth", "Text 【ID:0】 【ID:bad】.", "Text 【ID:0】.", "invalid_removed", false, 1, 1, 0, 0},
+		{"merged", "Text [ID:0, ID:alias].", "Text [ID:0, ID:alias].", "unresolved_markers", false, 0, 0, 0, 1},
+		{"no_refs", "Text [ID:0].", "Text.", "no_references", true, 1, 0, 0, 0},
+		{"no_citations", "Rok [2026], dokument ID:abc.", "Rok [2026], dokument ID:abc.", "no_citations", true, 0, 0, 0, 0},
+		{"partial_marker", "Text [ID:unfinished", "Text [ID:unfinished", "unresolved_markers", false, 0, 0, 0, 1},
+		{"partial_multiline", "Text [ID:unfinished\n\nDôležitý fakt [ID:0].", "Text [ID:unfinished\n\nDôležitý fakt [ID:0].", "unresolved_markers", false, 0, 1, 0, 1},
+		{"partial_nested", "Text [ID:unfinished dôležitý fakt [ID:0].", "Text [ID:unfinished dôležitý fakt [ID:0].", "unresolved_markers", false, 0, 1, 0, 1},
+		{"ambiguous_text", "Text [ID:Sem patrí dôležitá poznámka].", "Text [ID:Sem patrí dôležitá poznámka].", "unresolved_markers", false, 0, 0, 0, 1},
+		{"inline_code", "Ukážka `[ID:bad]`; text [ID:bad].", "Ukážka `[ID:bad]`; text.", "invalid_removed", false, 1, 0, 1, 0},
+		{"fenced_code", "```text\n[ID:bad]\n```\nText [ID:bad].", "```text\n[ID:bad]\n```\nText.", "invalid_removed", false, 1, 0, 1, 0},
+		{"link_destination", "[Súbor](https://example.test/a[ID:bad]) text [ID:bad].", "[Súbor](https://example.test/a[ID:bad]) text.", "invalid_removed", false, 1, 0, 1, 0},
+		{"bare_url", "https://example.test/a[ID:bad] text [ID:bad].", "https://example.test/a[ID:bad] text.", "invalid_removed", false, 1, 0, 1, 0},
+		{"escaped_literal", "Ukážka \\[ID:bad]; text [ID:bad].", "Ukážka \\[ID:bad]; text.", "invalid_removed", false, 1, 0, 1, 0},
+		{"bold", "**Áno [ID:bad]** [ID:0].", "**Áno** [ID:0].", "invalid_removed", false, 1, 1, 0, 0},
+		{"opening_emphasis", "Text [ID:bad]*ďalej* [ID:0].", "Text *ďalej* [ID:0].", "invalid_removed", false, 1, 1, 0, 0},
+		{"word_boundary", "word [ID:bad]next", "word next", "invalid_removed", false, 1, 0, 0, 0},
+		{"mismatched_brackets", "Text [ID:0】.", "Text [ID:0】.", "unresolved_markers", false, 0, 0, 0, 1},
+		{"image_payload", "![graf](https://example.test/image.png) [ID:bad]", "![graf](https://example.test/image.png) ", "invalid_removed", false, 1, 0, 0, 0},
+		{"bold_marker_only", "**[ID:bad]**", "****", "empty_after_cleanup", false, 1, 0, 0, 0},
+		{"heading_marker_only", "## [ID:bad]", "## ", "empty_after_cleanup", false, 1, 0, 0, 0},
+		{"marker_only", "[ID:bad]", "", "empty_after_cleanup", false, 1, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sources := refs
+			if tc.noRefs {
+				sources = nil
+			}
+			got := validateFinalAnswerCitations(tc.input, sources)
+			if got.Content != tc.want || got.Status != tc.status || got.RemovedCount != tc.removed || got.ValidCount != tc.valid || got.LiteralCount != tc.literal || got.UnresolvedCount != tc.pending {
+				t.Fatalf("validation=%+v, want content=%q status=%s removed=%d valid=%d literal=%d unresolved=%d", got, tc.want, tc.status, tc.removed, tc.valid, tc.literal, tc.pending)
+			}
+			if again := validateFinalAnswerCitations(got.Content, sources); again.Content != got.Content || again.RemovedCount != 0 {
+				t.Fatal("final cleanup must be idempotent")
+			}
+		})
+	}
+}
+
+func TestFinalCitationsDoNotInferPositionalIDs(t *testing.T) {
+	got := validateFinalAnswerCitations("Áno [ID:0].", []map[string]any{{"id": "9f3f90ff9766dcff", "content": "Source"}})
+	if got.Content != "Áno." || got.RemovedCount != 1 || got.ValidCount != 0 {
+		t.Fatalf("a source at position zero must not invent source ID 0: %+v", got)
+	}
+}
+
+func TestFinalCitationCleanupAfterGroundingFailure(t *testing.T) {
+	original := "Áno [ID:9f3f90ff9766dcff][ID:9f3f90ff90ff9766dcff]."
+	for _, providerError := range []bool{false, true} {
+		previous := getDefaultChatInvoker()
+		if providerError {
+			SetDefaultChatInvoker(&errInvoker{err: errors.New("provider failed")})
+		} else {
+			SetDefaultChatInvoker(&groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"A rewritten answer [ID:9f3f90ff9766dcff]."}}})
+		}
+		withAgentRunner(t, func(context.Context, AgentParam) (*schema.Message, error) {
+			return schema.AssistantMessage(original, nil), nil
+		})
+		state := canvas.NewCanvasState("run", "session")
+		state.SetRetrievalChunks([]map[string]any{{"id": "9f3f90ff9766dcff", "content": "Source"}})
+		var emitted []string
+		ctx := runtime.WithAgentMessageEmitter(runtime.WithState(t.Context(), state), func(content, _ string) {
+			if content != "" {
+				emitted = append(emitted, content)
+			}
+		})
+		out, err := NewAgentComponent(AgentParam{ModelID: "stub", Cite: true}).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
+		SetDefaultChatInvoker(previous)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "Áno [ID:9f3f90ff9766dcff]."
+		if out["content"] != want || out["citation_validation_status"] != "invalid_removed" || out["removed_citation_count"] != 1 || out["final_valid_citation_count"] != 1 || out["final_citation_count"] != 1 || out["citation_count_before_validation"] != 2 || out["unresolved_citation_count"] != 0 || len(emitted) != 1 || emitted[0] != want {
+			t.Fatalf("out=%v emitted=%q", out, emitted)
+		}
+	}
+}
+
+func TestFinalCitationEmissionBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, original, want, status      string
+		cite, streamed, noRefs, wantError bool
+		removed, unresolved               int
+	}{
+		{"no_refs", "Text [ID:0].", "Text.", "no_references", true, false, true, false, 1, 0},
+		{"cite_disabled", "Text [ID:bad].", "Text [ID:bad].", "", false, false, false, false, 0, 0},
+		{"already_streamed", "Text [ID:bad].", "Text [ID:bad].", "skipped_streamed", true, true, false, false, 0, 1},
+		{"marker_only", "[ID:bad]", "", "", true, false, true, true, 0, 0},
+		{"bold_marker_only", "**[ID:bad]**", "", "", true, false, true, true, 0, 0},
+		{"partial_marker", "Text [ID:unfinished", "Text [ID:unfinished", "unresolved_markers", true, false, false, false, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := getDefaultChatInvoker()
+			SetDefaultChatInvoker(&errInvoker{err: errors.New("provider failed")})
+			t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+			withAgentRunner(t, func(ctx context.Context, _ AgentParam) (*schema.Message, error) {
+				if tc.streamed {
+					runtime.EmitAgentMessage(ctx, tc.original, "")
+				}
+				return schema.AssistantMessage(tc.original, nil), nil
+			})
+			state := canvas.NewCanvasState("run", "session")
+			if !tc.noRefs {
+				state.SetRetrievalChunks([]map[string]any{{"id": "0", "content": "Source"}})
+			}
+			var emitted []string
+			ctx := runtime.WithAgentMessageEmitter(runtime.WithState(t.Context(), state), func(content, _ string) {
+				if content != "" {
+					emitted = append(emitted, content)
+				}
+			})
+			out, err := NewAgentComponent(AgentParam{ModelID: "stub", Cite: tc.cite}).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "no answer text after citation validation") || len(emitted) != 0 {
+					t.Fatalf("err=%v emitted=%q", err, emitted)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out["content"] != tc.want || len(emitted) != 1 || emitted[0] != tc.want {
+				t.Fatalf("out=%v emitted=%q", out, emitted)
+			}
+			if tc.cite {
+				if out["citation_validation_status"] != tc.status || out["removed_citation_count"] != tc.removed || out["unresolved_citation_count"] != tc.unresolved {
+					t.Fatalf("out=%v", out)
+				}
+			} else if _, present := out["citation_validation_status"]; present {
+				t.Fatal("cite=false must not silently change streamed citation behavior")
+			}
+		})
+	}
+}
+
 func TestGroundingPreservesTextAndCitationIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name, original, candidate, want, status string
