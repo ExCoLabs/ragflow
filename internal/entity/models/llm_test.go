@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 
 	einomodel "github.com/cloudwego/eino/components/model"
@@ -36,8 +37,8 @@ func TestEinoChatModelRequiresExecuteCodeTool(t *testing.T) {
 }
 
 func TestEinoChatModelAllowsFinalAnswerAfterToolResult(t *testing.T) {
-	name := "chat"
-	driver := &captureToolDriver{resp: &ChatResponse{}}
+	name, answer := "chat", "The chart is ready."
+	driver := &captureToolDriver{resp: &ChatResponse{Answer: &answer}}
 	model := NewEinoChatModel(NewChatModel(driver, &name, &APIConfig{}), nil)
 	bound, err := model.WithTools([]*schema.ToolInfo{{Name: "execute_code"}})
 	if err != nil {
@@ -362,6 +363,109 @@ func TestEinoChatModelGenerateHonorsOptsTools(t *testing.T) {
 	}
 	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "search_my_dateset" {
 		t.Fatalf("msg tool calls = %#v, want search_my_dateset", msg.ToolCalls)
+	}
+}
+
+func TestEinoChatModelRejectsEmptyFinalResponse(t *testing.T) {
+	key, name, blank, reasoning := "key", "chat", " \n", "Private reasoning must not appear in the error"
+	for _, tc := range []struct {
+		name string
+		resp *ChatResponse
+	}{
+		{"nil", nil},
+		{"empty", &ChatResponse{}},
+		{"whitespace", &ChatResponse{Answer: &blank}},
+		{"reasoning_only", &ChatResponse{Answer: &blank, ReasonContent: &reasoning}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, streaming := range []bool{false, true} {
+				driver := &captureToolDriver{resp: tc.resp}
+				mdl := NewEinoChatModel(NewChatModel(driver, &name, &APIConfig{ApiKey: &key}), nil)
+				var err error
+				if streaming {
+					var stream *schema.StreamReader[*schema.Message]
+					stream, err = mdl.Stream(t.Context(), []*schema.Message{schema.UserMessage("answer")})
+					if err == nil {
+						for {
+							_, err = stream.Recv()
+							if err != nil {
+								break
+							}
+						}
+						stream.Close()
+					}
+				} else {
+					_, err = mdl.Generate(t.Context(), []*schema.Message{schema.UserMessage("answer")})
+				}
+				if err == nil || err == io.EOF || !strings.Contains(err.Error(), "no answer content") {
+					t.Fatalf("streaming=%t: expected explicit empty-response error, got %v", streaming, err)
+				}
+				if strings.Contains(err.Error(), reasoning) {
+					t.Fatal("private reasoning leaked into error")
+				}
+			}
+		})
+	}
+}
+
+func TestEinoChatModelEmptyResponseFailsOver(t *testing.T) {
+	key, name, answer := "key", "chat", "Final answer"
+	for _, streaming := range []bool{false, true} {
+		empty := &captureToolDriver{resp: &ChatResponse{}}
+		healthy := &captureToolDriver{resp: &ChatResponse{Answer: &answer}}
+		mdl, err := NewFailoverEinoChatModel([]*ChatModel{
+			NewChatModel(empty, &name, &APIConfig{ApiKey: &key}),
+			NewChatModel(healthy, &name, &APIConfig{ApiKey: &key}),
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if streaming {
+			stream, err := mdl.Stream(t.Context(), []*schema.Message{schema.UserMessage("answer")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			msg, err := stream.Recv()
+			stream.Close()
+			if err != nil || msg.Content != answer {
+				t.Fatalf("failover stream: msg=%v err=%v", msg, err)
+			}
+		} else {
+			msg, err := mdl.Generate(t.Context(), []*schema.Message{schema.UserMessage("answer")})
+			if err != nil || msg.Content != answer {
+				t.Fatalf("failover generate: msg=%v err=%v", msg, err)
+			}
+		}
+		if empty.generateCalls+empty.streamCalls != 1 || healthy.generateCalls+healthy.streamCalls != 1 {
+			t.Fatal("each configured model must be tried at most once")
+		}
+	}
+}
+
+func TestEinoChatModelReasoningOnlyStreamDoesNotReplay(t *testing.T) {
+	key, name, empty, reasoning, answer := "key", "chat", "", "Reasoning", "Final answer"
+	first := &captureToolDriver{resp: &ChatResponse{Answer: &empty, ReasonContent: &reasoning}}
+	second := &captureToolDriver{resp: &ChatResponse{Answer: &answer}}
+	mdl, err := NewFailoverEinoChatModel([]*ChatModel{
+		NewChatModel(first, &name, &APIConfig{ApiKey: &key}),
+		NewChatModel(second, &name, &APIConfig{ApiKey: &key}),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := mdl.Stream(t.Context(), []*schema.Message{schema.UserMessage("answer")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	for err == nil {
+		_, err = stream.Recv()
+	}
+	if err == io.EOF || !strings.Contains(err.Error(), "reasoning_only") {
+		t.Fatalf("expected reasoning-only error, got %v", err)
+	}
+	if first.streamCalls != 1 || second.streamCalls != 0 || second.generateCalls != 0 {
+		t.Fatal("reasoning already streamed must not trigger a replay on another model")
 	}
 }
 

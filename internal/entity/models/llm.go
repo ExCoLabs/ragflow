@@ -467,7 +467,21 @@ func (m *EinoChatModel) generateOnce(ctx context.Context, cm *ChatModel, msgs []
 		zap.Int("tool_calls", toolCalls),
 		zap.Int("completion_tokens", usageCompletion(resp)),
 	)
-	return fromInternalResponse(resp), nil
+	msg := fromInternalResponse(resp)
+	if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 {
+		return nil, fmt.Errorf("%s: %w", *cm.ModelName, emptyModelResponseError(*cm.ModelName, "generate", len(msg.Content), len(msg.ReasoningContent)))
+	}
+	return msg, nil
+}
+
+func emptyModelResponseError(modelName, mode string, contentBytes, reasoningBytes int) error {
+	kind := "empty"
+	if reasoningBytes > 0 {
+		kind = "reasoning_only"
+	}
+	common.Info(fmt.Sprintf("model_empty_response model=%q mode=%s response_kind=%s content_bytes=%d reasoning_bytes=%d",
+		modelName, mode, kind, contentBytes, reasoningBytes))
+	return fmt.Errorf("model returned no answer content (%s)", kind)
 }
 
 // modelNameOf returns the model's display name (best-effort; nil-safe).
@@ -838,11 +852,12 @@ func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts
 
 	sr, sw := schema.Pipe[*schema.Message](1)
 	var sendMu sync.Mutex
-	var sentAny bool
+	var sentAny, hasAnswer bool
+	var contentBytes, reasoningBytes int
 	sender := func(content *string, reasoning *string) error {
 		sendMu.Lock()
 		defer sendMu.Unlock()
-		if content == nil && reasoning == nil {
+		if (content == nil || *content == "") && (reasoning == nil || *reasoning == "") {
 			return nil
 		}
 		// Provider drivers use the OpenAI-compatible [DONE] sentinel to
@@ -854,9 +869,12 @@ func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts
 		msg := &schema.Message{Role: schema.Assistant}
 		if content != nil {
 			msg.Content = *content
+			contentBytes += len(*content)
+			hasAnswer = hasAnswer || strings.TrimSpace(*content) != ""
 		}
 		if reasoning != nil {
 			msg.ReasoningContent = *reasoning
+			reasoningBytes += len(*reasoning)
 		}
 		if closed := sw.Send(msg, nil); closed {
 			return fmt.Errorf("models: stream closed before send completed")
@@ -920,6 +938,17 @@ func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts
 			attemptCfg.ToolCallsResult = nil
 			attemptCfg.UsageResult = nil
 			err := cm.ModelDriver.ChatStreamlyWithSender(ctx, *cm.ModelName, internalMessage, cm.APIConfig, attemptCfg, nil, sender)
+			sendMu.Lock()
+			emptyAnswer := !hasAnswer
+			answerSize, reasoningSize := contentBytes, reasoningBytes
+			sendMu.Unlock()
+			hasToolCalls := attemptCfg.ToolCallsResult != nil && len(*attemptCfg.ToolCallsResult) > 0
+			if err == nil && emptyAnswer && !hasToolCalls {
+				if attemptCfg.UsageResult != nil && attemptCfg.UsageResult.TotalTokens > 0 {
+					recordUsage(ctx, *cm.ModelName, attemptCfg.UsageResult)
+				}
+				err = emptyModelResponseError(*cm.ModelName, "stream", answerSize, reasoningSize)
+			}
 			if err != nil {
 				// Same user-visible shape as generateOnce's error: lead with the
 				// model name and keep the provider's own sentence. Tagging it HERE
