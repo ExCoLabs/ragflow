@@ -13,7 +13,98 @@ import (
 	"ragflow/internal/agent/runtime"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
+
+	"gorm.io/gorm"
 )
+
+type failedDeferredAgent struct {
+	content string
+	calls   *int
+}
+
+func (a failedDeferredAgent) Invoke(context.Context, *gorm.DB, map[string]any) (map[string]any, error) {
+	return map[string]any{"content": &runtime.DeferredStream{
+		Open: func(ctx context.Context, sink runtime.AgentDeltaSink) (map[string]any, error) {
+			*a.calls++
+			ctx = runtime.WithAgentDeltaSink(ctx, sink)
+			runtime.EmitAgentMessage(ctx, "", "planning")
+			runtime.EmitAgentMessage(ctx, a.content, "")
+			return nil, errors.New("model unavailable")
+		},
+	}}, nil
+}
+
+func TestRunAgent_DeferredFailureAfterDeltas(t *testing.T) {
+	for _, content := range []string{"", "\n \n", "partial answer"} {
+		t.Run(fmt.Sprintf("content=%q", content), func(t *testing.T) {
+			testDB := setupServiceTestDB(t)
+			if err := testDB.AutoMigrate(&entity.UserCanvasVersion{}, &entity.TenantModelProvider{}, &entity.TenantModelInstance{}, &entity.TenantModel{}); err != nil {
+				t.Fatal(err)
+			}
+			originalDB := dao.DB
+			dao.DB = testDB
+			t.Cleanup(func() { dao.DB = originalDB })
+			originalFactory := runtime.DefaultFactory()
+			calls := 0
+			runtime.SetDefaultFactory(func(name string, params map[string]any) (runtime.Component, error) {
+				if name == "Agent" {
+					return failedDeferredAgent{content: content, calls: &calls}, nil
+				}
+				return originalFactory(name, params)
+			})
+			t.Cleanup(func() { runtime.SetDefaultFactory(originalFactory) })
+			for _, row := range []any{
+				&entity.TenantModelProvider{ID: "provider-fail", UserID: "user-1", TenantID: "tenant-1", ProviderName: "OpenAI-API-Compatible"},
+				&entity.TenantModelInstance{ID: "instance-fail", ProviderID: "provider-fail", InstanceName: "local", Extra: "{}"},
+				&entity.TenantModel{ID: "model-fail", ModelName: "stub", ProviderID: "provider-fail", InstanceID: "instance-fail", ModelType: int(entity.ModelTypeChat), Status: "active", Extra: "{}"},
+			} {
+				if err := testDB.Create(row).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			dsl := map[string]any{"components": map[string]any{
+				"begin":           map[string]any{"obj": map[string]any{"component_name": "Begin", "params": map[string]any{}}, "downstream": []any{"Agent:failure"}},
+				"Agent:failure":   map[string]any{"obj": map[string]any{"component_name": "Agent", "params": map[string]any{"llm_id": "model-fail"}}, "upstream": []any{"begin"}, "downstream": []any{"Message:failure"}},
+				"Message:failure": map[string]any{"obj": map[string]any{"component_name": "Message", "params": map[string]any{"content": []any{"{Agent:failure@content}"}}}, "upstream": []any{"Agent:failure"}},
+			}}
+			makeCanvasWithDSL(t, "canvas-stream-fail", "user-1", "tenant-1", "v-stream-fail", dsl)
+			tracker, _ := newAgentCancelTracker(t)
+			svc := NewAgentServiceWithOptions(nil, nil, tracker)
+			events, err := svc.RunAgent(WithAgentSessionID(t.Context(), "session-stream-fail"), "user-1", "canvas-stream-fail", "session-stream-fail", "", "hello", nil)
+			if err != nil {
+				t.Fatalf("RunAgent: %v", err)
+			}
+			messages, _, errs, ends, done := drainAgentEvents(t, events)
+			var visible strings.Builder
+			thinking := false
+			for _, message := range messages {
+				if message.StartToThink {
+					thinking = true
+				}
+				if message.EndToThink {
+					thinking = false
+					continue
+				}
+				if !thinking {
+					visible.WriteString(message.Content)
+				}
+			}
+			failure := "**ERROR**: model unavailable"
+			want := failure
+			if strings.TrimSpace(content) != "" {
+				want = content + "\n\n" + failure
+			}
+			if got := strings.TrimSpace(visible.String()); got != want {
+				t.Fatalf("visible answer = %q, want %q", got, want)
+			}
+			if calls != 1 || len(errs) != 0 || ends != 1 || !done || thinking {
+				t.Fatalf("calls=%d errors=%v ends=%d done=%v thinking=%v", calls, errs, ends, done, thinking)
+			}
+			assertPersistedAssistantFailure(t, "session-stream-fail", "canvas-stream-fail", want)
+			assertRunMarkedFailed(t, tracker, "canvas-stream-fail", "session-stream-fail")
+		})
+	}
+}
 
 func TestDeferredAgentStreamFailureText(t *testing.T) {
 	deferred := &runtime.DeferredStreamError{Text: "**ERROR**: [GraphRunError] model unavailable"}

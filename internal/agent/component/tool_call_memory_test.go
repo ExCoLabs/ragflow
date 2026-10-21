@@ -58,7 +58,8 @@ func TestAddToolCallMemory_SummarizesAndAppendsToState(t *testing.T) {
 	withAgentRunner(t, func(_ context.Context, _ AgentParam) (*schema.Message, error) {
 		// Final message with one tool call.
 		return &schema.Message{
-			Role: schema.Assistant,
+			Role:    schema.Assistant,
+			Content: "answer from tools",
 			ToolCalls: []schema.ToolCall{{
 				ID: "1", Type: "function",
 				Function: schema.FunctionCall{
@@ -103,7 +104,8 @@ func TestAddToolCallMemory_LLMFailure(t *testing.T) {
 
 	withAgentRunner(t, func(_ context.Context, _ AgentParam) (*schema.Message, error) {
 		return &schema.Message{
-			Role: schema.Assistant,
+			Role:    schema.Assistant,
+			Content: "answer from tools",
 			ToolCalls: []schema.ToolCall{{
 				ID: "1", Type: "function",
 				Function: schema.FunctionCall{Name: "search"},

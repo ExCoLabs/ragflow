@@ -1682,6 +1682,9 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	artifacts := collectArtifactsFromToolCalls(ctx, msg)
 	artifactMD := formatArtifactMarkdown(artifacts, content)
 	finalContent := content + artifactMD
+	if strings.TrimSpace(finalContent) == "" {
+		return nil, fmt.Errorf("component: Agent.Invoke: no final answer content")
+	}
 	contentStreamed := runtime.AgentContentEventsEmittedRun(ctx)
 	var citationValidation *finalCitationValidation
 	if p.Cite {

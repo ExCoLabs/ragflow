@@ -171,6 +171,41 @@ describe('useSendAgentMessage session-scoped stream gating', () => {
   });
 });
 
+describe('findMessageFromList failed streams', () => {
+  it.each(['', '\n \n', 'partial answer'])(
+    'keeps the error outside thinking after %j',
+    (partial) => {
+      const failure = '**ERROR**: model unavailable';
+      const events = [
+        {
+          ...messageFrame('session-a', ''),
+          data: { content: '', start_to_think: true },
+        },
+        messageFrame('session-a', 'planning'),
+        {
+          ...messageFrame('session-a', ''),
+          data: { content: '', end_to_think: true },
+        },
+        messageFrame('session-a', partial),
+        messageFrame('session-a', '\n\n' + failure),
+        {
+          ...messageFrame('session-a', ''),
+          event: MessageEventType.MessageEnd,
+          data: {},
+        },
+      ];
+      const result = findMessageFromList(events as any);
+      expect(result.content).toBe(
+        '<think>planning</think>' + partial + '\n\n' + failure,
+      );
+      expect(result.content.indexOf(failure)).toBeGreaterThan(
+        result.content.indexOf('</think>'),
+      );
+      expect(result.content.split(failure)).toHaveLength(2);
+    },
+  );
+});
+
 describe('findMessageFromList memory errors', () => {
   it.each([
     [
