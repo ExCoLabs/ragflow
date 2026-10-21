@@ -2322,11 +2322,17 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 				}
 				return state, err
 			}
-			if failureText := deferredAgentStreamFailureText(err); failureText != "" {
+			failureText := deferredAgentStreamFailureText(err)
+			if isAgentRunTimeout(err) {
+				failureText = agentRunFailureText(err)
+			}
+			if failureText != "" {
 				visibleAnswer := answer
 				var deferred *runtime.DeferredStreamError
 				if errors.As(err, &deferred) && deferred.Content != "" {
 					visibleAnswer = deferred.Content
+				} else if streamed := runtime.GetAgentStreamedContent(ctx2); streamed != "" {
+					visibleAnswer = streamed
 				}
 				// Emit even when events were suppressed: a run that ends
 				// with no visible content must surface the failure text,
@@ -2941,6 +2947,18 @@ func tenantIDFromRoot(root map[string]any) string {
 	return ""
 }
 
+func isAgentRunTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "deadline exceeded") || strings.Contains(message, "timeout")
+}
+
 // agentRunFailureText renders a visible technical-error message for run
 // failures that produced no content, so the client sees a reason instead
 // of a silently closed stream. Mirrors the TECHNICKÁ CHYBA label the
@@ -2953,7 +2971,7 @@ func agentRunFailureText(err error) string {
 	switch {
 	case strings.Contains(msg, "exceeds max steps"):
 		return "**TECHNICKÁ CHYBA**: Agent nedokončil odpoveď — vyčerpal limit interných krokov (max_rounds). Skúste otázku zopakovať alebo ju spresniť."
-	case strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "timeout"):
+	case isAgentRunTimeout(err):
 		return "**TECHNICKÁ CHYBA**: Modelový endpoint neodpovedal včas (timeout). Skúste otázku zopakovať."
 	case strings.Contains(msg, "no choices in response"):
 		return "**TECHNICKÁ CHYBA**: Modelový endpoint vrátil prázdnu odpoveď. Skúste otázku zopakovať."
