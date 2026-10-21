@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"ragflow/internal/agent/runtime"
 	"ragflow/internal/common"
 	"slices"
 	"strings"
@@ -273,6 +274,77 @@ func TestMCPToolAdapter_InvokableRunNotYetImplemented(t *testing.T) {
 	if !strings.Contains(err.Error(), "x") {
 		t.Errorf("error message should mention tool name 'x'; got %v", err)
 	}
+}
+
+func TestMCPToolAdapterDocumentReferences(t *testing.T) {
+	defer mcpLoopbackOverride(t)()
+	payload := `{"reference":{"chunks":[{"chunk_id":"ck-1","content":"Visible excerpt","document_id":"doc-1","document_name":"report.pdf","dataset_id":"kb-1"}]}}`
+	for _, isError := range []bool{false, true} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct{ Method string }
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			switch req.Method {
+			case "initialize":
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{}}`))
+			case "tools/call":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jsonrpc": "2.0", "id": 2,
+					"result": map[string]any{"content": []map[string]any{{"type": "text", "text": payload}}, "isError": isError},
+				})
+			default:
+				w.WriteHeader(http.StatusAccepted)
+			}
+		}))
+		state := runtime.NewCanvasState("run", "session")
+		adapter := NewMCPToolAdapterFull(mcpclient.Tool{Name: "document_read"}, srv.URL, nil, 2*time.Second, srv.Client())
+		adapter.SetVisibleName("document_read_2")
+		out, err := adapter.InvokableRun(runtime.WithState(t.Context(), state), `{}`)
+		srv.Close()
+		if isError {
+			if err == nil || len(state.GetRetrievalChunks()) != 0 {
+				t.Fatal("MCP error must not register references")
+			}
+		} else if err != nil || out != payload || len(state.GetRetrievalChunks()) != 1 {
+			t.Fatalf("successful MCP response not recorded: out=%s err=%v refs=%v", out, err, state.GetRetrievalChunks())
+		}
+	}
+}
+
+func TestMCPDocumentReferences(t *testing.T) {
+	payload := `{"reference":{"chunks":[{"chunk_id":"ck-1","content":"Visible excerpt","document_id":"doc-1","document_name":"report.pdf","dataset_id":"kb-1"}]}}`
+	for _, name := range []string{"document_search", "document_read"} {
+		t.Run(name, func(t *testing.T) {
+			state := runtime.NewCanvasState("run", "session")
+			ctx := runtime.WithState(t.Context(), state)
+			state.SetRetrievalReferences([]map[string]any{{"id": "existing", "content": "Earlier retrieval"}}, nil)
+			recordMCPDocumentReferences(ctx, name, payload)
+			recordMCPDocumentReferences(ctx, name, payload)
+			chunks := state.GetRetrievalChunks()
+			if len(chunks) != 2 {
+				t.Fatalf("chunks=%v; expected previous retrieval and one deduplicated MCP chunk", chunks)
+			}
+			if chunks[1]["id"] != "ck-1" || chunks[1]["document_name"] != "report.pdf" || chunks[1]["content"] != "Visible excerpt" {
+				t.Fatalf("unexpected chunk: %v", chunks[1])
+			}
+			if len(state.GetRetrievalDocAggs()) != 1 {
+				t.Fatal("expected document aggregate for MCP reference")
+			}
+		})
+	}
+	for _, tc := range []struct{ name, payload string }{
+		{"file_query", payload},
+		{"document_read", "not JSON"},
+		{"document_search", `{"chunks":[0,3],"text":"Unstructured old result"}`},
+		{"document_read", `{"reference":{"chunks":[{"chunk_id":"bad","content":"No document identity"}]}}`},
+	} {
+		state := runtime.NewCanvasState("run", "session")
+		recordMCPDocumentReferences(runtime.WithState(t.Context(), state), tc.name, tc.payload)
+		if len(state.GetRetrievalChunks()) != 0 {
+			t.Fatalf("invalid or unrelated result registered: %s", tc.payload)
+		}
+	}
+	recordMCPDocumentReferences(t.Context(), "document_read", payload)
 }
 
 // TestBuildMCPToolAdapters_Empty: empty input → empty output.
