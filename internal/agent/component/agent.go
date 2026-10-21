@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -561,12 +563,132 @@ func addToolCallMemory(ctx context.Context, db *gorm.DB, p AgentParam, msg *sche
 	return strings.TrimSpace(resp.Content), nil
 }
 
-// citationGroundingMarkerRe matches canonical [ID:…] / [ID: …] markers that
-// the grounding call is asked to insert. IDs may be numeric or non-numeric
-// (e.g. "simple-0", "ck-1"). Used only to decide whether a grounding
-// response still has answer text after the markers are removed. The ID:
-// prefix is required so bare brackets like [2026] are not treated as markers.
-var citationGroundingMarkerRe = regexp.MustCompile(`\[ID:\s*[^\]]+\]`)
+// citationGroundingMarkerRe extracts candidate [ID:…] / [ID: …] markers.
+// IDs may be numeric or non-numeric (e.g. "simple-0", "ck-1"); canonical
+// syntax and source membership are checked separately. Extraction is shared
+// by text preservation and citation validation. The ID: prefix is required
+// so bare brackets like [2026] are not treated as markers.
+var citationGroundingMarkerRe = regexp.MustCompile(`\[ID:[^\]]*\]`)
+var citationGroundingIDRe = regexp.MustCompile(`^\[ID:\s*([^\s,\[\]]+)\s*\]$`)
+var citationGroundingStripRe = regexp.MustCompile(`[ \t]*\[ID:[^\]]*\]`)
+
+type citationGroundingValidation struct {
+	Reason           string
+	ValidCitations   int
+	InvalidCitations int
+	AddedCitations   int
+}
+
+type citationGroundingRejectionError struct {
+	reason string
+}
+
+func (e *citationGroundingRejectionError) Error() string {
+	return "citation grounding validation rejected: " + e.reason
+}
+
+func citationGroundingText(text string) string {
+	return strings.Join(strings.Fields(citationGroundingStripRe.ReplaceAllString(text, "")), " ")
+}
+
+func citationGroundingAnchors(text string, sourceIDs map[string]bool) map[string]int {
+	anchors := make(map[string]int)
+	offset, prefixLength := 0, 0
+	space, preservedSpace := false, false
+	for _, span := range citationGroundingMarkerRe.FindAllStringIndex(text, -1) {
+		fragment := text[offset:span[0]]
+		for len(fragment) > 0 {
+			r, size := utf8.DecodeRuneInString(fragment)
+			fragment = fragment[size:]
+			if unicode.IsSpace(r) {
+				space = true
+				preservedSpace = preservedSpace || (r != ' ' && r != '\t')
+				continue
+			}
+			if space && prefixLength > 0 {
+				prefixLength++
+			}
+			prefixLength += size
+			space, preservedSpace = false, false
+		}
+		match := citationGroundingIDRe.FindStringSubmatch(text[span[0]:span[1]])
+		if len(match) == 2 && sourceIDs[match[1]] {
+			anchors[fmt.Sprintf("%d:%s", prefixLength, match[1])]++
+		}
+		space = preservedSpace
+		offset = span[1]
+	}
+	return anchors
+}
+
+func validateCitationGrounding(before, after string, batch []prompts.CitationSource, sourceIDs map[string]bool) citationGroundingValidation {
+	allowedIDs := make(map[string]bool)
+	batchIDs := make(map[string]bool)
+	for _, source := range batch {
+		if source.ID != "" && source.Content != "" {
+			allowedIDs[source.ID] = true
+			batchIDs[source.ID] = true
+		}
+	}
+	for _, marker := range citationGroundingMarkerRe.FindAllString(before, -1) {
+		match := citationGroundingIDRe.FindStringSubmatch(marker)
+		if len(match) == 2 && sourceIDs[match[1]] {
+			allowedIDs[match[1]] = true
+		}
+	}
+	validation := citationGroundingValidation{}
+	for _, marker := range citationGroundingMarkerRe.FindAllString(after, -1) {
+		match := citationGroundingIDRe.FindStringSubmatch(marker)
+		switch {
+		case len(match) != 2:
+			validation.InvalidCitations++
+			validation.Reason = "malformed_citation"
+		case !allowedIDs[match[1]]:
+			validation.InvalidCitations++
+			if validation.Reason == "" {
+				validation.Reason = "unknown_citation"
+			}
+		default:
+			validation.ValidCitations++
+		}
+	}
+	if validation.Reason != "" {
+		return validation
+	}
+	if !citationGroundingHasSubstantiveText(after) {
+		validation.Reason = "empty_response"
+		return validation
+	}
+	if citationGroundingText(before) != citationGroundingText(after) {
+		validation.Reason = "content_changed"
+		return validation
+	}
+	previous := citationGroundingAnchors(before, sourceIDs)
+	next := citationGroundingAnchors(after, sourceIDs)
+	previousCount := 0
+	for anchor, count := range previous {
+		if next[anchor] < count {
+			validation.Reason = "existing_citation_changed"
+			return validation
+		}
+		previousCount += count
+	}
+	for anchor, count := range next {
+		if count > previous[anchor] {
+			_, id, _ := strings.Cut(anchor, ":")
+			if !batchIDs[id] {
+				validation.Reason = "source_not_in_batch"
+				return validation
+			}
+		}
+	}
+	validation.AddedCitations = validation.ValidCitations - previousCount
+	if validation.AddedCitations > 0 && citationGroundingStripRe.ReplaceAllString(before, "") != citationGroundingStripRe.ReplaceAllString(after, "") {
+		validation.Reason = "format_changed"
+		validation.AddedCitations = 0
+	}
+	return validation
+}
 
 // citationGroundingHasSubstantiveText reports whether s contains any
 // non-whitespace text once citation markers are stripped. Marker-only
@@ -617,15 +739,45 @@ func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, cont
 		}
 		p.ModelID, p.Driver, p.APIKey, p.BaseURL = modelID, driver, apiKey, baseURL
 	}
+	sourceIDs := make(map[string]bool)
+	for _, source := range chunks {
+		if source.ID != "" && source.Content != "" {
+			sourceIDs[source.ID] = true
+		}
+	}
+	var sessionID, tenantID string
+	if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
+		sessionID, _ = state.Sys["session_id"].(string)
+		tenantID, _ = state.Sys["tenant_id"].(string)
+	}
 	grounded := content
 	var firstErr error
 	for i, batch := range batches {
 		bStart := time.Now()
 		out, err := citationGroundingCall(ctx, db, p, grounded, batch, i > 0)
+		verdict, reason, errorKind := "error", "provider_error", "provider_error"
+		validation := citationGroundingValidation{}
+		if err == nil {
+			// Marker-only grounding must not silently replace the first-pass answer
+			// (#20613). Deltas are buffered, so falling back never repeats text the
+			// client already received.
+			validation = validateCitationGrounding(grounded, out, batch, sourceIDs)
+			switch {
+			case validation.Reason != "":
+				verdict, reason, errorKind = "rejected", validation.Reason, "validation_rejected"
+				err = &citationGroundingRejectionError{reason: reason}
+			case validation.AddedCitations == 0:
+				verdict, reason, errorKind = "unchanged", "no_new_citations", "<nil>"
+				out = grounded
+			default:
+				verdict, reason, errorKind = "accepted", "ok", "<nil>"
+			}
+		}
 		common.Info(fmt.Sprintf(
-			"citation_grounding_batch idx=%d/%d batch_ms=%d chunks=%d model=%s changed=%t err=%v",
-			i+1, len(batches), time.Since(bStart).Milliseconds(), len(batch),
-			p.ModelID, err == nil && out != grounded, err))
+			"citation_grounding_batch idx=%d/%d batch_ms=%d chunks=%d model=%q changed=%t err=%q "+
+				"verdict=%s validation_reason=%s valid_citations=%d invalid_citations=%d added_citations=%d session=%q tenant=%q",
+			i+1, len(batches), time.Since(bStart).Milliseconds(), len(batch), p.ModelID, verdict == "accepted", errorKind,
+			verdict, reason, validation.ValidCitations, validation.InvalidCitations, validation.AddedCitations, sessionID, tenantID))
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("citation grounding batch %d/%d: %w", i+1, len(batches), err)
@@ -663,6 +815,7 @@ func citationBatches(chunks []prompts.CitationSource, budget int) [][]prompts.Ci
 // single batch of chunks.
 func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, content string, batch []prompts.CitationSource, keepExisting bool) (string, error) {
 	systemPrompt, _ := prompts.CitationPlusPrompt(batch)
+	systemPrompt += "\nThe user message is the complete answer to cite. Return that same answer with citation insertions only. Do not rewrite, summarize, translate, add explanations, or ask for more text. Use source IDs exactly as provided in this context.\n"
 	if keepExisting {
 		// Later batches see text already tagged by earlier ones; without
 		// this instruction models tend to strip prior [ID:] citations.
@@ -697,12 +850,6 @@ func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, conte
 	}
 	if resp == nil {
 		return "", fmt.Errorf("citation grounding returned no response")
-	}
-	// Marker-only grounding must not silently replace the first-pass answer
-	// (#20613). Deltas are buffered, so falling back never repeats text the
-	// client already received.
-	if !citationGroundingHasSubstantiveText(resp.Content) {
-		return content, nil
 	}
 	return resp.Content, nil
 }
@@ -1349,7 +1496,13 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 				// Grounded deltas are buffered inside applyCitationGrounding,
 				// so a failed call never reached the client — the original
 				// answer is safe to emit.
-				groundingStatus = "error: " + gErr.Error()
+				content = grounded
+				var rejection *citationGroundingRejectionError
+				if errors.As(gErr, &rejection) {
+					groundingStatus = "rejected: " + rejection.reason
+				} else {
+					groundingStatus = "error: " + gErr.Error()
+				}
 			}
 		}
 	}
@@ -1430,7 +1583,7 @@ func (c *AgentComponent) Outputs() map[string]string {
 		"thinking":         "Model reasoning content, when the provider returns it separately.",
 		"tool_calls":       "One entry per tool call observed during the run",
 		"artifacts":        "Artifacts collected from tool responses (empty in P0)",
-		"grounding_status": "'applied' | 'no_chunks' | 'error: <msg>' (present when cite=true).",
+		"grounding_status": "'applied' | 'unchanged' | 'no_chunks' | 'empty_content' | 'rejected: <reason>' | 'error: <msg>' (present when cite=true).",
 	}
 }
 
