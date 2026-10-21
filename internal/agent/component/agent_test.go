@@ -446,6 +446,32 @@ func TestReactCheckerStreamsThinkingBeforeAgentReturns(t *testing.T) {
 	<-emitDone
 }
 
+func TestAgent_RejectsEmptyFinalAnswer(t *testing.T) {
+	for _, message := range []*schema.Message{
+		{Role: schema.Assistant},
+		{Role: schema.Assistant, Content: " \n\t"},
+		{Role: schema.Assistant, ReasoningContent: "reasoning only"},
+		{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "unfinished", Function: schema.FunctionCall{Name: "search"}}}},
+	} {
+		for _, cite := range []bool{false, true} {
+			t.Run(fmt.Sprintf("message=%+v/cite=%v", message, cite), func(t *testing.T) {
+				calls := 0
+				withAgentRunner(t, func(context.Context, AgentParam) (*schema.Message, error) {
+					calls++
+					return message, nil
+				})
+				_, err := NewAgentComponent(AgentParam{ModelID: "stub", UserPrompt: "hello", Cite: cite}).Invoke(t.Context(), nil, nil)
+				if err == nil || !strings.Contains(err.Error(), "no final answer content") {
+					t.Fatalf("Invoke error=%v, want empty final answer error", err)
+				}
+				if calls != 1 {
+					t.Fatalf("runner calls=%d, want no retry", calls)
+				}
+			})
+		}
+	}
+}
+
 func TestAgent_EmitsThinking(t *testing.T) {
 	withAgentRunner(t, func(_ context.Context, _ AgentParam) (*schema.Message, error) {
 		return &schema.Message{

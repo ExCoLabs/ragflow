@@ -178,9 +178,9 @@ func TestApplyMetaDataFilterManualNotInArray(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No dataset IDs means the request uses the in-memory filter.
-	got, empty := ApplyMetaDataFilter(t.Context(), filter, metas, "", nil, []string{"doc1", "doc3"}, nil)
-	if !slices.Equal(got, []string{"doc3"}) || empty {
-		t.Errorf("ApplyMetaDataFilter() = (%v, %v), want ([doc3], false)", got, empty)
+	got := ApplyMetaDataFilter(t.Context(), filter, metas, "", nil, []string{"doc1", "doc3"}, nil)
+	if !slices.Equal(got, []string{"doc3"}) {
+		t.Errorf("ApplyMetaDataFilter() = %v, want [doc3]", got)
 	}
 }
 

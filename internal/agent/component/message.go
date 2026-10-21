@@ -457,14 +457,14 @@ func (m *MessageComponent) resolveDeferredTemplate(ctx context.Context, text str
 		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return "", true, &runtime.DeferredStreamError{Err: err}
+				return "", true, &runtime.DeferredStreamError{Err: err, Content: out.String() + visible.String()}
 			}
 			// Eino reuses nested graph errors, discarding outer wrappers; keep
 			// ordinary stream failures as text so the deferred marker survives.
-			return "", true, &runtime.DeferredStreamError{Text: "**ERROR**: " + runtime.MarkdownSafeErrorText(err)}
+			return "", true, &runtime.DeferredStreamError{Text: "**ERROR**: " + runtime.MarkdownSafeErrorText(err), Content: out.String() + visible.String()}
 		}
 		if resultErr, _ := result["_ERROR"].(string); strings.TrimSpace(resultErr) != "" {
-			return "", true, &runtime.DeferredStreamError{Text: resultErr}
+			return "", true, &runtime.DeferredStreamError{Text: resultErr, Content: out.String() + visible.String()}
 		}
 		finalText := visible.String()
 		if result != nil {

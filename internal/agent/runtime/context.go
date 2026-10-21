@@ -319,7 +319,7 @@ func AgentContentEventsEmittedRun(ctx context.Context) bool {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return state.agentContent.Len() > 0
+	return strings.TrimSpace(state.agentContent.String()) != ""
 }
 
 // AgentMessageEventsSuppressedRun reports whether any Agent invocation

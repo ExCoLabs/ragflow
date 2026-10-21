@@ -2324,15 +2324,20 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 			}
 			if failureText := deferredAgentStreamFailureText(err); failureText != "" {
 				visibleAnswer := answer
+				var deferred *runtime.DeferredStreamError
+				if errors.As(err, &deferred) && deferred.Content != "" {
+					visibleAnswer = deferred.Content
+				}
 				// Emit even when events were suppressed: a run that ends
 				// with no visible content must surface the failure text,
 				// otherwise the stream closes silently.
-				emittedNow := false
-				if visibleAnswer == "" && !contentEventsEmitted {
-					emitAgentMessageEvents(emit, failureText, thinking, referencePayload)
-					visibleAnswer = failureText
-					emittedNow = true
+				if strings.TrimSpace(visibleAnswer) == "" {
+					visibleAnswer = ""
+				} else {
+					failureText = "\n\n" + failureText
 				}
+				emitAgentMessageEvents(emit, failureText, "", referencePayload)
+				visibleAnswer += failureText
 				if persistErr := s.persistAgentRunSession(ctx, canvasID, userID, sessionID, messageID, userInput, visibleAnswer, thinking, referencePayload, dsl, state, visibleAnswer != ""); persistErr != nil {
 					s.markAgentSessionFailed(ctx2, canvasID, userID, sessionID, "persist session: "+persistErr.Error())
 					s.markRunFailed(ctx2, runID, "persist session: "+persistErr.Error())
@@ -2340,13 +2345,11 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 						fmt.Errorf("persist agent session: %w: %w", persistErr, ErrAgentStorageError),
 					)
 				}
-				if emittedNow || shouldEmitMessage {
-					meData, _ := json.Marshal(canvas.MessageEndEvent{
-						Attachment: attachment,
-						Reference:  referencePayload,
-					})
-					emit("message_end", string(meData))
-				}
+				meData, _ := json.Marshal(canvas.MessageEndEvent{
+					Attachment: attachment,
+					Reference:  referencePayload,
+				})
+				emit("message_end", string(meData))
 				s.markAgentSessionFailed(ctx2, canvasID, userID, sessionID, "invoke: "+err.Error())
 				s.markRunFailed(ctx2, runID, "invoke: "+err.Error())
 				return state, nil

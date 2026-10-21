@@ -83,8 +83,9 @@ func NewUserFacingError(message string) error {
 // handler surfaces FailureText in the chat message flow instead of an
 // error frame; match with errors.As.
 type DeferredStreamError struct {
-	Text string
-	Err  error
+	Text    string
+	Content string
+	Err     error
 }
 
 func (e *DeferredStreamError) Error() string {
