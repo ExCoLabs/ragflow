@@ -32,6 +32,9 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
+	"github.com/yuin/goldmark"
+	markdownast "github.com/yuin/goldmark/ast"
+	markdowntext "github.com/yuin/goldmark/text"
 	"gorm.io/gorm"
 
 	"ragflow/internal/agent/chat"
@@ -571,6 +574,176 @@ func addToolCallMemory(ctx context.Context, db *gorm.DB, p AgentParam, msg *sche
 var citationGroundingMarkerRe = regexp.MustCompile(`\[ID:[^\]]*\]`)
 var citationGroundingIDRe = regexp.MustCompile(`^\[ID:\s*([^\s,\[\]]+)\s*\]$`)
 var citationGroundingStripRe = regexp.MustCompile(`[ \t]*\[ID:[^\]]*\]`)
+
+var finalCitationMarkerRe = regexp.MustCompile(`[\[【][ \t]*ID:[^\[\]【】\r\n]*[\]】]`)
+var finalCitationPrefixRe = regexp.MustCompile(`[\[【][ \t]*ID:`)
+var finalCitationURLRe = regexp.MustCompile(`(?i)\b(?:https?|ftp|file|smb)://[^\s<>"']+`)
+var finalCitationIDRe = regexp.MustCompile(`^(?:\[\s*ID:\s*([^\s,\[\]【】]+)\s*\]|【\s*ID:\s*([^\s,\[\]【】]+)\s*】)$`)
+
+type finalCitationValidation struct {
+	Content         string
+	Status          string
+	BeforeCount     int
+	ValidCount      int
+	RemovedCount    int
+	UnresolvedCount int
+	LiteralCount    int
+}
+
+func finalCitationTextRanges(source []byte) ([][2]int, map[int]bool) {
+	document := goldmark.New().Parser().Parse(markdowntext.NewReader(source))
+	var ranges [][2]int
+	closingFormat := make(map[int]bool)
+	_ = markdownast.Walk(document, func(node markdownast.Node, entering bool) (markdownast.WalkStatus, error) {
+		if !entering {
+			return markdownast.WalkContinue, nil
+		}
+		switch node.Kind() {
+		case markdownast.KindCodeSpan, markdownast.KindCodeBlock, markdownast.KindFencedCodeBlock:
+			return markdownast.WalkSkipChildren, nil
+		}
+		if text, ok := node.(*markdownast.Text); ok && text.Segment.Stop > text.Segment.Start {
+			ranges = append(ranges, [2]int{text.Segment.Start, text.Segment.Stop})
+			if text.Parent() != nil && text.Parent().Kind() == markdownast.KindEmphasis && text.NextSibling() == nil {
+				closingFormat[text.Segment.Stop] = true
+			}
+		}
+		return markdownast.WalkContinue, nil
+	})
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i][0] < ranges[j][0] })
+	merged := ranges[:0]
+	for _, span := range ranges {
+		if len(merged) > 0 && span[0] <= merged[len(merged)-1][1] {
+			merged[len(merged)-1][1] = max(merged[len(merged)-1][1], span[1])
+		} else {
+			merged = append(merged, span)
+		}
+	}
+	return merged, closingFormat
+}
+
+func finalAnswerHasPayload(content string) bool {
+	source := []byte(content)
+	document := goldmark.New().Parser().Parse(markdowntext.NewReader(source))
+	found := false
+	_ = markdownast.Walk(document, func(node markdownast.Node, entering bool) (markdownast.WalkStatus, error) {
+		if !entering {
+			return markdownast.WalkContinue, nil
+		}
+		if text, ok := node.(*markdownast.Text); ok && strings.TrimSpace(string(text.Segment.Value(source))) != "" {
+			found = true
+		}
+		if text, ok := node.(*markdownast.String); ok && strings.TrimSpace(string(text.Value)) != "" {
+			found = true
+		}
+		switch node.Kind() {
+		case markdownast.KindImage, markdownast.KindAutoLink, markdownast.KindHTMLBlock, markdownast.KindRawHTML:
+			found = true
+		case markdownast.KindCodeBlock, markdownast.KindFencedCodeBlock:
+			for i := 0; i < node.Lines().Len(); i++ {
+				line := node.Lines().At(i)
+				found = found || strings.TrimSpace(string(line.Value(source))) != ""
+			}
+		}
+		if found {
+			return markdownast.WalkStop, nil
+		}
+		return markdownast.WalkContinue, nil
+	})
+	return found
+}
+
+func validateFinalAnswerCitations(content string, references []map[string]any) finalCitationValidation {
+	validation := finalCitationValidation{Content: content, Status: "no_citations"}
+	prefixes := finalCitationPrefixRe.FindAllStringIndex(content, -1)
+	if len(prefixes) == 0 {
+		return validation
+	}
+	markers := finalCitationMarkerRe.FindAllStringIndex(content, -1)
+	ranges, closingFormat := finalCitationTextRanges([]byte(content))
+	urls := finalCitationURLRe.FindAllStringIndex(content, -1)
+	isText := func(start, end int) bool {
+		index := sort.Search(len(ranges), func(i int) bool { return ranges[i][1] > start })
+		if index == len(ranges) || ranges[index][0] > start || ranges[index][1] < end {
+			return false
+		}
+		urlIndex := sort.Search(len(urls), func(i int) bool { return urls[i][1] > start })
+		if urlIndex < len(urls) && urls[urlIndex][0] <= start && urls[urlIndex][1] >= end {
+			return false
+		}
+		escapes := 0
+		for i := start - 1; i >= 0 && content[i] == '\\'; i-- {
+			escapes++
+		}
+		return escapes%2 == 0
+	}
+	ids := make(map[string]bool)
+	for _, reference := range references {
+		for _, key := range []string{"id", "chunk_id"} {
+			if id, ok := reference[key].(string); ok && id != "" {
+				ids[id] = true
+			}
+		}
+	}
+	var output strings.Builder
+	offset := 0
+	for _, span := range markers {
+		prefix := content[offset:span[0]]
+		marker := content[span[0]:span[1]]
+		keep := true
+		if !isText(span[0], span[1]) {
+			validation.LiteralCount++
+		} else {
+			validation.BeforeCount++
+			match := finalCitationIDRe.FindStringSubmatch(marker)
+			id := ""
+			if len(match) == 3 {
+				id = match[1] + match[2]
+			}
+			switch {
+			case id == "" || strings.IndexFunc(id, unicode.IsSpace) >= 0:
+				validation.UnresolvedCount++
+			case ids[id]:
+				validation.ValidCount++
+			default:
+				validation.RemovedCount++
+				keep = false
+			}
+		}
+		if !keep && span[1] < len(content) {
+			next, _ := utf8.DecodeRuneInString(content[span[1]:])
+			if strings.ContainsRune(".,;:!?)]}»”’", next) || closingFormat[span[1]] {
+				prefix = strings.TrimRight(prefix, " \t")
+			}
+		}
+		output.WriteString(prefix)
+		if keep {
+			output.WriteString(marker)
+		}
+		offset = span[1]
+	}
+	output.WriteString(content[offset:])
+	validation.Content = output.String()
+	for _, prefix := range prefixes {
+		index := sort.Search(len(markers), func(i int) bool { return markers[i][1] > prefix[0] })
+		if (index == len(markers) || markers[index][0] > prefix[0]) && isText(prefix[0], prefix[1]) {
+			validation.UnresolvedCount++
+		}
+	}
+	switch {
+	case validation.RemovedCount > 0 && !finalAnswerHasPayload(validation.Content):
+		validation.Status = "empty_after_cleanup"
+	case validation.UnresolvedCount > 0:
+		validation.Status = "unresolved_markers"
+	case validation.BeforeCount > 0 && len(ids) == 0:
+		validation.Status = "no_references"
+	case validation.RemovedCount > 0:
+		validation.Status = "invalid_removed"
+	case validation.BeforeCount > 0:
+		validation.Status = "valid"
+	}
+	return validation
+}
 
 type citationGroundingValidation struct {
 	Reason           string
@@ -1474,9 +1647,9 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 		case len(chunks) == 0:
 			groundingStatus = "no_chunks"
 		case strings.TrimSpace(content) == "":
-			// Reasoning-only finish: the model consumed its token budget on
-			// thinking and produced no answer text. Logged separately from
-			// "unchanged" so empty-content runs stay addressable in metrics.
+			// Empty final message: reasoning-only output and assembly loss
+			// require separate diagnosis. Logged separately from "unchanged"
+			// so empty-content runs stay addressable in metrics.
 			groundingStatus = "empty_content"
 			common.Info(fmt.Sprintf(
 				"agent_empty_content model=%s think_len=%d session=%s tenant=%s",
@@ -1508,8 +1681,32 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	}
 	artifacts := collectArtifactsFromToolCalls(ctx, msg)
 	artifactMD := formatArtifactMarkdown(artifacts, content)
+	finalContent := content + artifactMD
+	contentStreamed := runtime.AgentContentEventsEmittedRun(ctx)
+	var citationValidation *finalCitationValidation
+	if p.Cite {
+		var references []map[string]any
+		if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
+			references = state.GetRetrievalChunks()
+		}
+		validation := validateFinalAnswerCitations(finalContent, references)
+		if contentStreamed {
+			validation.Content = finalContent
+			validation.UnresolvedCount += validation.RemovedCount
+			validation.RemovedCount = 0
+			validation.Status = "skipped_streamed"
+		}
+		finalContent = validation.Content
+		citationValidation = &validation
+		common.Info(fmt.Sprintf("agent_citation_validation status=%s before=%d valid=%d removed=%d unresolved=%d literal=%d final=%d reference_chunks=%d model=%q session=%q tenant=%q",
+			validation.Status, validation.BeforeCount, validation.ValidCount, validation.RemovedCount, validation.UnresolvedCount,
+			validation.LiteralCount, validation.BeforeCount-validation.RemovedCount, len(references), p.ModelID, sessionID, tenantID))
+		if validation.Status == "empty_after_cleanup" {
+			return nil, fmt.Errorf("component: Agent.Invoke: no answer text after citation validation")
+		}
+	}
 	out = map[string]any{
-		"content":    content + artifactMD,
+		"content":    finalContent,
 		"thinking":   thinking,
 		"tool_calls": extractToolCalls(msg),
 		"artifacts":  artifacts,
@@ -1517,16 +1714,24 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	if groundingStatus != "" {
 		out["grounding_status"] = groundingStatus
 	}
-	contentStreamed := runtime.AgentContentEventsEmittedRun(ctx)
+	if citationValidation != nil {
+		out["citation_validation_status"] = citationValidation.Status
+		out["citation_count_before_validation"] = citationValidation.BeforeCount
+		out["final_citation_count"] = citationValidation.BeforeCount - citationValidation.RemovedCount
+		out["final_valid_citation_count"] = citationValidation.ValidCount
+		out["removed_citation_count"] = citationValidation.RemovedCount
+		out["unresolved_citation_count"] = citationValidation.UnresolvedCount
+		out["literal_citation_markers"] = citationValidation.LiteralCount
+	}
 	switch {
 	case !contentStreamed:
 		// No answer content has reached the client yet. When only thinking
 		// was streamed (e.g., citation grounding held the answer), avoid
 		// re-emitting the thinking delta at the end.
 		if runtime.AgentMessageEventsEmitted(ctx) {
-			runtime.EmitAgentMessage(ctx, content+artifactMD, "")
+			runtime.EmitAgentMessage(ctx, finalContent, "")
 		} else {
-			runtime.EmitAgentMessage(ctx, content+artifactMD, thinking)
+			runtime.EmitAgentMessage(ctx, finalContent, thinking)
 		}
 	case artifactMD != "":
 		// Python's stream_output_with_tools_async yields the tool-artifact
@@ -1579,11 +1784,18 @@ func (c *AgentComponent) Inputs() map[string]string {
 // Outputs returns output metadata.
 func (c *AgentComponent) Outputs() map[string]string {
 	return map[string]string{
-		"content":          "Final assistant content (after the ReAct loop terminates)",
-		"thinking":         "Model reasoning content, when the provider returns it separately.",
-		"tool_calls":       "One entry per tool call observed during the run",
-		"artifacts":        "Artifacts collected from tool responses (empty in P0)",
-		"grounding_status": "'applied' | 'unchanged' | 'no_chunks' | 'empty_content' | 'rejected: <reason>' | 'error: <msg>' (present when cite=true).",
+		"content":                          "Final assistant content (after the ReAct loop terminates)",
+		"thinking":                         "Model reasoning content, when the provider returns it separately.",
+		"tool_calls":                       "One entry per tool call observed during the run",
+		"artifacts":                        "Artifacts collected from tool responses (empty in P0)",
+		"grounding_status":                 "'applied' | 'unchanged' | 'no_chunks' | 'empty_content' | 'rejected: <reason>' | 'error: <msg>' (present when cite=true).",
+		"citation_validation_status":       "Final citation-link validation for buffered cite=true answers; not semantic claim verification.",
+		"citation_count_before_validation": "Complete citation markers in Markdown text before final cleanup.",
+		"final_citation_count":             "Complete citation markers remaining in Markdown text after cleanup.",
+		"final_valid_citation_count":       "Remaining markers whose exact ID exists in recorded references.",
+		"removed_citation_count":           "Well-formed markers with unresolvable IDs removed without guessing replacements.",
+		"unresolved_citation_count":        "Malformed/unclosed markers left untouched, or invalid markers in already streamed content.",
+		"literal_citation_markers":         "Citation-shaped literals preserved in code, URLs or escaped Markdown.",
 	}
 }
 
