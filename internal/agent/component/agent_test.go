@@ -121,6 +121,102 @@ func TestHasCodeExecTool(t *testing.T) {
 	}
 }
 
+type delayedRoundModel struct {
+	*textThenToolCallModel
+	failure       error
+	streamFailure bool
+}
+
+func (m *delayedRoundModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	time.Sleep(15 * time.Millisecond)
+	if m.failure != nil {
+		return nil, m.failure
+	}
+	return schema.AssistantMessage("answer", nil), nil
+}
+
+func (m *delayedRoundModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	time.Sleep(15 * time.Millisecond)
+	if m.failure != nil && !m.streamFailure {
+		return nil, m.failure
+	}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	go func() {
+		defer sw.Close()
+		time.Sleep(15 * time.Millisecond)
+		if sw.Send(schema.AssistantMessage("answer", nil), nil) {
+			return
+		}
+		if m.streamFailure {
+			sw.Send(nil, m.failure)
+		}
+	}()
+	return sr, nil
+}
+
+func TestRoundLimitedModelMeasuresWholeCallIncludingOpenFailures(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		for _, failure := range []error{nil, errors.New("provider EOF")} {
+			timings := &runtime.PhaseTimings{}
+			ctx := runtime.WithPhaseTimings(t.Context(), timings)
+			mdl := &roundLimitedChatModel{ToolCallingChatModel: &delayedRoundModel{failure: failure}, remaining: 3}
+			var err error
+			if streaming {
+				var stream *schema.StreamReader[*schema.Message]
+				stream, err = mdl.Stream(ctx, nil)
+				if err == nil {
+					for {
+						_, err = stream.Recv()
+						if err != nil {
+							break
+						}
+					}
+					stream.Close()
+					if err == io.EOF {
+						err = nil
+					}
+				}
+			} else {
+				_, err = mdl.Generate(ctx, nil)
+			}
+			if !errors.Is(err, failure) {
+				t.Fatalf("stream=%t: expected %v, got %v", streaming, failure, err)
+			}
+			duration, _, _, calls, _ := timings.Snapshot()
+			minimum := 15 * time.Millisecond
+			if streaming && failure == nil {
+				minimum *= 2
+			}
+			if calls != 1 || duration < minimum {
+				t.Fatalf("stream=%t failure=%v: calls=%d duration=%s, want one full call >=%s", streaming, failure, calls, duration, minimum)
+			}
+		}
+	}
+}
+
+func TestRoundLimitedModelPreservesStreamErrorAndCountsOnce(t *testing.T) {
+	failure := errors.New("interrupted provider stream")
+	timings := &runtime.PhaseTimings{}
+	mdl := &roundLimitedChatModel{ToolCallingChatModel: &delayedRoundModel{failure: failure, streamFailure: true}, remaining: 3}
+	stream, err := mdl.Stream(runtime.WithPhaseTimings(t.Context(), timings), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	message, err := stream.Recv()
+	if err != nil || message.Content != "answer" {
+		t.Fatalf("message=%v err=%v", message, err)
+	}
+	_, err = stream.Recv()
+	if !errors.Is(err, failure) {
+		t.Fatalf("expected original stream error, got %v", err)
+	}
+	duration, _, _, calls, _ := timings.Snapshot()
+	if calls != 1 || duration < 30*time.Millisecond {
+		t.Fatalf("calls=%d duration=%s", calls, duration)
+	}
+}
+
 type textThenToolCallModel struct {
 	turn       int
 	boundTools []*schema.ToolInfo

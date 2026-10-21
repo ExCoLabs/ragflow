@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
@@ -227,14 +228,7 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 		// response before deciding whether the round contains a tool call.
 		// Eino's default checker only inspects the first non-empty chunk,
 		// which can miss a ToolCall emitted after explanatory text.
-		StreamToolCallChecker: func(cctx context.Context, stream *schema.StreamReader[*schema.Message]) (bool, error) {
-			start := time.Now()
-			ok, cerr := scanAllStreamForToolCall(cctx, stream)
-			if timings != nil {
-				timings.AddLLM(time.Since(start))
-			}
-			return ok, cerr
-		},
+		StreamToolCallChecker: scanAllStreamForToolCall,
 		MessageModifier: func(_ context.Context, msgs []*schema.Message) []*schema.Message {
 			if p.SystemPrompt != "" {
 				return append([]*schema.Message{schema.SystemMessage(p.SystemPrompt)}, msgs...)
@@ -322,13 +316,48 @@ func (m *roundLimitedChatModel) roundOptions(opts []model.Option) []model.Option
 }
 
 func (m *roundLimitedChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	start := time.Now()
+	if timings := runtime.PhaseTimingsFromContext(ctx); timings != nil {
+		defer func() { timings.AddLLM(time.Since(start)) }()
+	}
 	input = m.roundInput(input)
 	return m.ToolCallingChatModel.Generate(ctx, input, m.roundOptions(opts)...)
 }
 
 func (m *roundLimitedChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	start := time.Now()
 	input = m.roundInput(input)
-	return m.ToolCallingChatModel.Stream(ctx, input, m.roundOptions(opts)...)
+	stream, err := m.ToolCallingChatModel.Stream(ctx, input, m.roundOptions(opts)...)
+	timings := runtime.PhaseTimingsFromContext(ctx)
+	if timings == nil {
+		return stream, err
+	}
+	if err != nil {
+		timings.AddLLM(time.Since(start))
+		return nil, err
+	}
+	reader, writer := schema.Pipe[*schema.Message](1)
+	finish := sync.OnceFunc(func() { timings.AddLLM(time.Since(start)) })
+	go func() {
+		defer stream.Close()
+		defer writer.Close()
+		defer finish()
+		for {
+			message, err := stream.Recv()
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				finish()
+				writer.Send(nil, err)
+				return
+			}
+			if writer.Send(message, nil) {
+				return
+			}
+		}
+	}()
+	return reader, nil
 }
 
 func (m *roundLimitedChatModel) roundInput(input []*schema.Message) []*schema.Message {
