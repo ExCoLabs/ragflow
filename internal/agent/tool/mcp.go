@@ -27,8 +27,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"ragflow/internal/agent/runtime"
 	mcpclient "ragflow/internal/mcp/client"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -172,7 +174,46 @@ func (m *MCPToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON strin
 		// rather than a transport failure.
 		return "", fmt.Errorf("mcp tool %q returned isError: %s", m.mcpTool.Name, res.Text)
 	}
+	recordMCPDocumentReferences(ctx, m.mcpTool.Name, res.Text)
 	return res.Text, nil
+}
+
+func recordMCPDocumentReferences(ctx context.Context, toolName, text string) {
+	if toolName != "document_search" && toolName != "document_read" {
+		return
+	}
+	state, err := runtime.GetStateFromContext(ctx)
+	if err != nil || state == nil {
+		return
+	}
+	var result struct {
+		Reference struct {
+			Chunks []struct {
+				ChunkID      string `json:"chunk_id"`
+				Content      string `json:"content"`
+				DocumentID   string `json:"document_id"`
+				DocumentName string `json:"document_name"`
+				DatasetID    string `json:"dataset_id"`
+			} `json:"chunks"`
+		} `json:"reference"`
+	}
+	if json.Unmarshal([]byte(text), &result) != nil {
+		return
+	}
+	chunks := make([]RetrievalChunk, 0, len(result.Reference.Chunks))
+	for _, c := range result.Reference.Chunks {
+		if strings.TrimSpace(c.ChunkID) == "" || strings.TrimSpace(c.Content) == "" ||
+			strings.TrimSpace(c.DocumentID) == "" || strings.TrimSpace(c.DocumentName) == "" || strings.TrimSpace(c.DatasetID) == "" {
+			continue
+		}
+		chunks = append(chunks, RetrievalChunk{
+			ID: c.ChunkID, Content: c.Content, DocumentID: c.DocumentID,
+			DocumentName: c.DocumentName, DatasetID: c.DatasetID,
+		})
+	}
+	if len(chunks) > 0 {
+		state.SetRetrievalReferences(referenceChunksFromRetrieval(chunks), referenceDocAggsFromRetrieval(chunks))
+	}
 }
 
 // Close releases resources held by the adapter. In Go's architecture
