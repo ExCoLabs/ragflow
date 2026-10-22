@@ -61,6 +61,41 @@ func TestHandleStreamingResponseBareRootFinishReason(t *testing.T) {
 	}
 }
 
+// TestHandleStreamingResponseReasoningAlias verifies the shared OpenAI
+// parser surfaces reasoning emitted under delta.reasoning (OpenRouter,
+// OVH AI Endpoints) as well as delta.reasoning_content.
+func TestHandleStreamingResponseReasoningAlias(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"step 1. \"}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"step 2. \"}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n"
+
+	var contentChunks, reasonChunks []string
+	err := HandleStreamingResponse(
+		io.NopCloser(bytes.NewBufferString(sse)),
+		nil,
+		nil,
+		OpenAIParserConfig,
+		func(content *string, reason *string) error {
+			if content != nil && *content != "" {
+				contentChunks = append(contentChunks, *content)
+			}
+			if reason != nil && *reason != "" {
+				reasonChunks = append(reasonChunks, *reason)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("HandleStreamingResponse: %v", err)
+	}
+	if got := strings.Join(reasonChunks, ""); got != "step 1. step 2. " {
+		t.Errorf("reasoning=%q, want both aliases collected", got)
+	}
+	if got := strings.Join(contentChunks, ""); got != "answer[DONE]" {
+		t.Errorf("content=%q, want answer + [DONE]", got)
+	}
+}
+
 // TestHandleStreamingResponseTruncatedStream verifies a stream that ends
 // without [DONE], a root-level finish_reason, or a per-choice finish_reason
 // is rejected as truncated. This is the counterpart of the bare
