@@ -111,7 +111,7 @@ func (p *PPIOModel) ChatStreamlyWithSender(ctx context.Context, modelName string
 	reqBody["stream_options"] = map[string]interface{}{"include_usage": true}
 
 	return p.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
 	})
 }
 

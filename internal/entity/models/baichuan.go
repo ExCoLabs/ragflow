@@ -89,7 +89,7 @@ func (b *BaichuanModel) ChatStreamlyWithSender(ctx context.Context, modelName st
 	reqBody["stream_options"] = map[string]interface{}{"include_usage": true}
 
 	return b.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, modelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, modelConfig, OpenAIParserConfig, sender)
 	})
 }
 

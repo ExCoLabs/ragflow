@@ -1498,6 +1498,9 @@ func (s *AgentService) RunAgent(ctx context.Context, userID, canvasID, sessionID
 	runID := runIDFor(canvasID, map[string]any{"session_id": sessionID})
 	lockToken := common.GenerateToken()
 	runCtx, cancelRun := context.WithCancel(ctx)
+	// Correlate downstream model/provider logs with this agent run so a
+	// single `grep session_id=<id>` covers the eino failover and usage lines.
+	runCtx = common.WithSessionID(runCtx, sessionID)
 	// Keep workflow cancellation separate from event-consumer cancellation.
 	// An explicit session cancellation should still reach an attached client,
 	// while a disconnected HTTP request must stop event delivery promptly.

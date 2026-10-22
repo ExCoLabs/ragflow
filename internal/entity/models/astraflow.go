@@ -120,7 +120,7 @@ func (a *AstraflowModel) ChatStreamlyWithSender(ctx context.Context, modelName s
 	}
 
 	return a.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
 	})
 }
 

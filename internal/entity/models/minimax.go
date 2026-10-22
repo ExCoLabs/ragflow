@@ -252,7 +252,7 @@ func (m *MinimaxModel) ChatStreamlyWithSender(ctx context.Context, modelName str
 		// was already complete. Because this returns immediately,
 		// doStreamRequest's deferred resp.Body.Close() unblocks the scanner
 		// and the goroutine exits.
-		return HandleStreamingResponse(pr, modelUsage, modelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, pr, modelUsage, modelConfig, OpenAIParserConfig, sender)
 	})
 }
 

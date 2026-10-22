@@ -123,7 +123,7 @@ func (x *XunFeiModel) ChatStreamlyWithSender(ctx context.Context, modelName stri
 	// usage object in the final chunk by default, so usage reporting works
 	// without it.
 	return x.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, modelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, modelConfig, OpenAIParserConfig, sender)
 	})
 }
 

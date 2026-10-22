@@ -19,8 +19,13 @@ package models
 import (
 	"bytes"
 	"io"
+	"ragflow/internal/common"
 	"strings"
 	"testing"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestHandleStreamingResponseBareRootFinishReason verifies the shared handler
@@ -33,6 +38,7 @@ func TestHandleStreamingResponseBareRootFinishReason(t *testing.T) {
 
 	var contentChunks, reasonChunks []string
 	err := HandleStreamingResponse(
+		t.Context(),
 		io.NopCloser(bytes.NewBufferString(sse)),
 		nil,
 		nil,
@@ -71,6 +77,7 @@ func TestHandleStreamingResponseReasoningAlias(t *testing.T) {
 
 	var contentChunks, reasonChunks []string
 	err := HandleStreamingResponse(
+		t.Context(),
 		io.NopCloser(bytes.NewBufferString(sse)),
 		nil,
 		nil,
@@ -96,6 +103,52 @@ func TestHandleStreamingResponseReasoningAlias(t *testing.T) {
 	}
 }
 
+// TestHandleStreamingResponseStreamUsageCarriesSessionID verifies the
+// StreamUsage log line inherits the session correlation id from ctx, so an
+// agent run's provider usage can be reconstructed by session.
+func TestHandleStreamingResponseStreamUsageCarriesSessionID(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	prev := common.Logger
+	common.Logger = zap.New(core)
+	t.Cleanup(func() { common.Logger = prev })
+
+	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n" +
+		"data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n" +
+		"data: [DONE]\n"
+
+	err := HandleStreamingResponse(
+		common.WithSessionID(t.Context(), "sess-123"),
+		io.NopCloser(bytes.NewBufferString(sse)),
+		nil,
+		&ChatConfig{},
+		OpenAIParserConfig,
+		func(*string, *string) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("HandleStreamingResponse: %v", err)
+	}
+
+	var usageEntry *observer.LoggedEntry
+	for i, e := range logs.All() {
+		if e.Message == "StreamUsage" {
+			entry := logs.All()[i]
+			usageEntry = &entry
+		}
+	}
+	if usageEntry == nil {
+		t.Fatal("StreamUsage log entry not found")
+	}
+	found := false
+	for _, f := range usageEntry.Context {
+		if f.Key == "session_id" && f.String == "sess-123" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("StreamUsage missing session_id=sess-123, fields=%v", usageEntry.Context)
+	}
+}
+
 // TestHandleStreamingResponseTruncatedStream verifies a stream that ends
 // without [DONE], a root-level finish_reason, or a per-choice finish_reason
 // is rejected as truncated. This is the counterpart of the bare
@@ -104,6 +157,7 @@ func TestHandleStreamingResponseTruncatedStream(t *testing.T) {
 	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n"
 
 	err := HandleStreamingResponse(
+		t.Context(),
 		io.NopCloser(bytes.NewBufferString(sse)),
 		nil,
 		nil,

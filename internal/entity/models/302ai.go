@@ -165,7 +165,7 @@ func (a *AI302Model) ChatStreamlyWithSender(ctx context.Context, modelName strin
 	reqBody["stream_options"] = map[string]interface{}{"include_usage": true}
 
 	return a.baseModel.doStreamRequest(ctx, baseURL, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, modelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, modelConfig, OpenAIParserConfig, sender)
 	})
 }
 

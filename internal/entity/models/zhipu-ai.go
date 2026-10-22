@@ -126,7 +126,7 @@ func (z *ZhipuAIModel) ChatStreamlyWithSender(ctx context.Context, modelName str
 	}
 
 	return z.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
 	})
 }
 

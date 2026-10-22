@@ -198,7 +198,7 @@ func (m *MWSModel) ChatStreamlyWithSender(ctx context.Context, modelName string,
 		return err
 	}
 	return m.baseModel.doStreamRequest(ctx, endpoint, apiConfig, request, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, chatConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, chatConfig, OpenAIParserConfig, sender)
 	})
 }
 

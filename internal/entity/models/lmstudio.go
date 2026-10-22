@@ -135,7 +135,7 @@ func (l *LmStudioModel) ChatStreamlyWithSender(ctx context.Context, modelName st
 	reqBody["stream_options"] = map[string]any{"include_usage": true}
 
 	return l.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, modelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, modelConfig, OpenAIParserConfig, sender)
 	})
 }
 
