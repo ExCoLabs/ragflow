@@ -158,7 +158,7 @@ func (n *N1NModel) ChatStreamlyWithSender(ctx context.Context, modelName string,
 	}
 
 	return n.baseModel.doStreamRequest(ctx, endpoint, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
 	})
 }
 

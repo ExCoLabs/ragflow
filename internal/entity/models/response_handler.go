@@ -71,7 +71,7 @@ func HandleNonStreamingResponse(ctx context.Context, body []byte, modelUsage *co
 
 // HandleStreamingResponse processes a streaming chat response using the
 // ParserConfig's StreamParser to extract usage from each event.
-func HandleStreamingResponse(body io.Reader, modelUsage *common.ModelUsage, chatConfig *ChatConfig, cfg *ParserConfig, sender func(*string, *string) error) error {
+func HandleStreamingResponse(ctx context.Context, body io.Reader, modelUsage *common.ModelUsage, chatConfig *ChatConfig, cfg *ParserConfig, sender func(*string, *string) error) error {
 	if sender == nil {
 		return fmt.Errorf("sender is required")
 	}
@@ -159,7 +159,7 @@ func HandleStreamingResponse(body io.Reader, modelUsage *common.ModelUsage, chat
 		recordResponseUsage(modelUsage, "", streamUsage, "chat")
 		if chatConfig != nil {
 			chatConfig.UsageResult = streamUsage
-			common.Info("StreamUsage", zap.String("model", streamModel), zap.Int("prompt", streamUsage.PromptTokens), zap.Int("completion", streamUsage.CompletionTokens), zap.Int("total", streamUsage.TotalTokens))
+			common.InfoCtx(ctx, "StreamUsage", zap.String("model", streamModel), zap.Int("prompt", streamUsage.PromptTokens), zap.Int("completion", streamUsage.CompletionTokens), zap.Int("total", streamUsage.TotalTokens))
 		}
 	}
 

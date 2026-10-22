@@ -164,7 +164,7 @@ func (v *VllmModel) ChatStreamlyWithSender(ctx context.Context, modelName string
 	reqBody["stream_options"] = map[string]interface{}{"include_usage": true}
 
 	return v.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, modelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, modelConfig, OpenAIParserConfig, sender)
 	})
 }
 

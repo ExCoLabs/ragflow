@@ -104,7 +104,7 @@ func (m *ModelScopeModel) ChatStreamlyWithSender(ctx context.Context, modelName 
 	reqBody["stream_options"] = map[string]interface{}{"include_usage": true}
 
 	return m.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, chatModelConfig, OpenAIParserConfig, sender)
 	})
 }
 

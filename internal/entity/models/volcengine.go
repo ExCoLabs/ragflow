@@ -229,7 +229,7 @@ func (v *VolcEngine) ChatStreamlyWithSender(ctx context.Context, modelName strin
 
 	effectiveConfig := v.effectiveAPIConfig(apiConfig)
 	return v.baseModel.doStreamRequest(ctx, url, effectiveConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		return HandleStreamingResponse(body, modelUsage, modelConfig, OpenAIParserConfig, sender)
+		return HandleStreamingResponse(ctx, body, modelUsage, modelConfig, OpenAIParserConfig, sender)
 	})
 }
 
