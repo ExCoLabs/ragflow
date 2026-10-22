@@ -120,9 +120,7 @@ func (o *OpenRouterModel) ChatStreamlyWithSender(ctx context.Context, modelName 
 	}
 
 	return o.baseModel.doStreamRequest(ctx, url, apiConfig, reqBody, streamCallTimeout, func(body io.ReadCloser) error {
-		// OpenRouter emits reasoning under delta.reasoning (not
-		// delta.reasoning_content), so it uses its own ParserConfig.
-		return HandleStreamingResponse(body, modelUsage, modelConfig, OpenRouterParserConfig, sender)
+		return HandleStreamingResponse(body, modelUsage, modelConfig, OpenAIParserConfig, sender)
 	})
 }
 
