@@ -92,7 +92,7 @@ func (g *groundingTestInvoker) Invoke(_ context.Context, _ *gorm.DB, req ChatInv
 		return nil, errors.New("grounding provider failed")
 	}
 	if len(g.responses) == 0 {
-		return &ChatInvokeResponse{Content: "grounded"}, nil
+		return &ChatInvokeResponse{Content: `{"citations":[]}`}, nil
 	}
 	idx := g.calls - 1
 	if idx >= len(g.responses) {
@@ -103,8 +103,120 @@ func (g *groundingTestInvoker) Invoke(_ context.Context, _ *gorm.DB, req ChatInv
 
 // TestGrounding_Applied: Cite=true + state has chunks → second
 // LLM call is made and the grounded content replaces the original.
+func TestGroundingInsertionProposalPreservesTypography(t *testing.T) {
+	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"quote":"Text zadávateľa","id":"0"}]}`}}}
+	previous := getDefaultChatInvoker()
+	SetDefaultChatInvoker(inv)
+	t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+	withAgentRunner(t, func(context.Context, AgentParam) (*schema.Message, error) {
+		return schema.AssistantMessage("Text zadávateľa“.", nil), nil
+	})
+	state := canvas.NewCanvasState("run", "session")
+	state.SetRetrievalChunks([]map[string]any{{"id": "0", "content": "Source"}})
+	var emitted []string
+	ctx := runtime.WithAgentMessageEmitter(runtime.WithState(t.Context(), state), func(content, _ string) {
+		if content != "" {
+			emitted = append(emitted, content)
+		}
+	})
+	out, err := NewAgentComponent(AgentParam{ModelID: "stub", Cite: true}).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
+	want := "Text zadávateľa [ID:0]“."
+	if err != nil || out["content"] != want || out["grounding_status"] != "applied" || len(emitted) != 1 || emitted[0] != want {
+		t.Fatalf("out=%v err=%v emitted=%q", out, err, emitted)
+	}
+}
+
+func TestCitationInsertionProposals(t *testing.T) {
+	batch := []prompts.CitationSource{{ID: "0", Content: "source"}, {ID: "1", Content: "source"}}
+	for _, tc := range []struct{ name, original, proposal, want, reason string }{
+		{"empty", "Text.", `{"citations":[]}`, "Text.", ""},
+		{"multiple_ids", "Text.", `{"citations":[{"quote":"Text","id":"0"},{"quote":"Text","id":"1"}]}`, "Text [ID:0][ID:1].", ""},
+		{"existing", "Text [ID:0].", `{"citations":[{"quote":"Text","id":"1"}]}`, "Text [ID:0][ID:1].", ""},
+		{"existing_fullwidth", "Text 【ID:0】.", `{"citations":[{"quote":"Text","id":"1"}]}`, "Text 【ID:0】[ID:1].", ""},
+		{"duplicate_fullwidth", "Text 【ID:0】.", `{"citations":[{"quote":"Text","id":"0"}]}`, "Text 【ID:0】.", ""},
+		{"duplicate_nbsp", "Text\u00a0[ID:0].", `{"citations":[{"quote":"Text","id":"0"}]}`, "Text\u00a0[ID:0].", ""},
+		{"spans_existing", "First [ID:0]. Second.", `{"citations":[{"quote":"First [ID:0]. Second","id":"1"}]}`, "First [ID:0]. Second [ID:1].", ""},
+		{"duplicate", "Text [ID:0].", `{"citations":[{"quote":"Text","id":"0"},{"quote":"Text","id":"0"}]}`, "Text [ID:0].", ""},
+		{"duplicate_proposals", "Text.", `{"citations":[{"quote":"Text","id":"0"},{"quote":"Text","id":"0"}]}`, "Text [ID:0].", ""},
+		{"unordered", "First. Second.", `{"citations":[{"quote":"Second","id":"1"},{"quote":"First","id":"0"}]}`, "First [ID:0]. Second [ID:1].", ""},
+		{"unicode", "中文。 Žltý text.", `{"citations":[{"quote":"中文","id":"0"},{"quote":"Žltý text","id":"1"}]}`, "中文 [ID:0]。 Žltý text [ID:1].", ""},
+		{"missing_anchor", "Text.", `{"citations":[{"quote":"Changed","id":"0"}]}`, "Text.", "anchor_not_found"},
+		{"normalized_quote", "Text“.", `{"citations":[{"quote":"Text\"","id":"0"}]}`, "Text“.", "anchor_not_found"},
+		{"repeated", "Text. Text.", `{"citations":[{"quote":"Text","id":"0"}]}`, "Text. Text.", "ambiguous_anchor"},
+		{"overlapping", "aaa", `{"citations":[{"quote":"aa","id":"0"}]}`, "aaa", "ambiguous_anchor"},
+		{"atomic", "Text.", `{"citations":[{"quote":"Text","id":"0"},{"quote":"Missing","id":"1"}]}`, "Text.", "anchor_not_found"},
+		{"unknown_id", "Text.", `{"citations":[{"quote":"Text","id":"future"}]}`, "Text.", "unknown_citation"},
+		{"merged_id", "Text.", `{"citations":[{"quote":"Text","id":"0, ID:1"}]}`, "Text.", "malformed_citation"},
+		{"trailing_space", "Text next.", `{"citations":[{"quote":"Text ","id":"0"}]}`, "Text next.", "invalid_anchor"},
+		{"code", "`Text` next.", `{"citations":[{"quote":"Text","id":"0"}]}`, "`Text` next.", "unsafe_anchor"},
+		{"inside_url", "https://example.test/Text/more", `{"citations":[{"quote":"Text","id":"0"}]}`, "https://example.test/Text/more", "unsafe_anchor"},
+		{"after_url", "https://example.test/Text", `{"citations":[{"quote":"Text","id":"0"}]}`, "https://example.test/Text [ID:0]", ""},
+		{"inside_marker", "Text [ID:0].", `{"citations":[{"quote":"ID:0","id":"1"}]}`, "Text [ID:0].", "unsafe_anchor"},
+		{"inside_word", "Context.", `{"citations":[{"quote":"Con","id":"0"}]}`, "Context.", "unsafe_anchor"},
+		{"combining", "a\u0301.", `{"citations":[{"quote":"a","id":"0"}]}`, "a\u0301.", "unsafe_anchor"},
+		{"joiner", "\U0001f469\u200d\U0001f4bb.", `{"citations":[{"quote":"\ud83d\udc69","id":"0"}]}`, "\U0001f469\u200d\U0001f4bb.", "unsafe_anchor"},
+		{"regional_indicator_pair", "\U0001f1f8\U0001f1f0.", `{"citations":[{"quote":"\ud83c\uddf8","id":"0"}]}`, "\U0001f1f8\U0001f1f0.", "unsafe_anchor"},
+		{"full_rewrite", "Text.", "A rewritten answer [ID:0].", "Text.", "invalid_proposal"},
+		{"extra_fields", "Text.", `{"citations":[],"answer":"Changed"}`, "Text.", "invalid_proposal"},
+		{"duplicate_root", "Text.", `{"citations":[],"citations":[]}`, "Text.", "invalid_proposal"},
+		{"duplicate_field", "Text.", `{"citations":[{"quote":"Text","id":"future","id":"0"}]}`, "Text.", "invalid_proposal"},
+		{"null", "Text.", `{"citations":null}`, "Text.", "invalid_proposal"},
+		{"missing", "Text.", `{}`, "Text.", "invalid_proposal"},
+		{"missing_field", "Text.", `{"citations":[{"quote":"Text"}]}`, "Text.", "invalid_proposal"},
+		{"non_string", "Text.", `{"citations":[{"quote":"Text","id":0}]}`, "Text.", "invalid_proposal"},
+		{"trailing_json", "Text.", `{"citations":[]} {}`, "Text.", "invalid_proposal"},
+		{"empty_response", "Text.", "", "Text.", "empty_response"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := applyCitationInsertions(tc.original, tc.proposal, batch)
+			if got != tc.want {
+				t.Fatalf("content=%q want=%q", got, tc.want)
+			}
+			if tc.reason != "" {
+				var rejection *citationGroundingRejectionError
+				if !errors.As(err, &rejection) || rejection.reason != tc.reason {
+					t.Fatalf("err=%v, want %s", err, tc.reason)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if validation := validateCitationGrounding(tc.original, got, batch, map[string]bool{"0": true, "1": true}); validation.Reason != "" {
+					t.Fatalf("strict guard rejected materialization: %+v", validation)
+				}
+			}
+		})
+	}
+}
+
+func TestCitationInsertionLimitsAndStats(t *testing.T) {
+	batch := []prompts.CitationSource{{ID: "0", Content: "source"}}
+	_, stats, err := applyCitationInsertions("Text.", `{"citations":[{"quote":"Text","id":"0"},{"quote":"Text","id":"missing"}]}`, batch)
+	if err == nil || !stats.Parsed || stats.Count != 2 || stats.ValidIDs != 1 || stats.InvalidIDs != 1 {
+		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+	tooMany := `{"citations":[` + strings.Repeat(`{"quote":"Text","id":"0"},`, 128) + `{"quote":"Text","id":"0"}]}`
+	if _, _, err := applyCitationInsertions("Text.", tooMany, batch); err == nil {
+		t.Fatal("more than 128 proposals must fail")
+	}
+	if _, _, err := applyCitationInsertions("Text.", "x"+strings.Repeat(" ", citationGroundingBatchChars), batch); err == nil {
+		t.Fatal("oversized response must fail")
+	}
+	var proposals []string
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprint(i)
+		batch = append(batch, prompts.CitationSource{ID: id, Content: "source"})
+		proposals = append(proposals, fmt.Sprintf(`{"quote":"Text","id":%q}`, id))
+	}
+	out, _, err := applyCitationInsertions("Text.", `{"citations":[`+strings.Join(proposals, ",")+`]}`, batch)
+	var rejected *citationGroundingRejectionError
+	if out != "Text." || !errors.As(err, &rejected) || rejected.reason != "citation_limit" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+}
+
 func TestGrounding_Applied(t *testing.T) {
-	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"original answer [ID:0]"}}}
+	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"quote":"original answer","id":"0"}]}`}}}
 	prev := getDefaultChatInvoker()
 	SetDefaultChatInvoker(inv)
 	defer SetDefaultChatInvoker(prev)
@@ -151,7 +263,7 @@ func TestGrounding_Applied(t *testing.T) {
 	if !contains(inv.lastReq.Messages[0].Content, "ID: 0") {
 		t.Errorf("system prompt missing source block: %q", inv.lastReq.Messages[0].Content)
 	}
-	if !strings.Contains(inv.lastReq.Messages[0].Content, "Return that same answer with citation insertions only.") {
+	if !strings.Contains(inv.lastReq.Messages[0].Content, "you do not return the answer") {
 		t.Error("grounding prompt must prohibit answer rewriting")
 	}
 }
@@ -274,7 +386,7 @@ func TestGrounding_EmptyContent(t *testing.T) {
 // the client and is not duplicated at the end.
 func TestGrounding_HeldContentEmittedOnce(t *testing.T) {
 	prev := getDefaultChatInvoker()
-	SetDefaultChatInvoker(&groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"answer without citations [ID:0]"}}})
+	SetDefaultChatInvoker(&groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"quote":"answer without citations","id":"0"}]}`}}})
 	defer SetDefaultChatInvoker(prev)
 
 	withAgentRunner(t, func(_ context.Context, _ AgentParam) (*schema.Message, error) {
@@ -351,7 +463,7 @@ func TestGrounding_PartialStreamFailure_FallsBack(t *testing.T) {
 // is grounded through multiple sequential calls, each feeding its output
 // to the next.
 func TestGrounding_BatchedChunks(t *testing.T) {
-	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{"original [ID:0]", "original [ID:0][ID:13]", "original [ID:0][ID:13][ID:26]"}}}
+	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"quote":"original","id":"0"}]}`, `{"citations":[{"quote":"original","id":"13"}]}`, `{"citations":[{"quote":"original","id":"26"}]}`}}}
 	prev := getDefaultChatInvoker()
 	SetDefaultChatInvoker(inv)
 	defer SetDefaultChatInvoker(prev)
@@ -579,24 +691,16 @@ func TestGroundingPreservesTextAndCitationIdentity(t *testing.T) {
 		{"lost_duplicate", "Prvá veta [ID:0]. Druhá veta [ID:0].", "Prvá veta [ID:0]. Druhá veta [ID:1].", "Prvá veta [ID:0]. Druhá veta [ID:0].", "rejected: existing_citation_changed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{tc.candidate}}}
-			previous := getDefaultChatInvoker()
-			SetDefaultChatInvoker(inv)
-			t.Cleanup(func() { SetDefaultChatInvoker(previous) })
-			withAgentRunner(t, func(context.Context, AgentParam) (*schema.Message, error) {
-				return schema.AssistantMessage(tc.original, nil), nil
-			})
-			state := canvas.NewCanvasState("run", "session")
-			state.SetRetrievalChunks([]map[string]any{{"id": "0", "content": "First source"}, {"id": "1", "content": "Second source"}, {"id": "e52600578f031081", "content": "Hash source"}})
-			ctx := runtime.WithState(t.Context(), state)
-			var emitted string
-			ctx = runtime.WithAgentMessageEmitter(ctx, func(content, _ string) { emitted += content })
-			out, err := NewAgentComponent(AgentParam{ModelID: "stub", Cite: true}).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
-			if err != nil {
-				t.Fatal(err)
+			batch := []prompts.CitationSource{{ID: "0", Content: "First source"}, {ID: "1", Content: "Second source"}, {ID: "e52600578f031081", Content: "Hash source"}}
+			validation := validateCitationGrounding(tc.original, tc.candidate, batch, map[string]bool{"0": true, "1": true, "e52600578f031081": true})
+			content, status := tc.original, "unchanged"
+			if validation.Reason != "" {
+				status = "rejected: " + validation.Reason
+			} else if validation.AddedCitations > 0 {
+				content, status = tc.candidate, "applied"
 			}
-			if out["content"] != tc.want || out["grounding_status"] != tc.status || emitted != tc.want {
-				t.Fatalf("content=%q status=%q emitted=%q; want %q / %q", out["content"], out["grounding_status"], emitted, tc.want, tc.status)
+			if content != tc.want || status != tc.status {
+				t.Fatalf("content=%q status=%q; want %q / %q", content, status, tc.want, tc.status)
 			}
 		})
 	}
@@ -607,9 +711,9 @@ func TestGroundingBatchFailurePreservesAcceptedContent(t *testing.T) {
 		name, first, second, want, status string
 		failAt, calls                     int
 	}{
-		{"rejected_later", "original [ID:0]", "A different answer [ID:13]", "original [ID:0]", "rejected: content_changed", 0, 2},
-		{"provider_error_later", "original [ID:0]", "", "original [ID:0]", "error:", 2, 2},
-		{"future_source_not_visible", "original [ID:13]", "", "original", "rejected: unknown_citation", 0, 1},
+		{"rejected_later", `{"citations":[{"quote":"original","id":"0"}]}`, `{"citations":[{"quote":"different answer","id":"13"}]}`, "original [ID:0]", "rejected: anchor_not_found", 0, 2},
+		{"provider_error_later", `{"citations":[{"quote":"original","id":"0"}]}`, "", "original [ID:0]", "error:", 2, 2},
+		{"future_source_not_visible", `{"citations":[{"quote":"original","id":"13"}]}`, "", "original", "rejected: unknown_citation", 0, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{tc.first, tc.second}, failAt: tc.failAt}}

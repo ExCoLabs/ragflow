@@ -36,6 +36,14 @@ func TestCitationPlusPrompt_EmptySources(t *testing.T) {
 	if !strings.Contains(rendered, "ID:") {
 		t.Error("expected 'ID:' prefix in sources block (empty section)")
 	}
+	for _, instruction := range []string{"JSON object", "quote and id", "EXACTLY ONCE", `{"citations":[]}`} {
+		if !strings.Contains(rendered, instruction) {
+			t.Errorf("missing insertion protocol instruction %q", instruction)
+		}
+	}
+	if strings.Contains(rendered, "Comprehensive Examples") || strings.Contains(rendered, "Return that same answer") {
+		t.Fatal("grounding must not ask for a regenerated answer")
+	}
 }
 
 // TestCitationPlusPrompt_WithSources: sources are rendered as
