@@ -142,6 +142,12 @@ npm run test
 npm run type-check
 ```
 
+## Provider stream diagnostics (OP#1341)
+- `ModelStreamHTTP` logs session-correlated HTTP/transport status, a bounded provider request ID, header latency, and the generation parameters actually present in the outgoing body. A stored DSL max_tokens value is not an effective limit when maxTokensEnabled=false.
+- `ModelStreamDiagnostics` logs the provider response ID, normalized finish reason, DONE/terminal flags, content/reasoning byte counts, missing/non-string content frames, accepted/ignored tool-call deltas, body duration and failure flag. The shared parser's behavior is unchanged; diagnostics must not promote reasoning to an answer or replay model calls. stream_error=false only means the driver/parser returned without error; the Eino layer can still reject empty/reasoning-only output afterwards.
+- Log metadata only: never request/response bodies, prompts, reasoning, tool arguments, keys, headers or URLs. Unknown finish reasons and malformed/oversized IDs are redacted. Preserve session correlation on error paths as well as success.
+- Unit verification: `bash build.sh --test ./internal/entity/models`; the diagnostics tests use local httptest/observer fixtures and verify privacy, parameter omission, malformed frame shapes and truncated streams.
+
 ## Validation Preference
 - Run the narrowest relevant test, lint, or build command after a change.
 - For backend changes, first run package-scoped `bash build.sh --test ./path/to/package/...`. Run the integration or e2e tier when the changed behavior needs real services or a full pipeline.

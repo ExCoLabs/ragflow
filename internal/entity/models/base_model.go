@@ -29,6 +29,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // APIStatusError is a provider HTTP failure with its status code preserved, so
@@ -292,7 +294,43 @@ func (b *BaseModel) doStreamRequest(ctx context.Context, url string, apiConfig *
 	}
 	req.Header.Set("Accept", "text/event-stream")
 
+	started := time.Now()
 	resp, err := b.httpClient.Do(req)
+	fields := []zap.Field{zap.Bool("transport_error", err != nil), zap.Int64("response_headers_ms", time.Since(started).Milliseconds())}
+	model, _ := reqBody["model"].(string)
+	fields = append(fields, zap.String("model", diagnosticID(model)))
+	if resp != nil {
+		fields = append(fields, zap.Int("http_status", resp.StatusCode), zap.String("provider_request_id", diagnosticID(resp.Header.Get("x-request-id"))))
+	}
+	for _, key := range []string{"max_tokens", "temperature", "top_p"} {
+		value, present := reqBody[key]
+		fields = append(fields, zap.Bool(key+"_sent", present))
+		switch value.(type) {
+		case int, int64, float32, float64:
+			fields = append(fields, zap.Any(key, value))
+		}
+	}
+	_, templateControl := reqBody["chat_template_kwargs"]
+	_, genericControl := reqBody["thinking"]
+	_, enableControl := reqBody["enable_thinking"]
+	mode := "unspecified"
+	thinking := reqBody["enable_thinking"]
+	if kwargs, ok := reqBody["chat_template_kwargs"].(map[string]any); ok {
+		thinking = kwargs["enable_thinking"]
+	}
+	if enabled, ok := thinking.(bool); ok {
+		mode = "disabled"
+		if enabled {
+			mode = "enabled"
+		}
+	}
+	if control, ok := reqBody["thinking"].(map[string]any); ok {
+		if value, ok := control["type"].(string); ok && (value == "enabled" || value == "disabled") {
+			mode = value
+		}
+	}
+	fields = append(fields, zap.Bool("thinking_control_sent", templateControl || genericControl || enableControl), zap.String("thinking_mode", mode))
+	common.InfoCtx(ctx, "ModelStreamHTTP", fields...)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}

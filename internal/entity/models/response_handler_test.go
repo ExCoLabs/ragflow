@@ -19,14 +19,113 @@ package models
 import (
 	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"ragflow/internal/common"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+func TestModelStreamHTTPDiagnostics(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	prev := common.Logger
+	common.Logger = zap.New(core)
+	t.Cleanup(func() { common.Logger = prev })
+	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		logs.TakeAll()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("x-request-id", "req-test")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte("PRIVATE_RESPONSE"))
+		}))
+		model := &BaseModel{httpClient: server.Client()}
+		key := "PRIVATE_KEY"
+		body := map[string]any{"model": "Qwen3.5", "temperature": 0.2, "messages": "PRIVATE_PROMPT"}
+		wantMode := "unspecified"
+		if status == http.StatusServiceUnavailable {
+			body["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
+			wantMode = "disabled"
+		}
+		err := model.doStreamRequest(common.WithSessionID(t.Context(), "session-test"), server.URL, &APIConfig{ApiKey: &key},
+			body, time.Second,
+			func(body io.ReadCloser) error { _, err := io.Copy(io.Discard, body); return err })
+		server.Close()
+		if (err != nil) != (status != http.StatusOK) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		entries := logs.FilterMessage("ModelStreamHTTP").All()
+		if len(entries) != 1 {
+			t.Fatalf("entries=%d", len(entries))
+		}
+		fields := entries[0].ContextMap()
+		if fields["http_status"] != int64(status) || fields["provider_request_id"] != "req-test" || fields["session_id"] != "session-test" {
+			t.Errorf("bad correlation: %v", fields)
+		}
+		if fields["max_tokens_sent"] != false || fields["top_p_sent"] != false || fields["temperature_sent"] != true {
+			t.Errorf("wrong effective flags: %v", fields)
+		}
+		if fields["thinking_mode"] != wantMode || fields["thinking_control_sent"] != (wantMode == "disabled") {
+			t.Errorf("wrong thinking flags: %v", fields)
+		}
+		for _, field := range entries[0].Context {
+			if strings.Contains(field.String, "PRIVATE") {
+				t.Fatal("private HTTP data logged")
+			}
+		}
+	}
+}
+
+func TestHandleStreamingResponseDiagnostics(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	prev := common.Logger
+	common.Logger = zap.New(core)
+	t.Cleanup(func() { common.Logger = prev })
+	for _, tc := range []struct {
+		name, wire string
+		wantError  bool
+		fields     map[string]any
+	}{
+		{"reasoning_only", "data: {\"id\":\"chatcmpl-test\",\"choices\":[{\"delta\":{\"reasoning\":\"PRIVATE_REASON\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n", false,
+			map[string]any{"provider_response_id": "chatcmpl-test", "finish_reason": "length", "sse_done": true, "reasoning_bytes": int64(len("PRIVATE_REASON")), "content_bytes": int64(0)}},
+		{"ignored_shapes", "data: {\"id\":\"PRIVATE\\nID\",\"choices\":[{\"delta\":{\"content\":[{\"text\":\"PRIVATE_CONTENT\"}],\"tool_calls\":[{\"function\":{\"name\":\"PRIVATE_TOOL\",\"arguments\":\"PRIVATE_ARGS\"}}]},\"finish_reason\":\"PRIVATE_REASON\"}]}\n\ndata: [DONE]\n", false,
+			map[string]any{"provider_response_id": "", "finish_reason": "other", "non_string_content_frames": int64(1), "ignored_tool_call_deltas": int64(1), "accepted_tool_calls": int64(0)}},
+		{"missing_delta", "data: {\"choices\":[{\"message\":{\"content\":\"PRIVATE_CONTENT\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n", false,
+			map[string]any{"missing_delta_frames": int64(1), "content_bytes": int64(0), "finish_reason": "stop"}},
+		{"truncated", "data: {\"choices\":[{\"delta\":{\"content\":\"PRIVATE_CONTENT\"}}]}\n", true,
+			map[string]any{"sse_done": false, "terminal_seen": false, "stream_error": true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs.TakeAll()
+			err := HandleStreamingResponse(common.WithSessionID(t.Context(), "session-test"), strings.NewReader(tc.wire), nil, nil, OpenAIParserConfig, func(*string, *string) error { return nil })
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error = %v", err)
+			}
+			entries := logs.FilterMessage("ModelStreamDiagnostics").All()
+			if len(entries) != 1 {
+				t.Fatalf("diagnostic entries = %d", len(entries))
+			}
+			fields := entries[0].ContextMap()
+			if fields["session_id"] != "session-test" {
+				t.Fatal("missing session correlation")
+			}
+			for key, want := range tc.fields {
+				if fields[key] != want {
+					t.Errorf("%s = %v, want %v", key, fields[key], want)
+				}
+			}
+			for _, field := range entries[0].Context {
+				if strings.Contains(field.String, "PRIVATE") {
+					t.Errorf("private content leaked in %s", field.Key)
+				}
+			}
+		})
+	}
+}
 
 // TestHandleStreamingResponseBareRootFinishReason verifies the shared handler
 // terminates the stream when an event carries only a root-level finish_reason
