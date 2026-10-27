@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"ragflow/internal/common"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -71,17 +72,34 @@ func HandleNonStreamingResponse(ctx context.Context, body []byte, modelUsage *co
 
 // HandleStreamingResponse processes a streaming chat response using the
 // ParserConfig's StreamParser to extract usage from each event.
-func HandleStreamingResponse(ctx context.Context, body io.Reader, modelUsage *common.ModelUsage, chatConfig *ChatConfig, cfg *ParserConfig, sender func(*string, *string) error) error {
+func HandleStreamingResponse(ctx context.Context, body io.Reader, modelUsage *common.ModelUsage, chatConfig *ChatConfig, cfg *ParserConfig, sender func(*string, *string) error) (resultErr error) {
 	if sender == nil {
 		return fmt.Errorf("sender is required")
 	}
 
+	started := time.Now()
 	var streamUsage *TokenUsage
 	accumulatedToolCalls := make(map[int]map[string]any)
 	sawTerminal := false
 
-	var streamModel string
-	done, err := ParseSSEStream[map[string]any](body, func(event map[string]any) error {
+	var streamModel, responseID, finish string
+	var done bool
+	var err error
+	var frames, contentBytes, reasoningBytes, nonStringContent, toolDeltas, ignoredToolDeltas, missingDeltaFrames int
+	defer func() {
+		common.InfoCtx(ctx, "ModelStreamDiagnostics",
+			zap.String("model", diagnosticID(streamModel)), zap.String("provider_response_id", responseID),
+			zap.String("finish_reason", finish), zap.Bool("sse_done", done), zap.Bool("terminal_seen", sawTerminal),
+			zap.Int("frames", frames), zap.Int("content_bytes", contentBytes), zap.Int("reasoning_bytes", reasoningBytes),
+			zap.Int("non_string_content_frames", nonStringContent), zap.Int("missing_delta_frames", missingDeltaFrames), zap.Int("tool_call_deltas", toolDeltas),
+			zap.Int("ignored_tool_call_deltas", ignoredToolDeltas), zap.Int("accepted_tool_calls", len(accumulatedToolCalls)),
+			zap.Bool("stream_error", resultErr != nil), zap.Int64("stream_body_ms", time.Since(started).Milliseconds()))
+	}()
+	done, err = ParseSSEStream[map[string]any](body, func(event map[string]any) error {
+		frames++
+		if id, ok := event["id"].(string); ok && id != "" {
+			responseID = diagnosticID(id)
+		}
 		if u, ok := cfg.StreamParser(event); ok {
 			streamUsage = u
 		}
@@ -99,6 +117,7 @@ func HandleStreamingResponse(ctx context.Context, body io.Reader, modelUsage *co
 		// before [DONE] or finish_reason".
 		if finishReason, ok := event["finish_reason"].(string); ok && finishReason != "" {
 			sawTerminal = true
+			finish = diagnosticFinishReason(finishReason)
 		}
 
 		choices, ok := event["choices"].([]any)
@@ -111,9 +130,31 @@ func HandleStreamingResponse(ctx context.Context, body io.Reader, modelUsage *co
 			return nil
 		}
 
+		if reason, ok := firstChoice["finish_reason"].(string); ok && reason != "" {
+			finish = diagnosticFinishReason(reason)
+		}
 		delta, ok := firstChoice["delta"].(map[string]any)
 		if !ok {
+			missingDeltaFrames++
 			return nil
+		}
+		if value := delta["content"]; value != nil {
+			if _, ok := value.(string); !ok {
+				nonStringContent++
+			}
+		}
+		if calls, ok := delta["tool_calls"].([]any); ok {
+			toolDeltas += len(calls)
+			for _, call := range calls {
+				entry, ok := call.(map[string]any)
+				if !ok {
+					ignoredToolDeltas++
+					continue
+				}
+				if _, ok := entry["index"].(float64); !ok {
+					ignoredToolDeltas++
+				}
+			}
 		}
 
 		accumulateToolCallDeltas(delta, accumulatedToolCalls)
@@ -126,12 +167,14 @@ func HandleStreamingResponse(ctx context.Context, body io.Reader, modelUsage *co
 			extractReasoning = extractDefaultStreamReasoning
 		}
 		if reasoning := extractReasoning(delta); reasoning != "" {
+			reasoningBytes += len(reasoning)
 			if err := sender(nil, &reasoning); err != nil {
 				return err
 			}
 		}
 
 		if content, ok := delta["content"].(string); ok && content != "" {
+			contentBytes += len(content)
 			if err := sender(&content, nil); err != nil {
 				return err
 			}
@@ -165,6 +208,27 @@ func HandleStreamingResponse(ctx context.Context, body io.Reader, modelUsage *co
 
 	endOfStream := "[DONE]"
 	return sender(&endOfStream, nil)
+}
+
+func diagnosticID(value string) string {
+	if len(value) > 128 {
+		return ""
+	}
+	for _, c := range value {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' || c == ':') {
+			return ""
+		}
+	}
+	return value
+}
+
+func diagnosticFinishReason(value string) string {
+	switch value {
+	case "stop", "length", "tool_calls", "function_call", "content_filter":
+		return value
+	default:
+		return "other"
+	}
 }
 
 // extractContentAndChoices extracts content, reasoning_content, and tool_calls
