@@ -2,9 +2,13 @@ package nlp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -40,8 +44,15 @@ func TestRetrievalUsesRerankCandidatesCountAsCandidateSet(t *testing.T) {
 	vectorWeight := 1.0
 	aggs := false
 	rerankCandidatesCount := 70
+	captureDir := t.TempDir()
+	if err := os.Chmod(captureDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RAGFLOW_RETRIEVAL_CAPTURE_DIR", captureDir)
+	t.Setenv("RAGFLOW_RETRIEVAL_CAPTURE_SESSION", "candidate-test")
+	t.Setenv("RAGFLOW_RETRIEVAL_CAPTURE_TENANT", "tenant-1")
 
-	result, err := service.Retrieval(t.Context(), &RetrievalRequest{
+	request := &RetrievalRequest{
 		Question:               "alpha",
 		TenantIDs:              []string{"tenant-1"},
 		Page:                   1,
@@ -52,12 +63,28 @@ func TestRetrievalUsesRerankCandidatesCountAsCandidateSet(t *testing.T) {
 		Aggs:                   &aggs,
 		Filter:                 map[string]interface{}{"must_not": map[string]interface{}{"exists": "compile_kwd"}},
 		RerankCandidatesCount:  &rerankCandidatesCount,
-	})
+	}
+	result, err := service.Retrieval(common.WithSessionID(t.Context(), "candidate-test"), request)
 	if err != nil {
 		t.Fatalf("Retrieval failed: %v", err)
 	}
 	if len(result.Chunks) != 10 {
 		t.Fatalf("page chunk count = %d, want 10", len(result.Chunks))
+	}
+	entries, err := os.ReadDir(captureDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("capture entries=%v err=%v", entries, err)
+	}
+	data, err := os.ReadFile(filepath.Join(captureDir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot retrievalCandidateSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Result.IDs) != 70 || snapshot.Result.IDs[0] != "chunk-00" || snapshot.Result.IDs[69] != "chunk-69" {
+		t.Fatalf("capture did not preserve the pre-pagination pool: %v", snapshot.Result.IDs)
 	}
 	if result.Total != 70 {
 		t.Fatalf("total = %d, want 70", result.Total)
@@ -73,6 +100,13 @@ func TestRetrievalUsesRerankCandidatesCountAsCandidateSet(t *testing.T) {
 	}
 	if engine.highlightCalls != 0 {
 		t.Fatalf("GetHighlight calls = %d with highlighting disabled, want 0", engine.highlightCalls)
+	}
+	if err := os.Chmod(captureDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	failedCaptureResult, err := service.Retrieval(common.WithSessionID(t.Context(), "candidate-test"), request)
+	if err != nil || !reflect.DeepEqual(result, failedCaptureResult) {
+		t.Fatalf("capture failure changed retrieval result: err=%v", err)
 	}
 }
 
