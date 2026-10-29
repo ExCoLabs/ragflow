@@ -206,6 +206,12 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		return &RetrievalResult{Chunks: []map[string]interface{}{}, DocAggs: []map[string]interface{}{}, Total: 0}, nil
 	}
 
+	if captured, captureErr := captureRetrievalCandidates(ctx, req, searchResult); captureErr != nil {
+		common.WarnCtx(ctx, "Retrieval candidate capture failed")
+	} else if captured {
+		common.InfoCtx(ctx, "Retrieval candidates captured", zap.Int("count", len(searchResult.IDs)))
+	}
+
 	sim, termSimilarity, vectorSimilarity, err := s.scoreSearchResult(ctx, req, searchResult)
 	if err != nil {
 		return nil, err
