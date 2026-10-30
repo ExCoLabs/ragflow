@@ -38,6 +38,7 @@ import (
 // downstream code would silently treat as "empty document" (PR review
 // Finding 1).
 func OpenAndExtract(data []byte, format string) (irJSON, markdown, plainText string, mdErr error, err error) {
+	data, format = normalizeInput(data, format)
 	doc, openErr := officeOxide.OpenFromBytes(data, format)
 	if openErr != nil {
 		return "", "", "", nil, fmt.Errorf("office_oxide open %s: %w", format, openErr)
