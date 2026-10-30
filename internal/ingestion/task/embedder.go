@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"net"
@@ -581,6 +582,11 @@ func isRetryableErr(err error) bool {
 		return retryableStatus(statusErr.Status)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// The server closed the connection without a response. It arrives inside a
+	// *url.Error, which is a net.Error, and isRetryableNetErr would reject it.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	var netErr net.Error
