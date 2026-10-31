@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"ragflow/internal/agent/runtime"
+	"ragflow/internal/tokenizer"
 
 	"gorm.io/gorm"
 )
@@ -669,6 +670,53 @@ func TestRetrieval_RecordsFrontendReferencePayload(t *testing.T) {
 	docAgg, _ := docAggs[0].(map[string]any)
 	if docAgg["doc_id"] != "doc-1" || docAgg["doc_name"] != "paper.pdf" || docAgg["count"] != 1 {
 		t.Fatalf("reference doc_agg = %#v, want doc metadata", docAgg)
+	}
+}
+
+// TestRetrieval_KeepsResultWithinTokenBudget pins the output budget: one
+// oversized chunk is trimmed, chunks past the total budget are dropped, and
+// each chunk's text reaches the model once.
+func TestRetrieval_KeepsResultWithinTokenBudget(t *testing.T) {
+	huge := strings.Repeat("word ", 3*retrievalChunkMaxTokens)
+	full := strings.Repeat("word ", retrievalChunkMaxTokens-100)
+	chunks := []RetrievalChunk{{ID: "ck-huge", Content: huge, DocumentID: "doc-1"}}
+	for i := range retrievalResultMaxTokens / retrievalChunkMaxTokens {
+		chunks = append(chunks, RetrievalChunk{ID: "ck-" + string(rune('a'+i)), Content: full})
+	}
+	prev := GetRetrievalService()
+	SetRetrievalService(staticRetrievalService{chunks: chunks})
+	t.Cleanup(func() { SetRetrievalService(prev) })
+
+	state := runtime.NewCanvasState("run-1", "task-1")
+	ctx := runtime.WithState(t.Context(), state)
+
+	out, err := NewRetrievalTool().InvokableRun(ctx, `{"query":"hello","dataset_ids":["kb-1"]}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	var result retrievalResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := tokenizer.NumTokensFromString(result.FormalizedContent); got > retrievalResultMaxTokens+len(chunks)*20 {
+		t.Fatalf("formalized_content = %d tokens, want about %d at most", got, retrievalResultMaxTokens)
+	}
+	if !strings.Contains(result.FormalizedContent, "[ID:ck-huge] word") || !strings.Contains(result.FormalizedContent, retrievalTruncatedMarker) {
+		t.Fatal("the top chunk must be kept and marked as truncated")
+	}
+	if len(result.Chunks) == 0 || len(result.Chunks) >= len(chunks) {
+		t.Fatalf("chunks = %d, want some of the %d dropped", len(result.Chunks), len(chunks))
+	}
+	if strings.Contains(out, `"content"`) {
+		t.Fatal("chunk payloads must not repeat the content")
+	}
+
+	refs, _ := state.GetRetrievalReference()["chunks"].([]any)
+	if len(refs) != len(result.Chunks) {
+		t.Fatalf("reference chunks = %d, want the %d the model saw", len(refs), len(result.Chunks))
+	}
+	if ref, _ := refs[0].(map[string]any); ref["content"] != huge {
+		t.Fatal("citation references must keep the full chunk content")
 	}
 }
 

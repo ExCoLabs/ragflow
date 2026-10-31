@@ -30,6 +30,7 @@ import (
 
 	"ragflow/internal/agent/runtime"
 	"ragflow/internal/common"
+	"ragflow/internal/tokenizer"
 )
 
 // ErrGraphRAGNotSupported is returned by the Retrieval tool when
@@ -43,6 +44,15 @@ var ErrGraphRAGNotSupported = errors.New("GraphRAG 检索暂不支持，请使�
 const retrievalToolName = "search_my_dateset"
 
 const retrievalToolDescription = "This tool can be utilized for relevant content searching in the datasets."
+
+// A single drawing or table chunk can run past 40k tokens, and an agent calls
+// this tool several times per answer, so unbounded results overflow its context.
+const (
+	retrievalChunkMaxTokens  = 4000
+	retrievalResultMaxTokens = 32000
+)
+
+const retrievalTruncatedMarker = "\n[…truncated]"
 
 // retrievalArgs is the JSON schema the model sends into InvokableRun. We
 // accept both `query` (canonical) and `dataset_ids` / `use_kg` etc. to
@@ -83,12 +93,10 @@ type retrievalResult struct {
 	Error             string         `json:"_ERROR,omitempty"`
 }
 
-// chunkPayload is the minimal chunk shape we surface. We don't try to
-// match every Python field — the stub returns empty data; the wired
-// implementation will populate the real shape.
+// chunkPayload is the minimal chunk shape we surface. It carries no content:
+// formalized_content already holds every chunk's text once.
 type chunkPayload struct {
 	ID         string  `json:"id,omitempty"`
-	Content    string  `json:"content,omitempty"`
 	DocumentID string  `json:"document_id,omitempty"`
 	Score      float64 `json:"score,omitempty"`
 }
@@ -264,6 +272,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	common.Debug("agent retrieval tool: search result",
 		zap.Int("chunks_count", len(chunks)),
 	)
+	chunks, visible := budgetRetrievalChunks(chunks)
 	// Map the chunks into the result envelope. The retrievalResult
 	// type carries the eino-tool envelope shape (chunkPayload, not
 	// RetrievalChunk), so we translate.
@@ -271,14 +280,13 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	for _, c := range chunks {
 		payload = append(payload, chunkPayload{
 			ID:         c.ID,
-			Content:    c.Content,
 			DocumentID: c.DocumentID,
 			Score:      c.Score,
 		})
 	}
-	formalizedContent := renderChunks(chunks, args.Query)
+	formalizedContent := renderChunks(visible, args.Query)
 	if args.RetrievalFrom == "memory" {
-		formalizedContent = renderMemoryChunks(chunks)
+		formalizedContent = renderMemoryChunks(visible)
 	}
 	if len(chunks) == 0 {
 		formalizedContent = args.EmptyResponse
@@ -528,6 +536,38 @@ func resolveRetrievalValue(value any, state *runtime.CanvasState) (any, error) {
 	default:
 		return value, nil
 	}
+}
+
+// budgetRetrievalChunks trims each chunk to retrievalChunkMaxTokens and keeps
+// the highest-ranked chunks that fit retrievalResultMaxTokens. It returns the
+// kept chunks untouched, for citation references, alongside their trimmed
+// copies for the model. The first chunk is always kept.
+func budgetRetrievalChunks(chunks []RetrievalChunk) (kept, visible []RetrievalChunk) {
+	used, trimmed := 0, 0
+	for _, c := range chunks {
+		v := c
+		n := tokenizer.NumTokensFromString(v.Content)
+		if n > retrievalChunkMaxTokens {
+			v.Content = tokenizer.TrimContentToTokenLimit(v.Content, retrievalChunkMaxTokens) + retrievalTruncatedMarker
+			n = retrievalChunkMaxTokens
+			trimmed++
+		}
+		if len(kept) > 0 && used+n > retrievalResultMaxTokens {
+			continue
+		}
+		used += n
+		kept = append(kept, c)
+		visible = append(visible, v)
+	}
+	if trimmed > 0 || len(kept) < len(chunks) {
+		common.Info("agent retrieval tool: result over token budget",
+			zap.Int("chunks", len(chunks)),
+			zap.Int("kept", len(kept)),
+			zap.Int("trimmed", trimmed),
+			zap.Int("tokens", used),
+		)
+	}
+	return kept, visible
 }
 
 // renderChunks concatenates the retrieved chunks into a human-
