@@ -98,7 +98,9 @@ func NewCanvasState(runID, sessionID string) *CanvasState {
 
 // EnsureSysDate fills sys.date with the current local timestamp when it
 // is missing or blank. Python canvas initializes the same variable with
-// "%Y-%m-%d %H:%M:%S"; keep that wire format for DSL compatibility.
+// "%Y-%m-%d %H:%M:%S"; the timestamp prefix keeps that wire format and the
+// value is extended with the UTC offset and zone name so agents can report
+// the timezone from verified context instead of guessing it.
 func (s *CanvasState) EnsureSysDate() {
 	if s == nil {
 		return
@@ -111,7 +113,12 @@ func (s *CanvasState) EnsureSysDate() {
 	if v, ok := s.Sys["date"]; ok && strings.TrimSpace(fmt.Sprint(v)) != "" {
 		return
 	}
-	s.Sys["date"] = time.Now().Format("2006-01-02 15:04:05")
+	now := time.Now()
+	zone := now.Location().String()
+	if zone == "Local" {
+		zone = now.Format("MST")
+	}
+	s.Sys["date"] = fmt.Sprintf("%s (%s)", now.Format("2006-01-02 15:04:05 -0700"), zone)
 }
 
 // SeedIdentity writes the trusted caller identity into Sys. Both the normal
