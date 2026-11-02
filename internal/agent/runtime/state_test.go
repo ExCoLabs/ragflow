@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"regexp"
 	"testing"
 )
 
@@ -325,8 +326,12 @@ func TestCanvasState_EnsureSysDate(t *testing.T) {
 	t.Parallel()
 
 	state := NewCanvasState("r", "t")
-	if got, _ := state.Sys["date"].(string); got == "" {
+	got, _ := state.Sys["date"].(string)
+	if got == "" {
 		t.Fatal("NewCanvasState did not initialize sys.date")
+	}
+	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4} \(.+\)$`).MatchString(got) {
+		t.Fatalf("sys.date missing offset and zone name: %q", got)
 	}
 
 	state.Sys["date"] = ""
