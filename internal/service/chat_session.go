@@ -1230,6 +1230,10 @@ func (s *ChatSessionService) ChatCompletions(
 		}
 	}
 
+	if err = applyRequestMetaDataFilter(dialog, kwargs); err != nil {
+		return fail(common.NewCodedError(common.CodeArgumentError, err.Error()))
+	}
+
 	// --- 4. Initialize reference ---
 	var reference []interface{}
 	if session != nil {
@@ -2109,4 +2113,35 @@ func (s *ChatSessionService) chunksFormat(reference map[string]interface{}) []ma
 		})
 	}
 	return out
+}
+
+// applyRequestMetaDataFilter replaces the chat's meta_data_filter with the
+// request's manual conditions for this turn, so a client with its own filter
+// controls needs no chat per filter combination. Only manual is accepted: the
+// client decides the scope, and an empty list means no filter. dialog is the
+// copy loaded for this request.
+func applyRequestMetaDataFilter(dialog *entity.Chat, kwargs map[string]interface{}) error {
+	raw, ok := kwargs["meta_data_filter"]
+	if !ok {
+		return nil
+	}
+	delete(kwargs, "meta_data_filter")
+	if raw == nil {
+		return nil
+	}
+	filter, ok := raw.(map[string]interface{})
+	if !ok {
+		return errors.New("`meta_data_filter` must be an object")
+	}
+	if method, _ := filter["method"].(string); method != "manual" {
+		return errors.New("`meta_data_filter.method` must be manual")
+	}
+	if v, has := filter["manual"]; has && v != nil {
+		if _, ok := v.([]interface{}); !ok {
+			return errors.New("`meta_data_filter.manual` must be a list")
+		}
+	}
+	override := entity.JSONMap(filter)
+	dialog.MetaDataFilter = &override
+	return nil
 }
