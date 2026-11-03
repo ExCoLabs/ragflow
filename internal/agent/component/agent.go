@@ -140,6 +140,10 @@ type AgentParam struct {
 	MaxTokensDisabled   bool
 	TopPDisabled        bool
 	TemperatureDisabled bool
+
+	// contextLength is the resolved model context window used to bound the
+	// tool-result share of each ReAct round's prompt. 0 disables fitting.
+	contextLength int
 }
 
 // SubAgentTool is a child Agent exposed to a parent Agent as an Eino tool.
@@ -236,7 +240,10 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 		StreamToolCallChecker: scanAllStreamForToolCall,
 		MessageModifier: func(_ context.Context, msgs []*schema.Message) []*schema.Message {
 			if p.SystemPrompt != "" {
-				return append([]*schema.Message{schema.SystemMessage(p.SystemPrompt)}, msgs...)
+				msgs = append([]*schema.Message{schema.SystemMessage(p.SystemPrompt)}, msgs...)
+			}
+			if p.contextLength > 0 {
+				msgs = fitToolResultMessages(msgs, chat.ContextFitBudget(p.contextLength)-agentOutputReserve(p.MaxTokens))
 			}
 			return msgs
 		},
@@ -1740,6 +1747,10 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 	if err != nil {
 		return nil, err
 	}
+	// Resolve the model's context window so each ReAct round can bound the
+	// accumulated tool results instead of failing at the provider with a
+	// context-length 400 (mirrors llm.go's content_length resolution).
+	p.contextLength = dao.ResolveModelContentLength(ctx, db, tenantID, originalModelID, p.Driver, p.ModelID)
 
 	var state *runtime.CanvasState
 	if s, err := runtime.GetStateFromContext(ctx); err == nil && s != nil {
