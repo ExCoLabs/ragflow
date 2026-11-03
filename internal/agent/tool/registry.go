@@ -499,6 +499,9 @@ func buildRetrievalTool(params map[string]any) (einotool.BaseTool, error) {
 	if v, ok := boolParam(params, "toc_enhance"); ok {
 		defaults.TOCEnhance = v
 	}
+	if v, ok := boolParam(params, "query_fusion"); ok {
+		defaults.QueryFusion = v
+	}
 	if v, ok := floatParam(params, "similarity_threshold"); ok {
 		defaults.SimilarityThreshold = &v
 	}

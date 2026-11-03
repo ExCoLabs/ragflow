@@ -83,7 +83,10 @@ type RetrievalRequest struct {
 	RerankID                 string
 	CrossLanguages           []string
 	TOCEnhance               bool
-	MetaDataFilter           map[string]any
+	// QueryFusion also searches with the query and the user's question
+	// stripped of the applied metadata filter's words and fuses the rankings.
+	QueryFusion    bool
+	MetaDataFilter map[string]any
 	// ChunkMeta is a filter/boost on document metadata stored on chunks that
 	// the caller already resolved (common.ChunkMetaScope). Nil changes nothing.
 	ChunkMeta     *common.ChunkMetaScope

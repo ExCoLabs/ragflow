@@ -48,23 +48,25 @@ const retrievalToolDescription = "This tool can be utilized for relevant content
 // accept both `query` (canonical) and `dataset_ids` / `use_kg` etc. to
 // match the Python ToolMeta field set.
 type retrievalArgs struct {
-	Query                    string         `json:"query"`
-	DatasetIDs               []string       `json:"dataset_ids,omitempty"`
-	KBIDs                    []string       `json:"kb_ids,omitempty"`
-	MemoryIDs                []string       `json:"memory_ids,omitempty"`
-	UserID                   string         `json:"user_id,omitempty"`
-	TopN                     int            `json:"top_n,omitempty"`
-	RerankCandidatesCount    int            `json:"rerank_candidates_count,omitempty"`
-	TopK                     int            `json:"top_k,omitempty"`
-	KeywordsSimilarityWeight *float64       `json:"keywords_similarity_weight,omitempty"`
-	UseKG                    bool           `json:"use_kg,omitempty"`
-	SimilarityThreshold      *float64       `json:"similarity_threshold,omitempty"`
-	RerankID                 string         `json:"rerank_id,omitempty"`
-	CrossLanguages           []string       `json:"cross_languages,omitempty"`
-	TOCEnhance               bool           `json:"toc_enhance,omitempty"`
-	MetaDataFilter           map[string]any `json:"meta_data_filter,omitempty"`
-	RetrievalFrom            string         `json:"retrieval_from,omitempty"`
-	EmptyResponse            string         `json:"empty_response,omitempty"`
+	Query                    string   `json:"query"`
+	DatasetIDs               []string `json:"dataset_ids,omitempty"`
+	KBIDs                    []string `json:"kb_ids,omitempty"`
+	MemoryIDs                []string `json:"memory_ids,omitempty"`
+	UserID                   string   `json:"user_id,omitempty"`
+	TopN                     int      `json:"top_n,omitempty"`
+	RerankCandidatesCount    int      `json:"rerank_candidates_count,omitempty"`
+	TopK                     int      `json:"top_k,omitempty"`
+	KeywordsSimilarityWeight *float64 `json:"keywords_similarity_weight,omitempty"`
+	UseKG                    bool     `json:"use_kg,omitempty"`
+	SimilarityThreshold      *float64 `json:"similarity_threshold,omitempty"`
+	RerankID                 string   `json:"rerank_id,omitempty"`
+	CrossLanguages           []string `json:"cross_languages,omitempty"`
+	TOCEnhance               bool     `json:"toc_enhance,omitempty"`
+	// QueryFusion is a node-level setting only; the model cannot switch it.
+	QueryFusion    bool           `json:"-"`
+	MetaDataFilter map[string]any `json:"meta_data_filter,omitempty"`
+	RetrievalFrom  string         `json:"retrieval_from,omitempty"`
+	EmptyResponse  string         `json:"empty_response,omitempty"`
 	// FunctionName is the agent-visible tool name from the DSL. It is not
 	// exposed to the model as part of the tool arguments.
 	FunctionName string `json:"-"`
@@ -242,6 +244,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		RerankID:                 args.RerankID,
 		CrossLanguages:           append([]string(nil), args.CrossLanguages...),
 		TOCEnhance:               args.TOCEnhance,
+		QueryFusion:              args.QueryFusion,
 		MetaDataFilter:           cloneStringAnyMap(args.MetaDataFilter),
 		RetrievalFrom:            args.RetrievalFrom,
 		UserID:                   args.UserID,
@@ -365,6 +368,7 @@ func (r *RetrievalTool) mergeDefaults(args retrievalArgs) retrievalArgs {
 		args.RetrievalFrom = "memory"
 	}
 	args.TOCEnhance = args.TOCEnhance || r.defaults.TOCEnhance
+	args.QueryFusion = r.defaults.QueryFusion
 	args.UseKG = args.UseKG || r.defaults.UseKG
 	return args
 }
