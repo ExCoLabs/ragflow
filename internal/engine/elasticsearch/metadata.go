@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"gorm.io/gorm"
@@ -794,6 +795,13 @@ func (e *Engine) FilterDocIdsByMetaPushdown(ctx context.Context, sqlDB *gorm.DB,
 	// warning (parity with the Python reference) AND bail out so the
 	// caller falls back to the in-memory meta_filter, which is correct.
 	total, totalOK := totalHitsFromESResponse(result)
+	if (totalOK && total > int64(metaPushdownMaxSize)) || (!totalOK && len(uniqueDocIDs) >= metaPushdownMaxSize) {
+		ids, err := e.scanMetadataDocIDs(ctx, indexNames, queryBody)
+		if err == nil {
+			return ids
+		}
+		common.Warn("Metadata document scan failed", zap.Int("datasetCount", len(kbIDs)))
+	}
 	switch {
 	case !totalOK && len(uniqueDocIDs) >= metaPushdownMaxSize:
 		// ES didn't report a verifiable total but we filled the cap. The
@@ -816,6 +824,85 @@ func (e *Engine) FilterDocIdsByMetaPushdown(ctx context.Context, sqlDB *gorm.DB,
 	}
 
 	return docIDs
+}
+
+func (e *Engine) scanMetadataDocIDs(ctx context.Context, indices []string, query map[string]interface{}) ([]string, error) {
+	body := make(map[string]interface{}, len(query)+4)
+	for key, value := range query {
+		body[key] = value
+	}
+	body["size"] = metaPushdownMaxSize
+	body["sort"] = []string{"_doc"}
+	body["track_total_hits"] = true
+	body["_source"] = []string{"id"}
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		return nil, err
+	}
+	res, err := e.client.Search(
+		e.client.Search.WithContext(ctx), e.client.Search.WithIndex(indices...),
+		e.client.Search.WithAllowPartialSearchResults(false),
+		e.client.Search.WithScroll(time.Minute), e.client.Search.WithBody(&buf),
+	)
+	if err != nil {
+		return nil, err
+	}
+	var scrollID string
+	defer func() {
+		if scrollID != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if cleared, err := e.client.ClearScroll(e.client.ClearScroll.WithContext(cleanupCtx), e.client.ClearScroll.WithScrollID(scrollID)); err == nil {
+				cleared.Body.Close()
+			}
+		}
+	}()
+	ids := make([]string, 0)
+	var total, read int64
+	for page := 0; ; page++ {
+		var result map[string]interface{}
+		err := json.NewDecoder(res.Body).Decode(&result)
+		res.Body.Close()
+		if next, ok := result["_scroll_id"].(string); ok && next != "" {
+			scrollID = next
+		}
+		if err != nil || res.IsError() {
+			return nil, fmt.Errorf("metadata scroll page %d failed", page)
+		}
+		if timedOut, _ := result["timed_out"].(bool); timedOut {
+			return nil, fmt.Errorf("metadata scroll timed out")
+		}
+		if shards, ok := result["_shards"].(map[string]interface{}); ok {
+			if failed, _ := shards["failed"].(float64); failed > 0 {
+				return nil, fmt.Errorf("metadata scroll has failed shards")
+			}
+		}
+		if page == 0 {
+			var ok bool
+			total, ok = totalHitsFromESResponse(result)
+			if !ok || total < 0 {
+				return nil, fmt.Errorf("metadata scroll has no exact total")
+			}
+			hits, _ := result["hits"].(map[string]interface{})
+			totalValue, _ := hits["total"].(map[string]interface{})
+			if relation, _ := totalValue["relation"].(string); relation != "eq" {
+				return nil, fmt.Errorf("metadata scroll total is incomplete")
+			}
+		}
+		pageIDs := ExtractDocIDs(result)
+		read += int64(len(pageIDs))
+		ids = append(ids, pageIDs...)
+		if read == total {
+			return dedupeStrings(ids), nil
+		}
+		if len(pageIDs) == 0 || read > total || scrollID == "" {
+			return nil, fmt.Errorf("metadata scroll ended before exact total")
+		}
+		res, err = e.client.Scroll(e.client.Scroll.WithContext(ctx), e.client.Scroll.WithScrollID(scrollID), e.client.Scroll.WithScroll(time.Minute))
+		if err != nil {
+			return nil, err
+		}
+	}
 }
 
 // dedupeStrings returns the unique values of s, preserving first-seen order.

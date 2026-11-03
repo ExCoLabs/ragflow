@@ -186,6 +186,18 @@ func TestApplyMetaDataFilterWithDiagnostics_ManualNoMatches(t *testing.T) {
 	}
 }
 
+func TestConstrainLargeMetadataScopePreservesBaseDocuments(t *testing.T) {
+	ids := make([]string, 120974)
+	for i := range ids {
+		ids[i] = "project-document"
+	}
+	ids[len(ids)-1] = "last-document"
+	base := []string{"outside-project", "last-document"}
+	if got := constrainDocIDs(base, ids); !reflect.DeepEqual(got, []string{"last-document"}) {
+		t.Fatalf("constrained scope = %v, want only the selected document beyond the first window", got)
+	}
+}
+
 func TestApplyMetaDataFilterWithDiagnostics_DisabledAndUnsupported(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

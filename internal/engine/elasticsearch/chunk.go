@@ -2151,6 +2151,8 @@ func memoryMessageStatusBool(value interface{}) bool {
 	}
 }
 
+const maxTermsQueryValues = 65536
+
 // buildBoolQueryFromCondition builds an ES bool query from condition map.
 // Skill indexes use status, regular chunk indexes use kb_id, and memory
 // message indexes use memory_id plus message-specific storage fields.
@@ -2330,6 +2332,17 @@ func buildBoolQueryFromConditionRaw(filter map[string]interface{}, kbIDs []strin
 						"analyze_wildcard": true,
 					},
 				})
+				continue
+			}
+		}
+		if k == "doc_id" {
+			if items, ok := conditionTermsList(v); ok && len(items) > maxTermsQueryValues {
+				var batches []interface{}
+				for start := 0; start < len(items); start += maxTermsQueryValues {
+					end := min(start+maxTermsQueryValues, len(items))
+					batches = append(batches, map[string]interface{}{"terms": map[string]interface{}{k: items[start:end]}})
+				}
+				filterClauses = append(filterClauses, map[string]interface{}{"bool": map[string]interface{}{"should": batches, "minimum_should_match": 1}})
 				continue
 			}
 		}
