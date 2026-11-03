@@ -43,11 +43,12 @@ import (
 // is the only thing the grounding path cares about, so we record
 // the request verbatim and return a fixed string.
 type groundingTestInvoker struct {
-	mu        sync.Mutex
-	lastReq   ChatInvokeRequest
-	responses []string
-	calls     int
-	failAt    int
+	mu              sync.Mutex
+	lastReq         ChatInvokeRequest
+	responses       []string
+	calls           int
+	failAt          int
+	cancelAfterCall context.CancelFunc
 }
 
 type groundingStreamingInvoker struct {
@@ -88,6 +89,9 @@ func (g *groundingTestInvoker) Invoke(_ context.Context, _ *gorm.DB, req ChatInv
 	defer g.mu.Unlock()
 	g.lastReq = req
 	g.calls++
+	if g.cancelAfterCall != nil {
+		defer g.cancelAfterCall()
+	}
 	if g.failAt == g.calls {
 		return nil, errors.New("grounding provider failed")
 	}
@@ -706,14 +710,97 @@ func TestGroundingPreservesTextAndCitationIdentity(t *testing.T) {
 	}
 }
 
+func TestGroundingRejectedBatchDoesNotBlockLaterBatches(t *testing.T) {
+	const first = `{"citations":[{"quote":"First","id":"0"}]}`
+	const second = `{"citations":[{"quote":"Second","id":"13"}]}`
+	const third = `{"citations":[{"quote":"Third","id":"26"}]}`
+	const empty = `{"citations":[]}`
+	for _, tc := range []struct {
+		name, want, reason string
+		responses          []string
+	}{
+		{"invalid_json", "First. Second [ID:13]. Third [ID:26].", "invalid_proposal", []string{"not JSON", second, third}},
+		{"missing_anchor", "First. Second [ID:13]. Third.", "anchor_not_found", []string{`{"citations":[{"quote":"Missing","id":"0"}]}`, second, empty}},
+		{"future_source", "First. Second [ID:13]. Third.", "unknown_citation", []string{`{"citations":[{"quote":"First","id":"13"}]}`, second, empty}},
+		{"accepted_rejected_accepted", "First [ID:0]. Second. Third [ID:26].", "anchor_not_found", []string{first, `{"citations":[{"quote":"Missing","id":"13"}]}`, third}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: tc.responses}}
+			previous := getDefaultChatInvoker()
+			SetDefaultChatInvoker(inv)
+			t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+			var chunks []prompts.CitationSource
+			for i := 0; i < 39; i++ {
+				chunks = append(chunks, prompts.CitationSource{ID: fmt.Sprint(i), Content: strings.Repeat("x", citationGroundingMaxChunkChars)})
+			}
+			got, err := applyCitationGrounding(t.Context(), nil, AgentParam{ModelID: "stub", Cite: true}, "First. Second. Third.", chunks)
+			var rejected *citationGroundingRejectionError
+			if got != tc.want || !errors.As(err, &rejected) || rejected.reason != tc.reason {
+				t.Fatalf("content=%q err=%v, want %q / %s", got, err, tc.want, tc.reason)
+			}
+			if inv.calls != 3 || inv.streamCalls != 3 {
+				t.Fatalf("calls=%d stream_calls=%d, want one call per batch", inv.calls, inv.streamCalls)
+			}
+			if tc.name == "invalid_json" && inv.lastReq.Messages[1].Content != "First. Second [ID:13]. Third." {
+				t.Fatalf("later batch did not receive the last accepted answer: %q", inv.lastReq.Messages[1].Content)
+			}
+		})
+	}
+}
+
+func TestGroundingRejectedBatchesRemainBounded(t *testing.T) {
+	inv := &groundingTestInvoker{responses: []string{"not JSON"}}
+	previous := getDefaultChatInvoker()
+	SetDefaultChatInvoker(inv)
+	t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+	var chunks []prompts.CitationSource
+	for i := 0; i < (citationGroundingMaxBatches+1)*14; i++ {
+		chunks = append(chunks, prompts.CitationSource{ID: fmt.Sprint(i), Content: strings.Repeat("x", citationGroundingMaxChunkChars)})
+	}
+	got, err := applyCitationGrounding(t.Context(), nil, AgentParam{ModelID: "stub", Cite: true}, "Original.", chunks)
+	if got != "Original." || err == nil || inv.calls != citationGroundingMaxBatches {
+		t.Fatalf("content=%q err=%v calls=%d, want original answer and capped calls", got, err, inv.calls)
+	}
+}
+
+func TestGroundingCancellationStopsRemainingBatches(t *testing.T) {
+	for _, cancelBefore := range []bool{true, false} {
+		t.Run(fmt.Sprint(cancelBefore), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			inv := &groundingTestInvoker{responses: []string{"not JSON", `{"citations":[{"quote":"Original","id":"13"}]}`}}
+			wantCalls := 1
+			if cancelBefore {
+				cancel()
+				wantCalls = 0
+			} else {
+				inv.cancelAfterCall = cancel
+			}
+			previous := getDefaultChatInvoker()
+			SetDefaultChatInvoker(inv)
+			t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+			var chunks []prompts.CitationSource
+			for i := 0; i < 14; i++ {
+				chunks = append(chunks, prompts.CitationSource{ID: fmt.Sprint(i), Content: strings.Repeat("x", citationGroundingMaxChunkChars)})
+			}
+			got, err := applyCitationGrounding(ctx, nil, AgentParam{ModelID: "stub", Cite: true}, "Original.", chunks)
+			if got != "Original." || !errors.Is(err, context.Canceled) || inv.calls != wantCalls {
+				t.Fatalf("content=%q err=%v calls=%d, want cancellation after %d calls", got, err, inv.calls, wantCalls)
+			}
+		})
+	}
+}
+
 func TestGroundingBatchFailurePreservesAcceptedContent(t *testing.T) {
 	for _, tc := range []struct {
 		name, first, second, want, status string
 		failAt, calls                     int
 	}{
-		{"rejected_later", `{"citations":[{"quote":"original","id":"0"}]}`, `{"citations":[{"quote":"different answer","id":"13"}]}`, "original [ID:0]", "rejected: anchor_not_found", 0, 2},
+		{"rejected_later", `{"citations":[{"quote":"original","id":"0"}]}`, `{"citations":[{"quote":"different answer","id":"13"}]}`, "original [ID:0]", "rejected: anchor_not_found", 0, 3},
 		{"provider_error_later", `{"citations":[{"quote":"original","id":"0"}]}`, "", "original [ID:0]", "error:", 2, 2},
-		{"future_source_not_visible", `{"citations":[{"quote":"original","id":"13"}]}`, "", "original", "rejected: unknown_citation", 0, 1},
+		{"future_source_not_visible", `{"citations":[{"quote":"original","id":"13"}]}`, "", "original", "rejected: unknown_citation", 0, 3},
+		{"rejected_then_accepted", "not JSON", `{"citations":[{"quote":"original","id":"13"}]}`, "original [ID:13]", "rejected: invalid_proposal", 0, 3},
+		{"rejected_then_provider_error", "not JSON", "", "original", "error:", 2, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{tc.first, tc.second}, failAt: tc.failAt}}

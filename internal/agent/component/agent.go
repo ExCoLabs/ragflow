@@ -1087,12 +1087,12 @@ func citationGroundingHasSubstantiveText(s string) bool {
 //
 // Chunk bodies are truncated and the chunk set is split into batches;
 // each batch is grounded by a separate sequential call whose output
-// feeds the next one. On a batch failure the last successful version
+// feeds the next one. On a provider failure the last successful version
 // is returned, so a single provider timeout loses only the remaining
 // batches, never the answer itself. Grounded deltas are buffered
 // rather than streamed, so a failed call never reached the client.
 //
-// Returns the grounded content and the first batch error, if any.
+// Returns the grounded content and a batch error, if any.
 func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, content string, chunks []prompts.CitationSource) (string, error) {
 	if !p.Cite {
 		return content, nil
@@ -1133,6 +1133,9 @@ func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, cont
 	grounded := content
 	var firstErr error
 	for i, batch := range batches {
+		if err := ctx.Err(); err != nil {
+			return grounded, err
+		}
 		bStart := time.Now()
 		out, proposal, err := citationGroundingCall(ctx, db, p, grounded, batch)
 		verdict, reason, errorKind := "error", "provider_error", "provider_error"
@@ -1165,10 +1168,14 @@ func applyCitationGrounding(ctx context.Context, db *gorm.DB, p AgentParam, cont
 			verdict, reason, validation.ValidCitations, validation.InvalidCitations, validation.AddedCitations, sessionID, tenantID,
 			proposal.Parsed, proposal.Count, proposal.ValidIDs, proposal.InvalidIDs))
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("citation grounding batch %d/%d: %w", i+1, len(batches), err)
+			batchErr := fmt.Errorf("citation grounding batch %d/%d: %w", i+1, len(batches), err)
+			if !errors.As(err, &rejection) {
+				return grounded, batchErr
 			}
-			break
+			if firstErr == nil {
+				firstErr = batchErr
+			}
+			continue
 		}
 		if trimmed := strings.TrimSpace(out); trimmed != "" {
 			grounded = out
