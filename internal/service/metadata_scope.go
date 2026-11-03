@@ -358,7 +358,12 @@ func ApplyMetaDataScopeWithDiagnostics(
 		}
 		matched := false
 		if len(hard) > 0 {
-			matched = applyHard(hard, logic)
+			_, _, matched = matchRelaxing(hard, logic, filterKeys, func(c []MetaFilterCondition) (struct{}, bool) {
+				return struct{}{}, applyHard(c, logic)
+			})
+			if !matched {
+				record("no_matches", hard, logic, 0)
+			}
 		} else {
 			record("not_generated", nil, logic, 0)
 		}
