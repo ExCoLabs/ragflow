@@ -4011,6 +4011,7 @@ Starts a chat completion request. The same endpoint supports three modes:
   - `"session_id"`: `string` (optional)
   - `"llm_id"`: `string` (optional)
   - `"legacy"`: `boolean` (optional)
+  - `"meta_data_filter"`: `object` (optional)
 
 ##### Request example
 
@@ -4071,6 +4072,18 @@ curl --request POST \
   Defaults to `false`. Enables backward compatibility with RAGFlow v0.23.0 for streaming responses. When set to `true`:
   - Cumulative output: The `"answer"` field in each chunk returns the entire text generated so far, rather than just the new tokens (deltas).
   - No reasoning markers: The `start_to_think` and `end_to_think` signals are stripped from the stream.
+- `"meta_data_filter"`: `object`
+  Optional. Replaces the chat assistant's metadata filter for this request only. Only `"method": "manual"` is accepted; `"manual"` lists the conditions (same shape as the chat's manual filter) and `"logic"` (`"and"` by default) joins them. An empty list searches without a filter. Conditions that match no document yield no retrieved chunks, as with the chat's own manual filter.
+
+  ```json
+  {
+    "method": "manual",
+    "manual": [
+      {"key": "project", "op": "contains", "value": "2018_055"},
+      {"key": "ext", "op": "in", "value": ["pdf", "dwg"]}
+    ]
+  }
+  ```
 
 #### Response
 
