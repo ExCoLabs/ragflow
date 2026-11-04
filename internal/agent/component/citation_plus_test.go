@@ -36,7 +36,7 @@ func TestCitationPlusPrompt_EmptySources(t *testing.T) {
 	if !strings.Contains(rendered, "ID:") {
 		t.Error("expected 'ID:' prefix in sources block (empty section)")
 	}
-	for _, instruction := range []string{"JSON object", "quote and id", "EXACTLY ONCE", `{"citations":[]}`} {
+	for _, instruction := range []string{"JSON object", "answer_quote and id", "EXACTLY ONCE", "<immutable_answer>", "NOT a quotation from the sources", "Never paraphrase", `{"citations":[]}`} {
 		if !strings.Contains(rendered, instruction) {
 			t.Errorf("missing insertion protocol instruction %q", instruction)
 		}

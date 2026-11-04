@@ -793,7 +793,7 @@ func decodeCitationInsertions(raw string) ([]citationInsertion, error) {
 		for decoder.More() {
 			key, err := decoder.Token()
 			name, ok := key.(string)
-			if err != nil || !ok || seen[name] || (name != "quote" && name != "id") {
+			if err != nil || !ok || seen[name] || (name != "answer_quote" && name != "id") {
 				return nil, invalid
 			}
 			value, err := decoder.Token()
@@ -802,7 +802,7 @@ func decodeCitationInsertions(raw string) ([]citationInsertion, error) {
 				return nil, invalid
 			}
 			seen[name] = true
-			if name == "quote" {
+			if name == "answer_quote" {
 				entry.Quote = text
 			} else {
 				entry.ID = text
@@ -1218,7 +1218,7 @@ func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, conte
 		BaseURL:   p.BaseURL,
 		Messages: []schema.Message{
 			{Role: schema.System, Content: systemPrompt},
-			{Role: schema.User, Content: content},
+			{Role: schema.User, Content: "<immutable_answer>\n" + content + "\n</immutable_answer>"},
 		},
 		TopP: p.TopP,
 	}
