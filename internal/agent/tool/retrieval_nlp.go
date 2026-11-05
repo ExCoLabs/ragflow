@@ -256,6 +256,9 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	query := req.Query
 	docIDs := compactStrings(req.DocScope)
 	chunkMeta := req.ChunkMeta
+	if req.QueryFusion && req.Diagnostics == nil {
+		req.Diagnostics = &common.MetadataFilterDiagnostic{}
+	}
 	if len(req.MetaDataFilter) > 0 {
 		if a.enhancer == nil {
 			return nil, fmt.Errorf("retrieval: metadata filter service is not configured")
@@ -323,6 +326,9 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	if err != nil {
 		return nil, err
 	}
+	if req.QueryFusion {
+		res = a.fuseQueries(ctx, nlpReq, res, query, retrievalUserQuestion(ctx), req.Diagnostics, topN)
+	}
 	if res == nil || len(res.Chunks) == 0 {
 		return []RetrievalChunk{}, nil
 	}
@@ -353,6 +359,48 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		out = append(out, translateChunk(raw))
 	}
 	return out, nil
+}
+
+// fuseQueries runs fusionQueries next to the primary search and fuses the
+// rankings (fuseChunks). A failed extra search only loses its own list.
+func (a *NLPRetrievalAdapter) fuseQueries(ctx context.Context, primaryReq *nlp.RetrievalRequest, primary *nlp.RetrievalResult,
+	query, userQuestion string, diag *common.MetadataFilterDiagnostic, topN int) *nlp.RetrievalResult {
+	extra := fusionQueries(query, userQuestion, diag)
+	if len(extra) == 0 {
+		return primary
+	}
+	lists := make([][]map[string]any, 0, len(extra)+1)
+	if primary != nil {
+		lists = append(lists, primary.Chunks)
+	}
+	for _, q := range extra {
+		alt := *primaryReq
+		alt.Question = q
+		res, err := a.svc.Retrieval(ctx, &alt)
+		if err != nil {
+			common.Warn("agent retrieval: fusion query failed; skipping it", zap.Error(err))
+			continue
+		}
+		if res != nil {
+			lists = append(lists, res.Chunks)
+		}
+	}
+	out := nlp.RetrievalResult{}
+	if primary != nil {
+		out = *primary
+	}
+	out.Chunks = fuseChunks(lists, topN)
+	return &out
+}
+
+// retrievalUserQuestion is the message that started the agent run (sys.query).
+func retrievalUserQuestion(ctx context.Context) string {
+	state, err := runtime.GetStateFromContext(ctx)
+	if err != nil || state == nil {
+		return ""
+	}
+	q, _ := state.Sys["query"].(string)
+	return retrievalUserPrefixPattern.ReplaceAllString(strings.TrimSpace(q), "")
 }
 
 func nlpRequestFromRetrieval(

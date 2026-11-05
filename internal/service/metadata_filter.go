@@ -935,6 +935,24 @@ func ApplyMetaDataFilterWithDiagnostics(
 		// Fall back to in-memory filter
 		return ApplyMetaFilter(metaData, conditions, logic)
 	}
+	// runGenerated applies an LLM-generated filter, dropping conditions that
+	// select nothing (relaxMetaConditions) before giving the filter up.
+	runGenerated := func(filters *MetaFilterResult, keyPriority []string) []string {
+		if len(filters.Conditions) == 0 {
+			recordGenerated(record, filters, 0)
+			return nil
+		}
+		conditions, docIDs, _ := matchRelaxing(filters.Conditions, filters.Logic, keyPriority,
+			func(c []MetaFilterCondition) ([]string, bool) {
+				ids := constrainDocIDs(baseDocIDs, runMetadataFilter(c, filters.Logic))
+				return ids, len(ids) > 0
+			})
+		recordGenerated(record, &MetaFilterResult{Conditions: conditions, Logic: filters.Logic}, len(docIDs))
+		if len(docIDs) == 0 {
+			return nil
+		}
+		return docIDs
+	}
 
 	switch method {
 	case "auto":
@@ -949,15 +967,8 @@ func ApplyMetaDataFilterWithDiagnostics(
 			record("not_generated", nil, "", 0)
 			return baseDocIDs
 		}
-		filteredIDs := runMetadataFilter(filters.Conditions, filters.Logic)
-		docIDs := constrainDocIDs(baseDocIDs, filteredIDs)
-		recordGenerated(record, filters, len(docIDs))
-		if len(docIDs) == 0 {
-			// No conditions, or conditions that selected nothing: the model was
-			// not able to narrow the search, so it stays unnarrowed.
-			return nil
-		}
-		return docIDs
+		// No conditions, or none that select anything: the search stays unnarrowed.
+		return runGenerated(filters, nil)
 
 	case "semi_auto":
 		selectedKeys := []string{}
@@ -1000,13 +1011,7 @@ func ApplyMetaDataFilterWithDiagnostics(
 					record("not_generated", nil, "", 0)
 					return baseDocIDs
 				}
-				filteredIDs := runMetadataFilter(filters.Conditions, filters.Logic)
-				docIDs := constrainDocIDs(baseDocIDs, filteredIDs)
-				recordGenerated(record, filters, len(docIDs))
-				if len(docIDs) == 0 {
-					return nil
-				}
-				return docIDs
+				return runGenerated(filters, selectedKeys)
 			}
 		}
 		// None of the selected keys exist in the metadata, so there was
