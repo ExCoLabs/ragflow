@@ -470,52 +470,66 @@ check_onnxruntime_deps() {
     echo "✓ onnxruntime v${ort_version} static lib verified under $ONNXRUNTIME_STATIC_PREFIX"
 }
 
+_office_oxide_matches() {
+    local prefix="$1"
+    [ -s "$prefix/lib/liboffice_oxide.a" ] &&
+        [ -s "$prefix/include/office_oxide_c/office_oxide.h" ] &&
+        strings "$prefix/lib/liboffice_oxide.a" 2>/dev/null | grep -Fxq "$OFFICE_OXIDE_VERSION"
+}
+
+_install_office_oxide() (
+    local destination="$1" asset parent staging
+    asset="$(office_oxide_asset)"
+    if [ -z "$asset" ]; then
+        echo "Error: unsupported office_oxide target ${TARGET_OS}_${TARGET_ARCH}" >&2
+        exit 1
+    fi
+    parent="$(dirname "$destination")"
+    mkdir -p "$parent" || exit 1
+    staging="$(mktemp -d "$parent/.office_oxide.XXXXXX")" || exit 1
+    trap 'rm -rf -- "$staging"' EXIT
+    mkdir -p "$staging/install/lib" "$staging/install/include/office_oxide_c" || exit 1
+    curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 300 \
+        --proto '=https' --proto-redir '=https' \
+        --output "$staging/archive.tar.gz" \
+        "https://github.com/yfedoseev/office_oxide/releases/download/v${OFFICE_OXIDE_VERSION}/${asset}" || exit 1
+    tar -xzOf "$staging/archive.tar.gz" ./lib/liboffice_oxide.a \
+        > "$staging/install/lib/liboffice_oxide.a" || exit 1
+    tar -xzOf "$staging/archive.tar.gz" ./include/office_oxide_c/office_oxide.h \
+        > "$staging/install/include/office_oxide_c/office_oxide.h" || exit 1
+    if ! _office_oxide_matches "$staging/install"; then
+        echo "Error: downloaded office_oxide library/header does not match v${OFFICE_OXIDE_VERSION}" >&2
+        exit 1
+    fi
+    mkdir -p "$destination/lib" "$destination/include/office_oxide_c" || exit 1
+    mv "$staging/install/lib/liboffice_oxide.a" "$destination/lib/liboffice_oxide.a" || exit 1
+    mv "$staging/install/include/office_oxide_c/office_oxide.h" \
+        "$destination/include/office_oxide_c/office_oxide.h" || exit 1
+)
+
 # Check office_oxide native library
 check_office_oxide_deps() {
     print_section "Checking office_oxide native library"
     _seed_from_system "office_oxide" || true
 
-    local lib_file="liboffice_oxide.a"
-    local lib_path="${OFFICE_OXIDE_PREFIX}/lib/${lib_file}"
-    local header_path="${OFFICE_OXIDE_PREFIX}/include/office_oxide_c/office_oxide.h"
-
-    if [ ! -f "$lib_path" ] || [ ! -f "$header_path" ]; then
-        echo -e "${RED}Error: office_oxide native library not found${NC}"
-        echo "  Expected: ${lib_path}"
-        echo "  Run: uv run tools/scripts/download_dev_deps.py"
-        echo "  Or manually download: https://github.com/yfedoseev/office_oxide/releases/download/v${OFFICE_OXIDE_VERSION}/$(office_oxide_asset)"
-        exit 1
-    fi
-
     # Verify the on-disk lib matches the pinned version. A stale older lib
     # (e.g. v0.1.7) silently reintroduces the PPT97 content-loss bug
     # (github.com/yfedoseev/office_oxide#85, fixed in v0.1.8): PlainText()
     # on a legacy .ppt returns stale metadata instead of slide text.
-    if ! strings "$lib_path" 2>/dev/null | grep -Fxq "$OFFICE_OXIDE_VERSION"; then
-        local found_version
-        found_version=$(strings "$lib_path" 2>/dev/null | grep -E "^0\.[0-9]+\.[0-9]+$" | head -1)
-        echo -e "${YELLOW}office_oxide native lib version mismatch (required v${OFFICE_OXIDE_VERSION}; found: ${found_version:-unknown}); refreshing from download${NC}"
-        rm -rf "${OFFICE_OXIDE_PREFIX}" "${PROJECT_ROOT}/ragflow_deps/$(office_oxide_asset)"
-        if ! (cd "${PROJECT_ROOT}" && uv run tools/scripts/download_dev_deps.py); then
-            echo -e "${RED}Error: office_oxide native lib version mismatch${NC}"
-            echo "  Required: v${OFFICE_OXIDE_VERSION}; found: ${found_version:-unknown}"
-            echo "  A stale lib silently loses PPT97 (.ppt) slide content. Refresh:"
-            echo "    rm -rf ~/ragflow-native-libs/office_oxide ragflow_deps/$(office_oxide_asset)"
-            echo "    uv run tools/scripts/download_dev_deps.py"
-            exit 1
+    if ! _office_oxide_matches "$OFFICE_OXIDE_PREFIX"; then
+        local pinned="${OFFICE_OXIDE_PREFIX}/pinned/${TARGET_OS}_${TARGET_ARCH}/v${OFFICE_OXIDE_VERSION}"
+        if ! _office_oxide_matches "$pinned"; then
+            echo "Preparing office_oxide v${OFFICE_OXIDE_VERSION} for ${TARGET_OS}_${TARGET_ARCH}"
+            if ! _install_office_oxide "$pinned"; then
+                echo -e "${RED}Error: could not provision office_oxide v${OFFICE_OXIDE_VERSION}${NC}" >&2
+                exit 1
+            fi
         fi
-        lib_path="${OFFICE_OXIDE_PREFIX}/lib/${lib_file}"
-        header_path="${OFFICE_OXIDE_PREFIX}/include/office_oxide_c/office_oxide.h"
-        if [ ! -f "$lib_path" ] || [ ! -f "$header_path" ]; then
-            echo -e "${RED}Error: office_oxide native library not found after refresh${NC}"
-            exit 1
-        fi
-        if ! strings "$lib_path" 2>/dev/null | grep -Fxq "$OFFICE_OXIDE_VERSION"; then
-            found_version=$(strings "$lib_path" 2>/dev/null | grep -E "^0\.[0-9]+\.[0-9]+$" | head -1)
-            echo -e "${RED}Error: office_oxide native lib version mismatch after refresh${NC}"
-            echo "  Required: v${OFFICE_OXIDE_VERSION}; found: ${found_version:-unknown}"
-            exit 1
-        fi
+        OFFICE_OXIDE_PREFIX="$pinned"
+    fi
+    if ! _office_oxide_matches "$OFFICE_OXIDE_PREFIX"; then
+        echo -e "${RED}Error: office_oxide native library/header does not match v${OFFICE_OXIDE_VERSION}${NC}" >&2
+        exit 1
     fi
 
     echo "✓ office_oxide v${OFFICE_OXIDE_VERSION} native library found at ${OFFICE_OXIDE_PREFIX}"
