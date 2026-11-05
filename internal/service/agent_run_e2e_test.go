@@ -229,6 +229,59 @@ func TestRunAgent_RealCanvas_BeginMessage(t *testing.T) {
 	}
 }
 
+func TestRunAgent_RefreshesPersistedSysDate(t *testing.T) {
+	testDB := setupServiceTestDB(t)
+	if err := testDB.AutoMigrate(
+		&entity.UserCanvas{},
+		&entity.UserCanvasVersion{},
+		&entity.API4Conversation{},
+	); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	orig := dao.DB
+	dao.DB = testDB
+	t.Cleanup(func() { dao.DB = orig })
+
+	const stale = "2026-11-04 16:14:21 +0100 (Europe/Bratislava)"
+	dsl := map[string]any{
+		"globals": map[string]any{"sys.date": stale},
+		"components": map[string]any{
+			"begin_0": map[string]any{
+				"obj":        map[string]any{"component_name": "Begin", "params": map[string]any{}},
+				"downstream": []any{"message_0"},
+			},
+			"message_0": map[string]any{
+				"obj":      map[string]any{"component_name": "Message", "params": map[string]any{"text": "now {{sys.date}}"}},
+				"upstream": []any{"begin_0"},
+			},
+		},
+		"path": []any{"begin_0", "message_0"},
+	}
+	makeCanvasWithDSL(t, "canvas-date", "user-1", "tenant-1", "v-date", dsl)
+
+	tracker, mr := newRunTrackerForTest(t, 30*24*time.Hour)
+	cpClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = cpClient.Close() })
+	svc := NewAgentServiceWithOptions(canvas.NewKvrocksCheckPointStoreWithClient(cpClient, 30*24*time.Hour), nil, tracker)
+	before := time.Now().Truncate(time.Second)
+	events, err := svc.RunAgent(WithAgentSessionID(t.Context(), "session-date"), "user-1", "canvas-date", "session-date", "", "q", nil)
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	messages, _, errs, _, _ := drainAgentEvents(t, events)
+	if len(errs) > 0 || len(messages) != 1 {
+		t.Fatalf("messages=%+v errors=%+v", messages, errs)
+	}
+	rendered := strings.TrimPrefix(messages[0].Content, "now ")
+	if rendered == stale {
+		t.Fatalf("sys.date kept the persisted session value %q", stale)
+	}
+	got, err := time.Parse("2006-01-02 15:04:05 -0700", strings.SplitN(rendered, " (", 2)[0])
+	if err != nil || got.Before(before) || got.After(time.Now()) {
+		t.Fatalf("sys.date = %q, want the run's current time (parse err %v)", rendered, err)
+	}
+}
+
 func TestRunAgent_SessionHistoryFeedsSysHistoryAndPersists(t *testing.T) {
 	testDB := setupServiceTestDB(t)
 	if err := testDB.AutoMigrate(

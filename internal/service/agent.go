@@ -2131,7 +2131,7 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 			state.SetHistory(openAICompatPriorHistory(messages))
 		}
 		state.SetMemory(c.Memory)
-		state.EnsureSysDate()
+		state.RefreshSysDate()
 		query := agentRunQuery(userInput)
 		state.Sys["query"] = query
 		state.AppendCurrentUser(query)

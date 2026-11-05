@@ -442,7 +442,7 @@ func BuildWorkflow(ctx context.Context, c *Canvas) (*compose.Workflow[map[string
 		}
 		st.SetHistory(c.History)
 		st.SetMemory(c.Memory)
-		st.EnsureSysDate()
+		st.RefreshSysDate()
 		return st
 	}
 

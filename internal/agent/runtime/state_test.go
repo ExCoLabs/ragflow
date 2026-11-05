@@ -322,28 +322,21 @@ func TestCanvasStateMemoryIsSeparateFromHistory(t *testing.T) {
 	}
 }
 
-func TestCanvasState_EnsureSysDate(t *testing.T) {
+func TestCanvasState_RefreshSysDate(t *testing.T) {
 	t.Parallel()
 
+	format := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4} \(.+\)$`)
 	state := NewCanvasState("r", "t")
-	got, _ := state.Sys["date"].(string)
-	if got == "" {
-		t.Fatal("NewCanvasState did not initialize sys.date")
-	}
-	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4} \(.+\)$`).MatchString(got) {
-		t.Fatalf("sys.date missing offset and zone name: %q", got)
+	if got, _ := state.Sys["date"].(string); !format.MatchString(got) {
+		t.Fatalf("NewCanvasState sys.date missing offset and zone name: %q", got)
 	}
 
-	state.Sys["date"] = ""
-	state.EnsureSysDate()
-	if got, _ := state.Sys["date"].(string); got == "" {
-		t.Fatal("EnsureSysDate left blank sys.date unchanged")
-	}
-
-	state.Sys["date"] = "custom-date"
-	state.EnsureSysDate()
-	if got := state.Sys["date"]; got != "custom-date" {
-		t.Fatalf("EnsureSysDate overwrote non-empty sys.date: %v", got)
+	for _, previous := range []any{"", "2026-11-04 16:14:21 +0100 (Europe/Bratislava)"} {
+		state.Sys["date"] = previous
+		state.RefreshSysDate()
+		if got, _ := state.Sys["date"].(string); got == previous || !format.MatchString(got) {
+			t.Fatalf("RefreshSysDate from %q left sys.date = %q", previous, got)
+		}
 	}
 }
 
