@@ -759,9 +759,152 @@ type citationGroundingValidation struct {
 	AddedCitations   int
 }
 
+const (
+	citationMaxAnchors      = 256
+	citationMaxAnchorBytes  = 512
+	citationMaxCatalogBytes = 32_000
+)
+
+var citationSentenceEndRe = regexp.MustCompile(`[.!?。！？]["“”’»)]*(?:\s+|$)`)
+
+type citationAnchor struct {
+	ID   string `json:"anchor_id"`
+	Text string `json:"text"`
+}
+
+func isCitationInsertionBoundary(content string, position int, ranges [][2]int, markers, urls [][]int) bool {
+	index := sort.Search(len(ranges), func(i int) bool { return ranges[i][1] >= position })
+	if position <= 0 || index == len(ranges) || ranges[index][0] > position {
+		return false
+	}
+	for _, spans := range [][][]int{markers, urls} {
+		for _, span := range spans {
+			if position > span[0] && position < span[1] {
+				return false
+			}
+		}
+	}
+	last, _ := utf8.DecodeLastRuneInString(content[:position])
+	if position < len(content) {
+		next, _ := utf8.DecodeRuneInString(content[position:])
+		regionalPair := last >= '\U0001f1e6' && last <= '\U0001f1ff' && next >= '\U0001f1e6' && next <= '\U0001f1ff'
+		if unicode.IsLetter(next) || unicode.IsDigit(next) || unicode.IsMark(next) || unicode.Is(unicode.Cf, next) || regionalPair || (next >= '\U0001f3fb' && next <= '\U0001f3ff') {
+			return false
+		}
+	}
+	return last != '\u200d'
+}
+
+func buildCitationAnchors(content string) []citationAnchor {
+	if !utf8.ValidString(content) {
+		return nil
+	}
+	ranges, _ := finalCitationTextRanges([]byte(content))
+	markers := finalCitationMarkerRe.FindAllStringIndex(content, -1)
+	urls := finalCitationURLRe.FindAllStringIndex(content, -1)
+	var anchors []citationAnchor
+	catalogBytes := 2
+	trimEnd := func(start, end int) int {
+		for {
+			end = start + len(strings.TrimRightFunc(content[start:end], func(r rune) bool {
+				return unicode.IsSpace(r) || strings.ContainsRune(".!?;:。！？\"'“”’»", r)
+			}))
+			found := false
+			for _, span := range markers {
+				if span[1] == end && span[0] >= start {
+					end, found = span[0], true
+					break
+				}
+			}
+			if !found {
+				return end
+			}
+		}
+	}
+	add := func(start, end int) {
+		end = trimEnd(start, end)
+		for i := len(ranges) - 1; i >= 0; i-- {
+			span := ranges[i]
+			if span[1] <= start {
+				break
+			}
+			if span[0] >= end {
+				continue
+			}
+			position := trimEnd(start, min(end, span[1]))
+			if position <= start || !isCitationInsertionBoundary(content, position, ranges, markers, urls) {
+				continue
+			}
+			quoteStart := max(start, position-citationMaxAnchorBytes)
+			if quoteStart > start {
+				for quoteStart < position && !utf8.RuneStart(content[quoteStart]) {
+					quoteStart++
+				}
+				for quoteStart < position {
+					r, size := utf8.DecodeRuneInString(content[quoteStart:position])
+					quoteStart += size
+					if unicode.IsSpace(r) {
+						break
+					}
+				}
+			}
+			quote := strings.TrimLeftFunc(content[quoteStart:position], unicode.IsSpace)
+			if quote == "" || strings.IndexFunc(quote, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }) < 0 {
+				return
+			}
+			first := strings.Index(content, quote)
+			if first < 0 || strings.Index(content[first+1:], quote) >= 0 {
+				return
+			}
+			for _, anchor := range anchors {
+				if anchor.Text == quote {
+					return
+				}
+			}
+			anchor := citationAnchor{ID: fmt.Sprintf("a%d", len(anchors)+1), Text: quote}
+			encoded, _ := json.Marshal(anchor)
+			if len(anchors) < citationMaxAnchors && catalogBytes+len(encoded)+1 <= citationMaxCatalogBytes {
+				anchors = append(anchors, anchor)
+				catalogBytes += len(encoded) + 1
+			}
+			return
+		}
+	}
+	lines := strings.SplitAfter(content, "\n")
+	offset := 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		start, end := offset, offset+len(line)
+		offset = end
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(line, "|") {
+			if i+1 < len(lines) && strings.Contains(lines[i+1], "-") && strings.TrimSpace(strings.Trim(lines[i+1], "|:- \t\r\n")) == "" {
+				continue
+			}
+			end = start + len(strings.TrimRightFunc(line, func(r rune) bool { return r == '|' || unicode.IsSpace(r) }))
+		} else {
+			for _, boundary := range citationSentenceEndRe.FindAllStringIndex(line, -1) {
+				next, _ := utf8.DecodeRuneInString(line[boundary[1]:])
+				if unicode.IsDigit(next) || strings.TrimSpace(strings.Trim(line[:boundary[0]], "0123456789")) == "" {
+					continue
+				}
+				add(start, offset-len(line)+boundary[1])
+				start = offset - len(line) + boundary[1]
+			}
+		}
+		add(start, end)
+		if len(anchors) == citationMaxAnchors || catalogBytes >= citationMaxCatalogBytes-citationMaxAnchorBytes {
+			break
+		}
+	}
+	return anchors
+}
+
 type citationInsertion struct {
-	Quote string
-	ID    string
+	AnchorID string
+	ID       string
 }
 
 func decodeCitationInsertions(raw string) ([]citationInsertion, error) {
@@ -793,7 +936,7 @@ func decodeCitationInsertions(raw string) ([]citationInsertion, error) {
 		for decoder.More() {
 			key, err := decoder.Token()
 			name, ok := key.(string)
-			if err != nil || !ok || seen[name] || (name != "answer_quote" && name != "id") {
+			if err != nil || !ok || seen[name] || (name != "anchor_id" && name != "id") {
 				return nil, invalid
 			}
 			value, err := decoder.Token()
@@ -802,8 +945,8 @@ func decodeCitationInsertions(raw string) ([]citationInsertion, error) {
 				return nil, invalid
 			}
 			seen[name] = true
-			if name == "answer_quote" {
-				entry.Quote = text
+			if name == "anchor_id" {
+				entry.AnchorID = text
 			} else {
 				entry.ID = text
 			}
@@ -829,7 +972,7 @@ type citationInsertionStats struct {
 	InvalidIDs int
 }
 
-func applyCitationInsertions(content, raw string, batch []prompts.CitationSource) (string, citationInsertionStats, error) {
+func applyCitationInsertions(content, raw string, batch []prompts.CitationSource, anchors []citationAnchor) (string, citationInsertionStats, error) {
 	insertions, err := decodeCitationInsertions(raw)
 	stats := citationInsertionStats{Parsed: err == nil, Count: len(insertions)}
 	if err != nil {
@@ -855,6 +998,13 @@ func applyCitationInsertions(content, raw string, batch []prompts.CitationSource
 			stats.InvalidIDs++
 		}
 	}
+	anchorText := make(map[string]string, len(anchors))
+	for _, anchor := range anchors {
+		if _, duplicate := anchorText[anchor.ID]; duplicate || anchor.ID == "" {
+			return content, stats, &citationGroundingRejectionError{reason: "invalid_anchor"}
+		}
+		anchorText[anchor.ID] = anchor.Text
+	}
 	ranges, _ := finalCitationTextRanges([]byte(content))
 	markers := finalCitationMarkerRe.FindAllStringIndex(content, -1)
 	urls := finalCitationURLRe.FindAllStringIndex(content, -1)
@@ -877,40 +1027,22 @@ func applyCitationInsertions(content, raw string, batch []prompts.CitationSource
 		if !ids[insertion.ID] {
 			return reject("unknown_citation")
 		}
-		if strings.TrimSpace(insertion.Quote) == "" || strings.TrimRightFunc(insertion.Quote, unicode.IsSpace) != insertion.Quote {
+		quote, ok := anchorText[insertion.AnchorID]
+		if !ok {
+			return reject("unknown_anchor")
+		}
+		if strings.TrimSpace(quote) == "" || strings.TrimRightFunc(quote, unicode.IsSpace) != quote {
 			return reject("invalid_anchor")
 		}
-		start := strings.Index(content, insertion.Quote)
+		start := strings.Index(content, quote)
 		if start < 0 {
 			return reject("anchor_not_found")
 		}
-		if strings.Index(content[start+1:], insertion.Quote) >= 0 {
+		if strings.Index(content[start+1:], quote) >= 0 {
 			return reject("ambiguous_anchor")
 		}
-		position := start + len(insertion.Quote)
-		index := sort.Search(len(ranges), func(i int) bool { return ranges[i][1] >= position })
-		if index == len(ranges) || ranges[index][0] > position {
-			return reject("unsafe_anchor")
-		}
-		for _, span := range markers {
-			if position > span[0] && position < span[1] {
-				return reject("unsafe_anchor")
-			}
-		}
-		for _, span := range urls {
-			if position > span[0] && position < span[1] {
-				return reject("unsafe_anchor")
-			}
-		}
-		last, _ := utf8.DecodeLastRuneInString(content[:position])
-		if position < len(content) {
-			next, _ := utf8.DecodeRuneInString(content[position:])
-			regionalPair := last >= '\U0001f1e6' && last <= '\U0001f1ff' && next >= '\U0001f1e6' && next <= '\U0001f1ff'
-			if unicode.IsLetter(next) || unicode.IsDigit(next) || unicode.IsMark(next) || unicode.Is(unicode.Cf, next) || regionalPair || (next >= '\U0001f3fb' && next <= '\U0001f3ff') {
-				return reject("unsafe_anchor")
-			}
-		}
-		if last == '\u200d' {
+		position := start + len(quote)
+		if !isCitationInsertionBoundary(content, position, ranges, markers, urls) {
 			return reject("unsafe_anchor")
 		}
 		grouped, duplicate := false, false
@@ -1207,6 +1339,14 @@ func citationBatches(chunks []prompts.CitationSource, budget int) [][]prompts.Ci
 // citationGroundingCall makes one buffered grounding invocation over a
 // single batch of chunks.
 func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, content string, batch []prompts.CitationSource) (string, citationInsertionStats, error) {
+	anchors := buildCitationAnchors(content)
+	if len(anchors) == 0 {
+		return content, citationInsertionStats{}, nil
+	}
+	catalog, err := json.Marshal(anchors)
+	if err != nil {
+		return content, citationInsertionStats{}, err
+	}
 	systemPrompt, _ := prompts.CitationPlusPrompt(batch)
 	// Later batches receive earlier citations but return insertion proposals only.
 	// Existing markers are never regenerated and the strict guard rechecks them.
@@ -1218,12 +1358,11 @@ func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, conte
 		BaseURL:   p.BaseURL,
 		Messages: []schema.Message{
 			{Role: schema.System, Content: systemPrompt},
-			{Role: schema.User, Content: "<immutable_answer>\n" + content + "\n</immutable_answer>"},
+			{Role: schema.User, Content: "<immutable_answer>\n" + content + "\n</immutable_answer>\n<answer_anchors>\n" + string(catalog) + "\n</answer_anchors>"},
 		},
 		TopP: p.TopP,
 	}
 	var resp *ChatInvokeResponse
-	var err error
 	if streamer, ok := inv.(chat.StreamingInvoker); ok {
 		resp, err = streamer.Stream(ctx, db, req, func(delta string, isThink bool) error {
 			if ctx.Err() != nil {
@@ -1240,7 +1379,7 @@ func citationGroundingCall(ctx context.Context, db *gorm.DB, p AgentParam, conte
 	if resp == nil {
 		return "", citationInsertionStats{}, fmt.Errorf("citation grounding returned no response")
 	}
-	return applyCitationInsertions(content, resp.Content, batch)
+	return applyCitationInsertions(content, resp.Content, batch, anchors)
 }
 
 // chunksFromState extracts the recorded retrieval chunks from

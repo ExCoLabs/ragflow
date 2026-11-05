@@ -110,7 +110,7 @@ func (g *groundingTestInvoker) Invoke(_ context.Context, _ *gorm.DB, req ChatInv
 // TestGrounding_Applied: Cite=true + state has chunks → second
 // LLM call is made and the grounded content replaces the original.
 func TestGroundingInsertionProposalPreservesTypography(t *testing.T) {
-	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"answer_quote":"Text zadávateľa","id":"0"}]}`}}}
+	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"anchor_id":"a1","id":"0"}]}`}}}
 	previous := getDefaultChatInvoker()
 	SetDefaultChatInvoker(inv)
 	t.Cleanup(func() { SetDefaultChatInvoker(previous) })
@@ -132,49 +132,201 @@ func TestGroundingInsertionProposalPreservesTypography(t *testing.T) {
 	}
 }
 
+func TestGroundingServerAnchorSelection(t *testing.T) {
+	batch := []prompts.CitationSource{{ID: "0", Content: "Supporting source"}}
+	for _, tc := range []struct{ name, answer, proposal, want, reason string }{
+		{"markdown", "Residency: **100 %**.", `{"citations":[{"anchor_id":"a1","id":"0"}]}`, "Residency: **100 % [ID:0]**.", ""},
+		{"typography", "Brief says „ready“.", `{"citations":[{"anchor_id":"a1","id":"0"}]}`, "Brief says „ready [ID:0]“.", ""},
+		{"table_row", "| Type | Area |\n|---|---|\n| 2kk | 35–42 m² (max. 47 m²) |", `{"citations":[{"anchor_id":"a1","id":"0"}]}`, "| Type | Area |\n|---|---|\n| 2kk | 35–42 m² (max. 47 m²) [ID:0] |", ""},
+		{"second_sentence", "First claim. Second claim.", `{"citations":[{"anchor_id":"a2","id":"0"}]}`, "First claim. Second claim [ID:0].", ""},
+		{"unknown_anchor", "First claim.", `{"citations":[{"anchor_id":"missing","id":"0"}]}`, "First claim.", "unknown_anchor"},
+		{"unknown_anchor_atomic", "First claim.", `{"citations":[{"anchor_id":"a1","id":"0"},{"anchor_id":"missing","id":"0"}]}`, "First claim.", "unknown_anchor"},
+		{"legacy_quote_rejected", "First claim.", `{"citations":[{"answer_quote":"First claim","id":"0"}]}`, "First claim.", "invalid_proposal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &groundingTestInvoker{responses: []string{tc.proposal}}
+			previous := getDefaultChatInvoker()
+			SetDefaultChatInvoker(inv)
+			t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+			got, _, err := citationGroundingCall(t.Context(), nil, AgentParam{ModelID: "stub"}, tc.answer, batch)
+			if got != tc.want {
+				t.Errorf("got=%q want=%q err=%v", got, tc.want, err)
+			}
+			if tc.reason != "" {
+				var rejected *citationGroundingRejectionError
+				if !errors.As(err, &rejected) || rejected.reason != tc.reason {
+					t.Fatalf("err=%v want=%s", err, tc.reason)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(inv.lastReq.Messages[1].Content, "<answer_anchors>") {
+				t.Error("server anchor catalogue missing from request")
+			}
+		})
+	}
+}
+
+func TestCitationAnchorCatalog(t *testing.T) {
+	for _, tc := range []struct {
+		name, answer string
+		want         int
+	}{
+		{"sentences", "First claim. Second claim.", 2},
+		{"bold", "Residency: **100 %**.", 1},
+		{"quotation", "Brief says „ready“.", 1},
+		{"table", "| Type | Area |\n|---|---|\n| Small | 32 m² |\n| Large | **68 m²** |", 2},
+		{"list", "1. First claim.\n2. Second claim.", 2},
+		{"unicode", "中文。 Žltý text. 👩‍💻 and 🇸🇰.", 3},
+		{"existing", "First [ID:0]. Second 【ID:1】.", 2},
+		{"repeated", "Repeated. Repeated.", 0},
+		{"code", "```go\nvalue := 1\n```", 0},
+		{"inline_code", "`value`", 0},
+		{"only_marker", "[ID:0]", 0},
+		{"heading", "# Heading", 0},
+		{"invalid_utf8", string([]byte{0xff}), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			anchors := buildCitationAnchors(tc.answer)
+			if len(anchors) != tc.want {
+				t.Fatalf("anchors=%+v want=%d", anchors, tc.want)
+			}
+			batch := []prompts.CitationSource{{ID: "new", Content: "Supporting source"}}
+			for i, anchor := range anchors {
+				if anchor.ID != fmt.Sprintf("a%d", i+1) || strings.Count(tc.answer, anchor.Text) != 1 || len(anchor.Text) > citationMaxAnchorBytes {
+					t.Fatalf("invalid anchor: %+v", anchor)
+				}
+				proposal, _ := json.Marshal(map[string]any{"citations": []map[string]string{{"anchor_id": anchor.ID, "id": "new"}}})
+				out, _, err := applyCitationInsertions(tc.answer, string(proposal), batch, anchors)
+				if err != nil {
+					t.Fatalf("offered anchor rejected: %+v err=%v", anchor, err)
+				}
+				validation := validateCitationGrounding(tc.answer, out, batch, map[string]bool{"new": true, "0": true, "1": true})
+				if validation.Reason != "" || validation.AddedCitations != 1 {
+					t.Fatalf("offered anchor failed final guard: %+v", validation)
+				}
+			}
+		})
+	}
+}
+
+func TestCitationAnchorCatalogLimits(t *testing.T) {
+	for _, long := range []bool{false, true} {
+		var answer strings.Builder
+		for i := 0; i < citationMaxAnchors*2; i++ {
+			if long {
+				answer.WriteString(strings.Repeat("Žltý detail ", 90))
+			}
+			fmt.Fprintf(&answer, "Unique line %04d.\n", i)
+		}
+		anchors := buildCitationAnchors(answer.String())
+		encoded, err := json.Marshal(anchors)
+		if err != nil || len(anchors) == 0 || len(anchors) > citationMaxAnchors || len(encoded) > citationMaxCatalogBytes {
+			t.Fatalf("long=%t anchors=%d bytes=%d err=%v", long, len(anchors), len(encoded), err)
+		}
+		if !long && len(anchors) != citationMaxAnchors {
+			t.Fatalf("short catalogue cap: %d", len(anchors))
+		}
+		for _, anchor := range anchors {
+			if len(anchor.Text) > citationMaxAnchorBytes || strings.Count(answer.String(), anchor.Text) != 1 {
+				t.Fatalf("invalid bounded anchor: %+v", anchor)
+			}
+		}
+		again, _ := json.Marshal(buildCitationAnchors(answer.String()))
+		if string(encoded) != string(again) {
+			t.Fatal("catalogue is not deterministic")
+		}
+	}
+}
+
+func TestCitationAnchorSnapshotValidation(t *testing.T) {
+	batch := []prompts.CitationSource{{ID: "0", Content: "Source"}}
+	for _, tc := range []struct {
+		name, answer, reason string
+		anchors              []citationAnchor
+	}{
+		{"stale", "Second claim.", "anchor_not_found", buildCitationAnchors("First claim.")},
+		{"ambiguous", "First claim. First claim.", "ambiguous_anchor", buildCitationAnchors("First claim.")},
+		{"duplicate_id", "First claim.", "invalid_anchor", []citationAnchor{{ID: "a1", Text: "First"}, {ID: "a1", Text: "claim"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, err := applyCitationInsertions(tc.answer, `{"citations":[{"anchor_id":"a1","id":"0"}]}`, batch, tc.anchors)
+			var rejected *citationGroundingRejectionError
+			if out != tc.answer || !errors.As(err, &rejected) || rejected.reason != tc.reason {
+				t.Fatalf("content=%q err=%v want=%s", out, err, tc.reason)
+			}
+		})
+	}
+}
+
+func TestGroundingSkipsEmptyAnchorCatalog(t *testing.T) {
+	inv := &groundingTestInvoker{}
+	previous := getDefaultChatInvoker()
+	SetDefaultChatInvoker(inv)
+	t.Cleanup(func() { SetDefaultChatInvoker(previous) })
+	const answer = "```go\nvalue := 1\n```"
+	out, _, err := citationGroundingCall(t.Context(), nil, AgentParam{ModelID: "stub"}, answer, []prompts.CitationSource{{ID: "0", Content: "Source"}})
+	if err != nil || out != answer || inv.calls != 0 {
+		t.Fatalf("empty catalogue: out=%q err=%v calls=%d", out, err, inv.calls)
+	}
+}
+
+func insertionTestAnchors(raw string) []citationAnchor {
+	insertions, _ := decodeCitationInsertions(raw)
+	var anchors []citationAnchor
+	seen := make(map[string]bool)
+	for _, insertion := range insertions {
+		if !seen[insertion.AnchorID] {
+			anchors = append(anchors, citationAnchor{ID: insertion.AnchorID, Text: insertion.AnchorID})
+			seen[insertion.AnchorID] = true
+		}
+	}
+	return anchors
+}
+
 func TestCitationInsertionProposals(t *testing.T) {
 	batch := []prompts.CitationSource{{ID: "0", Content: "source"}, {ID: "1", Content: "source"}}
 	for _, tc := range []struct{ name, original, proposal, want, reason string }{
 		{"empty", "Text.", `{"citations":[]}`, "Text.", ""},
-		{"multiple_ids", "Text.", `{"citations":[{"answer_quote":"Text","id":"0"},{"answer_quote":"Text","id":"1"}]}`, "Text [ID:0][ID:1].", ""},
-		{"existing", "Text [ID:0].", `{"citations":[{"answer_quote":"Text","id":"1"}]}`, "Text [ID:0][ID:1].", ""},
-		{"existing_fullwidth", "Text 【ID:0】.", `{"citations":[{"answer_quote":"Text","id":"1"}]}`, "Text 【ID:0】[ID:1].", ""},
-		{"duplicate_fullwidth", "Text 【ID:0】.", `{"citations":[{"answer_quote":"Text","id":"0"}]}`, "Text 【ID:0】.", ""},
-		{"duplicate_nbsp", "Text\u00a0[ID:0].", `{"citations":[{"answer_quote":"Text","id":"0"}]}`, "Text\u00a0[ID:0].", ""},
-		{"spans_existing", "First [ID:0]. Second.", `{"citations":[{"answer_quote":"First [ID:0]. Second","id":"1"}]}`, "First [ID:0]. Second [ID:1].", ""},
-		{"duplicate", "Text [ID:0].", `{"citations":[{"answer_quote":"Text","id":"0"},{"answer_quote":"Text","id":"0"}]}`, "Text [ID:0].", ""},
-		{"duplicate_proposals", "Text.", `{"citations":[{"answer_quote":"Text","id":"0"},{"answer_quote":"Text","id":"0"}]}`, "Text [ID:0].", ""},
-		{"unordered", "First. Second.", `{"citations":[{"answer_quote":"Second","id":"1"},{"answer_quote":"First","id":"0"}]}`, "First [ID:0]. Second [ID:1].", ""},
-		{"unicode", "中文。 Žltý text.", `{"citations":[{"answer_quote":"中文","id":"0"},{"answer_quote":"Žltý text","id":"1"}]}`, "中文 [ID:0]。 Žltý text [ID:1].", ""},
-		{"missing_anchor", "Text.", `{"citations":[{"answer_quote":"Changed","id":"0"}]}`, "Text.", "anchor_not_found"},
-		{"normalized_quote", "Text“.", `{"citations":[{"answer_quote":"Text\"","id":"0"}]}`, "Text“.", "anchor_not_found"},
-		{"repeated", "Text. Text.", `{"citations":[{"answer_quote":"Text","id":"0"}]}`, "Text. Text.", "ambiguous_anchor"},
-		{"overlapping", "aaa", `{"citations":[{"answer_quote":"aa","id":"0"}]}`, "aaa", "ambiguous_anchor"},
-		{"atomic", "Text.", `{"citations":[{"answer_quote":"Text","id":"0"},{"answer_quote":"Missing","id":"1"}]}`, "Text.", "anchor_not_found"},
-		{"unknown_id", "Text.", `{"citations":[{"answer_quote":"Text","id":"future"}]}`, "Text.", "unknown_citation"},
-		{"merged_id", "Text.", `{"citations":[{"answer_quote":"Text","id":"0, ID:1"}]}`, "Text.", "malformed_citation"},
-		{"trailing_space", "Text next.", `{"citations":[{"answer_quote":"Text ","id":"0"}]}`, "Text next.", "invalid_anchor"},
-		{"code", "`Text` next.", `{"citations":[{"answer_quote":"Text","id":"0"}]}`, "`Text` next.", "unsafe_anchor"},
-		{"inside_url", "https://example.test/Text/more", `{"citations":[{"answer_quote":"Text","id":"0"}]}`, "https://example.test/Text/more", "unsafe_anchor"},
-		{"after_url", "https://example.test/Text", `{"citations":[{"answer_quote":"Text","id":"0"}]}`, "https://example.test/Text [ID:0]", ""},
-		{"inside_marker", "Text [ID:0].", `{"citations":[{"answer_quote":"ID:0","id":"1"}]}`, "Text [ID:0].", "unsafe_anchor"},
-		{"inside_word", "Context.", `{"citations":[{"answer_quote":"Con","id":"0"}]}`, "Context.", "unsafe_anchor"},
-		{"combining", "a\u0301.", `{"citations":[{"answer_quote":"a","id":"0"}]}`, "a\u0301.", "unsafe_anchor"},
-		{"joiner", "\U0001f469\u200d\U0001f4bb.", `{"citations":[{"answer_quote":"\ud83d\udc69","id":"0"}]}`, "\U0001f469\u200d\U0001f4bb.", "unsafe_anchor"},
-		{"regional_indicator_pair", "\U0001f1f8\U0001f1f0.", `{"citations":[{"answer_quote":"\ud83c\uddf8","id":"0"}]}`, "\U0001f1f8\U0001f1f0.", "unsafe_anchor"},
+		{"multiple_ids", "Text.", `{"citations":[{"anchor_id":"Text","id":"0"},{"anchor_id":"Text","id":"1"}]}`, "Text [ID:0][ID:1].", ""},
+		{"existing", "Text [ID:0].", `{"citations":[{"anchor_id":"Text","id":"1"}]}`, "Text [ID:0][ID:1].", ""},
+		{"existing_fullwidth", "Text 【ID:0】.", `{"citations":[{"anchor_id":"Text","id":"1"}]}`, "Text 【ID:0】[ID:1].", ""},
+		{"duplicate_fullwidth", "Text 【ID:0】.", `{"citations":[{"anchor_id":"Text","id":"0"}]}`, "Text 【ID:0】.", ""},
+		{"duplicate_nbsp", "Text\u00a0[ID:0].", `{"citations":[{"anchor_id":"Text","id":"0"}]}`, "Text\u00a0[ID:0].", ""},
+		{"spans_existing", "First [ID:0]. Second.", `{"citations":[{"anchor_id":"First [ID:0]. Second","id":"1"}]}`, "First [ID:0]. Second [ID:1].", ""},
+		{"duplicate", "Text [ID:0].", `{"citations":[{"anchor_id":"Text","id":"0"},{"anchor_id":"Text","id":"0"}]}`, "Text [ID:0].", ""},
+		{"duplicate_proposals", "Text.", `{"citations":[{"anchor_id":"Text","id":"0"},{"anchor_id":"Text","id":"0"}]}`, "Text [ID:0].", ""},
+		{"unordered", "First. Second.", `{"citations":[{"anchor_id":"Second","id":"1"},{"anchor_id":"First","id":"0"}]}`, "First [ID:0]. Second [ID:1].", ""},
+		{"unicode", "中文。 Žltý text.", `{"citations":[{"anchor_id":"中文","id":"0"},{"anchor_id":"Žltý text","id":"1"}]}`, "中文 [ID:0]。 Žltý text [ID:1].", ""},
+		{"missing_anchor", "Text.", `{"citations":[{"anchor_id":"Changed","id":"0"}]}`, "Text.", "anchor_not_found"},
+		{"normalized_quote", "Text“.", `{"citations":[{"anchor_id":"Text\"","id":"0"}]}`, "Text“.", "anchor_not_found"},
+		{"repeated", "Text. Text.", `{"citations":[{"anchor_id":"Text","id":"0"}]}`, "Text. Text.", "ambiguous_anchor"},
+		{"overlapping", "aaa", `{"citations":[{"anchor_id":"aa","id":"0"}]}`, "aaa", "ambiguous_anchor"},
+		{"atomic", "Text.", `{"citations":[{"anchor_id":"Text","id":"0"},{"anchor_id":"Missing","id":"1"}]}`, "Text.", "anchor_not_found"},
+		{"unknown_id", "Text.", `{"citations":[{"anchor_id":"Text","id":"future"}]}`, "Text.", "unknown_citation"},
+		{"merged_id", "Text.", `{"citations":[{"anchor_id":"Text","id":"0, ID:1"}]}`, "Text.", "malformed_citation"},
+		{"trailing_space", "Text next.", `{"citations":[{"anchor_id":"Text ","id":"0"}]}`, "Text next.", "invalid_anchor"},
+		{"code", "`Text` next.", `{"citations":[{"anchor_id":"Text","id":"0"}]}`, "`Text` next.", "unsafe_anchor"},
+		{"inside_url", "https://example.test/Text/more", `{"citations":[{"anchor_id":"Text","id":"0"}]}`, "https://example.test/Text/more", "unsafe_anchor"},
+		{"after_url", "https://example.test/Text", `{"citations":[{"anchor_id":"Text","id":"0"}]}`, "https://example.test/Text [ID:0]", ""},
+		{"inside_marker", "Text [ID:0].", `{"citations":[{"anchor_id":"ID:0","id":"1"}]}`, "Text [ID:0].", "unsafe_anchor"},
+		{"inside_word", "Context.", `{"citations":[{"anchor_id":"Con","id":"0"}]}`, "Context.", "unsafe_anchor"},
+		{"combining", "a\u0301.", `{"citations":[{"anchor_id":"a","id":"0"}]}`, "a\u0301.", "unsafe_anchor"},
+		{"joiner", "\U0001f469\u200d\U0001f4bb.", `{"citations":[{"anchor_id":"\ud83d\udc69","id":"0"}]}`, "\U0001f469\u200d\U0001f4bb.", "unsafe_anchor"},
+		{"regional_indicator_pair", "\U0001f1f8\U0001f1f0.", `{"citations":[{"anchor_id":"\ud83c\uddf8","id":"0"}]}`, "\U0001f1f8\U0001f1f0.", "unsafe_anchor"},
 		{"full_rewrite", "Text.", "A rewritten answer [ID:0].", "Text.", "invalid_proposal"},
 		{"extra_fields", "Text.", `{"citations":[],"answer":"Changed"}`, "Text.", "invalid_proposal"},
 		{"duplicate_root", "Text.", `{"citations":[],"citations":[]}`, "Text.", "invalid_proposal"},
-		{"duplicate_field", "Text.", `{"citations":[{"answer_quote":"Text","id":"future","id":"0"}]}`, "Text.", "invalid_proposal"},
+		{"duplicate_field", "Text.", `{"citations":[{"anchor_id":"Text","id":"future","id":"0"}]}`, "Text.", "invalid_proposal"},
 		{"null", "Text.", `{"citations":null}`, "Text.", "invalid_proposal"},
 		{"missing", "Text.", `{}`, "Text.", "invalid_proposal"},
-		{"missing_field", "Text.", `{"citations":[{"answer_quote":"Text"}]}`, "Text.", "invalid_proposal"},
-		{"non_string", "Text.", `{"citations":[{"answer_quote":"Text","id":0}]}`, "Text.", "invalid_proposal"},
+		{"missing_field", "Text.", `{"citations":[{"anchor_id":"Text"}]}`, "Text.", "invalid_proposal"},
+		{"non_string", "Text.", `{"citations":[{"anchor_id":"Text","id":0}]}`, "Text.", "invalid_proposal"},
 		{"trailing_json", "Text.", `{"citations":[]} {}`, "Text.", "invalid_proposal"},
 		{"empty_response", "Text.", "", "Text.", "empty_response"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := applyCitationInsertions(tc.original, tc.proposal, batch)
+			got, _, err := applyCitationInsertions(tc.original, tc.proposal, batch, insertionTestAnchors(tc.proposal))
 			if got != tc.want {
 				t.Fatalf("content=%q want=%q", got, tc.want)
 			}
@@ -195,9 +347,9 @@ func TestCitationInsertionProposals(t *testing.T) {
 	}
 }
 
-func TestGroundingAnswerQuoteScope(t *testing.T) {
+func TestGroundingAnchorCatalogScope(t *testing.T) {
 	const answer = "A warehouse has **seventeen bays**."
-	inv := &groundingTestInvoker{responses: []string{`{"citations":[{"answer_quote":"seventeen bays","id":"0"}]}`}}
+	inv := &groundingTestInvoker{responses: []string{`{"citations":[{"anchor_id":"a1","id":"0"}]}`}}
 	previous := getDefaultChatInvoker()
 	SetDefaultChatInvoker(inv)
 	t.Cleanup(func() { SetDefaultChatInvoker(previous) })
@@ -206,30 +358,39 @@ func TestGroundingAnswerQuoteScope(t *testing.T) {
 	if err != nil || out != "A warehouse has **seventeen bays [ID:0]**." {
 		t.Errorf("answer-anchored proposal failed: out=%q err=%v", out, err)
 	}
-	if got := inv.lastReq.Messages[1].Content; got != "<immutable_answer>\n"+answer+"\n</immutable_answer>" {
-		t.Errorf("immutable answer boundary missing: %q", got)
+	user := inv.lastReq.Messages[1].Content
+	prefix := "<immutable_answer>\n" + answer + "\n</immutable_answer>\n<answer_anchors>\n"
+	if !strings.HasPrefix(user, prefix) || !strings.HasSuffix(user, "\n</answer_anchors>") {
+		t.Fatalf("answer/catalogue boundary missing: %q", user)
 	}
-	if !strings.Contains(inv.lastReq.Messages[0].Content, "NOT a quotation from the sources") {
-		t.Error("grounding must distinguish answer locators from evidence quotations")
+	var anchors []citationAnchor
+	if err := json.Unmarshal([]byte(strings.TrimSuffix(strings.TrimPrefix(user, prefix), "\n</answer_anchors>")), &anchors); err != nil || len(anchors) != 1 || anchors[0].ID != "a1" || anchors[0].Text != "A warehouse has **seventeen bays" {
+		t.Fatalf("catalogue=%+v err=%v", anchors, err)
+	}
+	if !strings.Contains(inv.lastReq.Messages[0].Content, "Never return answer text") {
+		t.Error("grounding must select IDs instead of copying text")
 	}
 }
 
-func TestCitationInsertionAnswerQuoteProtocol(t *testing.T) {
+func TestCitationInsertionAnchorIDProtocol(t *testing.T) {
 	const answer = "A warehouse has **seventeen bays**."
-	const valid = `{"citations":[{"answer_quote":"seventeen bays","id":"0"}]}`
+	const valid = `{"citations":[{"anchor_id":"a1","id":"0"}]}`
 	batch := []prompts.CitationSource{{ID: "0", Content: "The facility contains 17 bays."}}
 	for _, tc := range []struct{ name, proposal, reason string }{
 		{"answer_locator", valid, ""},
-		{"source_quote_is_not_answer", `{"citations":[{"answer_quote":"The facility contains 17 bays","id":"0"}]}`, "anchor_not_found"},
-		{"scope_mismatch_is_atomic", `{"citations":[{"answer_quote":"seventeen bays","id":"0"},{"answer_quote":"The facility contains 17 bays","id":"0"}]}`, "anchor_not_found"},
-		{"wrapper_is_not_answer", `{"citations":[{"answer_quote":"<immutable_answer>","id":"0"}]}`, "anchor_not_found"},
+		{"source_quote_is_not_id", `{"citations":[{"anchor_id":"The facility contains 17 bays","id":"0"}]}`, "unknown_anchor"},
+		{"unknown_id_is_atomic", `{"citations":[{"anchor_id":"a1","id":"0"},{"anchor_id":"a2","id":"0"}]}`, "unknown_anchor"},
+		{"wrapper_is_not_id", `{"citations":[{"anchor_id":"<immutable_answer>","id":"0"}]}`, "unknown_anchor"},
 		{"generic_quote_field", `{"citations":[{"quote":"seventeen bays","id":"0"}]}`, "invalid_proposal"},
-		{"both_quote_fields", `{"citations":[{"answer_quote":"seventeen bays","quote":"seventeen bays","id":"0"}]}`, "invalid_proposal"},
-		{"duplicate_answer_quote", `{"citations":[{"answer_quote":"seventeen bays","answer_quote":"seventeen bays","id":"0"}]}`, "invalid_proposal"},
-		{"literal_control_character", strings.ReplaceAll(valid, "seventeen bays", "seventeen\nbays"), "invalid_proposal"},
+		{"legacy_answer_quote", `{"citations":[{"answer_quote":"seventeen bays","id":"0"}]}`, "invalid_proposal"},
+		{"mixed_protocol", `{"citations":[{"anchor_id":"a1","answer_quote":"seventeen bays","id":"0"}]}`, "invalid_proposal"},
+		{"duplicate_anchor_id", `{"citations":[{"anchor_id":"a1","anchor_id":"a1","id":"0"}]}`, "invalid_proposal"},
+		{"literal_control_character", strings.ReplaceAll(valid, "a1", "a\n1"), "invalid_proposal"},
+		{"markdown_fence", "```json\n" + valid + "\n```", "invalid_proposal"},
+		{"null_anchor", `{"citations":[{"anchor_id":null,"id":"0"}]}`, "invalid_proposal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out, _, err := applyCitationInsertions(answer, tc.proposal, batch)
+			out, _, err := applyCitationInsertions(answer, tc.proposal, batch, buildCitationAnchors(answer))
 			if tc.reason == "" {
 				if err != nil || out != "A warehouse has **seventeen bays [ID:0]**." {
 					t.Fatalf("answer locator failed: out=%q err=%v", out, err)
@@ -257,7 +418,7 @@ func TestCitationInsertionPrivateFixture(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &fixture); err != nil {
 		t.Fatalf("invalid private fixture: %T", err)
 	}
-	out, stats, err := applyCitationInsertions(fixture.Answer, fixture.Proposal, fixture.Sources)
+	out, stats, err := applyCitationInsertions(fixture.Answer, fixture.Proposal, fixture.Sources, buildCitationAnchors(fixture.Answer))
 	if err != nil {
 		t.Fatalf("private fixture rejected: parsed=%t proposals=%d err=%v", stats.Parsed, stats.Count, err)
 	}
@@ -274,24 +435,25 @@ func TestCitationInsertionPrivateFixture(t *testing.T) {
 
 func TestCitationInsertionLimitsAndStats(t *testing.T) {
 	batch := []prompts.CitationSource{{ID: "0", Content: "source"}}
-	_, stats, err := applyCitationInsertions("Text.", `{"citations":[{"answer_quote":"Text","id":"0"},{"answer_quote":"Text","id":"missing"}]}`, batch)
+	anchors := []citationAnchor{{ID: "Text", Text: "Text"}}
+	_, stats, err := applyCitationInsertions("Text.", `{"citations":[{"anchor_id":"Text","id":"0"},{"anchor_id":"Text","id":"missing"}]}`, batch, anchors)
 	if err == nil || !stats.Parsed || stats.Count != 2 || stats.ValidIDs != 1 || stats.InvalidIDs != 1 {
 		t.Fatalf("stats=%+v err=%v", stats, err)
 	}
-	tooMany := `{"citations":[` + strings.Repeat(`{"answer_quote":"Text","id":"0"},`, 128) + `{"answer_quote":"Text","id":"0"}]}`
-	if _, _, err := applyCitationInsertions("Text.", tooMany, batch); err == nil {
+	tooMany := `{"citations":[` + strings.Repeat(`{"anchor_id":"Text","id":"0"},`, 128) + `{"anchor_id":"Text","id":"0"}]}`
+	if _, _, err := applyCitationInsertions("Text.", tooMany, batch, anchors); err == nil {
 		t.Fatal("more than 128 proposals must fail")
 	}
-	if _, _, err := applyCitationInsertions("Text.", "x"+strings.Repeat(" ", citationGroundingBatchChars), batch); err == nil {
+	if _, _, err := applyCitationInsertions("Text.", "x"+strings.Repeat(" ", citationGroundingBatchChars), batch, anchors); err == nil {
 		t.Fatal("oversized response must fail")
 	}
 	var proposals []string
 	for i := 0; i < 5; i++ {
 		id := fmt.Sprint(i)
 		batch = append(batch, prompts.CitationSource{ID: id, Content: "source"})
-		proposals = append(proposals, fmt.Sprintf(`{"answer_quote":"Text","id":%q}`, id))
+		proposals = append(proposals, fmt.Sprintf(`{"anchor_id":"Text","id":%q}`, id))
 	}
-	out, _, err := applyCitationInsertions("Text.", `{"citations":[`+strings.Join(proposals, ",")+`]}`, batch)
+	out, _, err := applyCitationInsertions("Text.", `{"citations":[`+strings.Join(proposals, ",")+`]}`, batch, anchors)
 	var rejected *citationGroundingRejectionError
 	if out != "Text." || !errors.As(err, &rejected) || rejected.reason != "citation_limit" {
 		t.Fatalf("out=%q err=%v", out, err)
@@ -299,7 +461,7 @@ func TestCitationInsertionLimitsAndStats(t *testing.T) {
 }
 
 func TestGrounding_Applied(t *testing.T) {
-	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"answer_quote":"original answer","id":"0"}]}`}}}
+	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"anchor_id":"a1","id":"0"}]}`}}}
 	prev := getDefaultChatInvoker()
 	SetDefaultChatInvoker(inv)
 	defer SetDefaultChatInvoker(prev)
@@ -346,7 +508,7 @@ func TestGrounding_Applied(t *testing.T) {
 	if !contains(inv.lastReq.Messages[0].Content, "ID: 0") {
 		t.Errorf("system prompt missing source block: %q", inv.lastReq.Messages[0].Content)
 	}
-	if !strings.Contains(inv.lastReq.Messages[0].Content, "you do not return the answer") {
+	if !strings.Contains(inv.lastReq.Messages[0].Content, "you do not return or copy answer text") {
 		t.Error("grounding prompt must prohibit answer rewriting")
 	}
 }
@@ -469,7 +631,7 @@ func TestGrounding_EmptyContent(t *testing.T) {
 // the client and is not duplicated at the end.
 func TestGrounding_HeldContentEmittedOnce(t *testing.T) {
 	prev := getDefaultChatInvoker()
-	SetDefaultChatInvoker(&groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"answer_quote":"answer without citations","id":"0"}]}`}}})
+	SetDefaultChatInvoker(&groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"anchor_id":"a1","id":"0"}]}`}}})
 	defer SetDefaultChatInvoker(prev)
 
 	withAgentRunner(t, func(_ context.Context, _ AgentParam) (*schema.Message, error) {
@@ -546,7 +708,7 @@ func TestGrounding_PartialStreamFailure_FallsBack(t *testing.T) {
 // is grounded through multiple sequential calls, each feeding its output
 // to the next.
 func TestGrounding_BatchedChunks(t *testing.T) {
-	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"answer_quote":"original","id":"0"}]}`, `{"citations":[{"answer_quote":"original","id":"13"}]}`, `{"citations":[{"answer_quote":"original","id":"26"}]}`}}}
+	inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: []string{`{"citations":[{"anchor_id":"a1","id":"0"}]}`, `{"citations":[{"anchor_id":"a1","id":"13"}]}`, `{"citations":[{"anchor_id":"a1","id":"26"}]}`}}}
 	prev := getDefaultChatInvoker()
 	SetDefaultChatInvoker(inv)
 	defer SetDefaultChatInvoker(prev)
@@ -790,18 +952,18 @@ func TestGroundingPreservesTextAndCitationIdentity(t *testing.T) {
 }
 
 func TestGroundingRejectedBatchDoesNotBlockLaterBatches(t *testing.T) {
-	const first = `{"citations":[{"answer_quote":"First","id":"0"}]}`
-	const second = `{"citations":[{"answer_quote":"Second","id":"13"}]}`
-	const third = `{"citations":[{"answer_quote":"Third","id":"26"}]}`
+	const first = `{"citations":[{"anchor_id":"a1","id":"0"}]}`
+	const second = `{"citations":[{"anchor_id":"a2","id":"13"}]}`
+	const third = `{"citations":[{"anchor_id":"a3","id":"26"}]}`
 	const empty = `{"citations":[]}`
 	for _, tc := range []struct {
 		name, want, reason string
 		responses          []string
 	}{
 		{"invalid_json", "First. Second [ID:13]. Third [ID:26].", "invalid_proposal", []string{"not JSON", second, third}},
-		{"missing_anchor", "First. Second [ID:13]. Third.", "anchor_not_found", []string{`{"citations":[{"answer_quote":"Missing","id":"0"}]}`, second, empty}},
-		{"future_source", "First. Second [ID:13]. Third.", "unknown_citation", []string{`{"citations":[{"answer_quote":"First","id":"13"}]}`, second, empty}},
-		{"accepted_rejected_accepted", "First [ID:0]. Second. Third [ID:26].", "anchor_not_found", []string{first, `{"citations":[{"answer_quote":"Missing","id":"13"}]}`, third}},
+		{"missing_anchor", "First. Second [ID:13]. Third.", "unknown_anchor", []string{`{"citations":[{"anchor_id":"missing","id":"0"}]}`, second, empty}},
+		{"future_source", "First. Second [ID:13]. Third.", "unknown_citation", []string{`{"citations":[{"anchor_id":"a1","id":"13"}]}`, second, empty}},
+		{"accepted_rejected_accepted", "First [ID:0]. Second. Third [ID:26].", "unknown_anchor", []string{first, `{"citations":[{"anchor_id":"missing","id":"13"}]}`, third}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &groundingStreamingInvoker{groundingTestInvoker: groundingTestInvoker{responses: tc.responses}}
@@ -820,7 +982,7 @@ func TestGroundingRejectedBatchDoesNotBlockLaterBatches(t *testing.T) {
 			if inv.calls != 3 || inv.streamCalls != 3 {
 				t.Fatalf("calls=%d stream_calls=%d, want one call per batch", inv.calls, inv.streamCalls)
 			}
-			if tc.name == "invalid_json" && inv.lastReq.Messages[1].Content != "<immutable_answer>\nFirst. Second [ID:13]. Third.\n</immutable_answer>" {
+			if tc.name == "invalid_json" && !strings.HasPrefix(inv.lastReq.Messages[1].Content, "<immutable_answer>\nFirst. Second [ID:13]. Third.\n</immutable_answer>\n<answer_anchors>") {
 				t.Fatalf("later batch did not receive the last accepted answer: %q", inv.lastReq.Messages[1].Content)
 			}
 		})
@@ -847,7 +1009,7 @@ func TestGroundingCancellationStopsRemainingBatches(t *testing.T) {
 		t.Run(fmt.Sprint(cancelBefore), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			inv := &groundingTestInvoker{responses: []string{"not JSON", `{"citations":[{"answer_quote":"Original","id":"13"}]}`}}
+			inv := &groundingTestInvoker{responses: []string{"not JSON", `{"citations":[{"anchor_id":"a1","id":"13"}]}`}}
 			wantCalls := 1
 			if cancelBefore {
 				cancel()
@@ -875,10 +1037,10 @@ func TestGroundingBatchFailurePreservesAcceptedContent(t *testing.T) {
 		name, first, second, want, status string
 		failAt, calls                     int
 	}{
-		{"rejected_later", `{"citations":[{"answer_quote":"original","id":"0"}]}`, `{"citations":[{"answer_quote":"different answer","id":"13"}]}`, "original [ID:0]", "rejected: anchor_not_found", 0, 3},
-		{"provider_error_later", `{"citations":[{"answer_quote":"original","id":"0"}]}`, "", "original [ID:0]", "error:", 2, 2},
-		{"future_source_not_visible", `{"citations":[{"answer_quote":"original","id":"13"}]}`, "", "original", "rejected: unknown_citation", 0, 3},
-		{"rejected_then_accepted", "not JSON", `{"citations":[{"answer_quote":"original","id":"13"}]}`, "original [ID:13]", "rejected: invalid_proposal", 0, 3},
+		{"rejected_later", `{"citations":[{"anchor_id":"a1","id":"0"}]}`, `{"citations":[{"anchor_id":"missing","id":"13"}]}`, "original [ID:0]", "rejected: unknown_anchor", 0, 3},
+		{"provider_error_later", `{"citations":[{"anchor_id":"a1","id":"0"}]}`, "", "original [ID:0]", "error:", 2, 2},
+		{"future_source_not_visible", `{"citations":[{"anchor_id":"a1","id":"13"}]}`, "", "original", "rejected: unknown_citation", 0, 3},
+		{"rejected_then_accepted", "not JSON", `{"citations":[{"anchor_id":"a1","id":"13"}]}`, "original [ID:13]", "rejected: invalid_proposal", 0, 3},
 		{"rejected_then_provider_error", "not JSON", "", "original", "error:", 2, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
