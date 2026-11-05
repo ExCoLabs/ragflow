@@ -92,16 +92,17 @@ func NewCanvasState(runID, sessionID string) *CanvasState {
 		RunID:              runID,
 		SessionID:          sessionID,
 	}
-	s.EnsureSysDate()
+	s.RefreshSysDate()
 	return s
 }
 
-// EnsureSysDate fills sys.date with the current local timestamp when it
-// is missing or blank. Python canvas initializes the same variable with
-// "%Y-%m-%d %H:%M:%S"; the timestamp prefix keeps that wire format and the
-// value is extended with the UTC offset and zone name so agents can report
-// the timezone from verified context instead of guessing it.
-func (s *CanvasState) EnsureSysDate() {
+// RefreshSysDate sets sys.date to the current local timestamp. Callers
+// invoke it after seeding Sys from persisted session globals, which carry
+// the date of the session's first turn. The "%Y-%m-%d %H:%M:%S" prefix
+// keeps the DSL wire format and the value is extended with the UTC offset
+// and zone name so agents can report the timezone from verified context
+// instead of guessing it.
+func (s *CanvasState) RefreshSysDate() {
 	if s == nil {
 		return
 	}
@@ -109,9 +110,6 @@ func (s *CanvasState) EnsureSysDate() {
 	defer s.mu.Unlock()
 	if s.Sys == nil {
 		s.Sys = make(map[string]any)
-	}
-	if v, ok := s.Sys["date"]; ok && strings.TrimSpace(fmt.Sprint(v)) != "" {
-		return
 	}
 	now := time.Now()
 	zone := now.Location().String()
