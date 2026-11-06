@@ -79,8 +79,35 @@ type retrievalArgs struct {
 type retrievalResult struct {
 	FormalizedContent string         `json:"formalized_content"`
 	Chunks            []chunkPayload `json:"chunks,omitempty"`
+	FiltersRelaxed    bool           `json:"filters_relaxed,omitempty"`
 	Stub              bool           `json:"stub,omitempty"`
 	Error             string         `json:"_ERROR,omitempty"`
+}
+
+// relaxedMetadataFilter keeps only the "project" conditions of a metadata
+// filter. A phase/flow/sector condition the model guessed wrong otherwise
+// yields an empty result it reports as missing evidence.
+func relaxedMetadataFilter(filter map[string]any) (map[string]any, bool) {
+	conds, _ := filter["conditions"].([]any)
+	if len(conds) == 0 {
+		return filter, false
+	}
+	kept := make([]any, 0, len(conds))
+	for _, c := range conds {
+		if m, _ := c.(map[string]any); m != nil && m["key"] == "project" {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) == len(conds) {
+		return filter, false
+	}
+	relaxed := cloneStringAnyMap(filter)
+	if len(kept) > 0 {
+		relaxed["conditions"] = kept
+	} else {
+		delete(relaxed, "conditions")
+	}
+	return relaxed, true
 }
 
 // chunkPayload is the minimal chunk shape we surface. We don't try to
@@ -261,8 +288,23 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			Error: err.Error(),
 		}), err
 	}
+	filtersRelaxed := false
+	if len(chunks) == 0 && args.RetrievalFrom != "memory" && args.MetaDataFilter != nil {
+		if relaxed, changed := relaxedMetadataFilter(args.MetaDataFilter); changed {
+			searchReq.MetaDataFilter = cloneStringAnyMap(relaxed)
+			chunks, err = GetRetrievalService().Search(ctx, dao.DB, searchReq)
+			if err != nil {
+				return stubJSON(retrievalResult{
+					Stub:  true,
+					Error: err.Error(),
+				}), err
+			}
+			filtersRelaxed = len(chunks) > 0
+		}
+	}
 	common.Debug("agent retrieval tool: search result",
 		zap.Int("chunks_count", len(chunks)),
+		zap.Bool("filters_relaxed", filtersRelaxed),
 	)
 	// Map the chunks into the result envelope. The retrievalResult
 	// type carries the eino-tool envelope shape (chunkPayload, not
@@ -283,7 +325,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	if len(chunks) == 0 {
 		formalizedContent = args.EmptyResponse
 	}
-	out := retrievalResult{FormalizedContent: formalizedContent, Chunks: payload}
+	out := retrievalResult{FormalizedContent: formalizedContent, Chunks: payload, FiltersRelaxed: filtersRelaxed}
 	// Record chunks into canvas state so the Agent's post-stream
 	// citation grounding call can read them. The recording is
 	// best-effort — when the canvas state is not
