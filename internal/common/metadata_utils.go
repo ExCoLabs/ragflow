@@ -78,6 +78,9 @@ type MetadataFilterDiagnostic struct {
 	Conditions           []map[string]interface{} `json:"conditions"`
 	Logic                string                   `json:"logic"`
 	MatchedDocumentCount int                      `json:"matched_document_count"`
+	OriginalConditions   []map[string]interface{} `json:"original_conditions,omitempty"`
+	RelaxationAttempted  bool                     `json:"relaxation_attempted,omitempty"`
+	RelaxationStatus     string                   `json:"relaxation_status,omitempty"`
 	// AppliedOn is "chunk_fields" when the conditions ran as a filter on the
 	// document metadata stored on chunks (no document id list, so
 	// MatchedDocumentCount is not known); empty for the document id path.
