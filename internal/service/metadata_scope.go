@@ -356,6 +356,13 @@ func ApplyMetaDataScopeWithDiagnostics(
 		if logic == "" {
 			logic = "and"
 		}
+		if len(hard) > 0 && len(generatedRelaxationKeys(metaDataFilter)) > 0 {
+			scope.DocIDs = generatedMetadataDocIDs(metaDataFilter, &MetaFilterResult{Conditions: hard, Logic: logic}, baseDocIDs,
+				func(conditions []MetaFilterCondition, logic string) []string {
+					return runDocMetaFilter(ctx, metaData, kbIDs, conditions, logic)
+				}, record, diagnostics)
+			return scope
+		}
 		matched := false
 		if len(hard) > 0 {
 			matched = applyHard(hard, logic)

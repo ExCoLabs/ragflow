@@ -1,59 +1,42 @@
 package tool
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"reflect"
+	"testing"
 
-func cond(key, op string, value any) map[string]any {
-	return map[string]any{"key": key, "op": op, "value": value}
+	"gorm.io/gorm"
+)
+
+type scopedEmptyRetrievalService struct {
+	calls   int
+	request RetrievalRequest
+	err     error
 }
 
-func TestRelaxedMetadataFilterKeepsProject(t *testing.T) {
-	filter := map[string]any{
-		"logic": "and",
-		"conditions": []any{
-			cond("project", "contains", "2018_055 nst"),
-			cond("phase", "in", []any{"sp"}),
-			cond("flow", "=", "expedition"),
-		},
-	}
-	relaxed, changed := relaxedMetadataFilter(filter)
-	if !changed {
-		t.Fatal("expected changed=true")
-	}
-	conds, _ := relaxed["conditions"].([]any)
-	if len(conds) != 1 || conds[0].(map[string]any)["key"] != "project" {
-		t.Fatalf("expected only project condition, got %v", conds)
-	}
-	if len(filter["conditions"].([]any)) != 3 {
-		t.Fatal("original filter was mutated")
-	}
+func (s *scopedEmptyRetrievalService) Search(_ context.Context, _ *gorm.DB, req RetrievalRequest) ([]RetrievalChunk, error) {
+	s.calls++
+	s.request = req
+	return nil, s.err
 }
 
-func TestRelaxedMetadataFilterNoProjectDropsConditions(t *testing.T) {
-	filter := map[string]any{
-		"logic":      "and",
-		"conditions": []any{cond("phase", "=", "sp"), cond("flow", "=", "in")},
-	}
-	relaxed, changed := relaxedMetadataFilter(filter)
-	if !changed {
-		t.Fatal("expected changed=true")
-	}
-	if _, ok := relaxed["conditions"]; ok {
-		t.Fatalf("expected conditions removed, got %v", relaxed["conditions"])
-	}
-}
-
-func TestRelaxedMetadataFilterNoChangeWhenOnlyProject(t *testing.T) {
-	filter := map[string]any{
-		"conditions": []any{cond("project", "contains", "2018_055")},
-	}
-	if _, changed := relaxedMetadataFilter(filter); changed {
-		t.Fatal("expected changed=false for project-only filter")
-	}
-}
-
-func TestRelaxedMetadataFilterNoConditions(t *testing.T) {
-	filter := map[string]any{"logic": "and"}
-	if got, changed := relaxedMetadataFilter(filter); changed || len(got) != 1 {
-		t.Fatal("expected no change for filter without conditions")
+func TestRetrievalDoesNotRelaxToolConditions(t *testing.T) {
+	for _, backendError := range []error{nil, errors.New("unavailable")} {
+		t.Run("backend", func(t *testing.T) {
+			previous := GetRetrievalService()
+			svc := &scopedEmptyRetrievalService{err: backendError}
+			SetRetrievalService(svc)
+			t.Cleanup(func() { SetRetrievalService(previous) })
+			filter := map[string]any{"method": "manual", "conditions": []any{map[string]any{"key": "phase", "op": "=", "value": "rp"}}}
+			rt := NewRetrievalToolWithDefaults(retrievalArgs{DatasetIDs: []string{"kb-1"}, MetaDataFilter: filter})
+			_, err := rt.InvokableRun(t.Context(), `{"query":"test"}`)
+			if (err != nil) != (backendError != nil) {
+				t.Fatalf("error=%v want=%v", err, backendError)
+			}
+			if svc.calls != 1 || !reflect.DeepEqual(svc.request.MetaDataFilter, filter) {
+				t.Fatalf("calls=%d filter=%v", svc.calls, svc.request.MetaDataFilter)
+			}
+		})
 	}
 }

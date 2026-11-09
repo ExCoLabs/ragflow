@@ -84,32 +84,6 @@ type retrievalResult struct {
 	Error             string         `json:"_ERROR,omitempty"`
 }
 
-// relaxedMetadataFilter keeps only the "project" conditions of a metadata
-// filter. A phase/flow/sector condition the model guessed wrong otherwise
-// yields an empty result it reports as missing evidence.
-func relaxedMetadataFilter(filter map[string]any) (map[string]any, bool) {
-	conds, _ := filter["conditions"].([]any)
-	if len(conds) == 0 {
-		return filter, false
-	}
-	kept := make([]any, 0, len(conds))
-	for _, c := range conds {
-		if m, _ := c.(map[string]any); m != nil && m["key"] == "project" {
-			kept = append(kept, c)
-		}
-	}
-	if len(kept) == len(conds) {
-		return filter, false
-	}
-	relaxed := cloneStringAnyMap(filter)
-	if len(kept) > 0 {
-		relaxed["conditions"] = kept
-	} else {
-		delete(relaxed, "conditions")
-	}
-	return relaxed, true
-}
-
 // chunkPayload is the minimal chunk shape we surface. We don't try to
 // match every Python field — the stub returns empty data; the wired
 // implementation will populate the real shape.
@@ -288,20 +262,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			Error: err.Error(),
 		}), err
 	}
-	filtersRelaxed := false
-	if len(chunks) == 0 && args.RetrievalFrom != "memory" && args.MetaDataFilter != nil {
-		if relaxed, changed := relaxedMetadataFilter(args.MetaDataFilter); changed {
-			searchReq.MetaDataFilter = cloneStringAnyMap(relaxed)
-			chunks, err = GetRetrievalService().Search(ctx, dao.DB, searchReq)
-			if err != nil {
-				return stubJSON(retrievalResult{
-					Stub:  true,
-					Error: err.Error(),
-				}), err
-			}
-			filtersRelaxed = len(chunks) > 0
-		}
-	}
+	filtersRelaxed := diagnostics != nil && diagnostics.RelaxationAttempted
 	common.Debug("agent retrieval tool: search result",
 		zap.Int("chunks_count", len(chunks)),
 		zap.Bool("filters_relaxed", filtersRelaxed),

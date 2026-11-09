@@ -823,9 +823,9 @@ func metaKeyDescriptions(fields []common.MetadataFieldDef) map[string]string {
 //     the model in full. Callers keep their own document scope and search it
 //     unfiltered; a filter that fails to narrow is recoverable, one that narrows
 //     to the wrong documents is not.
-//   - []string{NoMatchDocIDSentinel} -- manual conditions that match no document.
-//     Only manual mode produces the sentinel, and it means zero results on
-//     purpose: the user asked for those exact conditions.
+//   - []string{NoMatchDocIDSentinel} -- manual conditions, or an opted-in
+//     generated-filter relaxation, that match no document. Callers must not
+//     turn this empty selection into an unfiltered search.
 //   - any other slice -- the documents the filter selected.
 //
 // nil must never be turned into the sentinel: that would answer "the metadata
@@ -949,15 +949,7 @@ func ApplyMetaDataFilterWithDiagnostics(
 			record("not_generated", nil, "", 0)
 			return baseDocIDs
 		}
-		filteredIDs := runMetadataFilter(filters.Conditions, filters.Logic)
-		docIDs := constrainDocIDs(baseDocIDs, filteredIDs)
-		recordGenerated(record, filters, len(docIDs))
-		if len(docIDs) == 0 {
-			// No conditions, or conditions that selected nothing: the model was
-			// not able to narrow the search, so it stays unnarrowed.
-			return nil
-		}
-		return docIDs
+		return generatedMetadataDocIDs(metaDataFilter, filters, baseDocIDs, runMetadataFilter, record, diagnostics)
 
 	case "semi_auto":
 		selectedKeys := []string{}
@@ -1000,13 +992,7 @@ func ApplyMetaDataFilterWithDiagnostics(
 					record("not_generated", nil, "", 0)
 					return baseDocIDs
 				}
-				filteredIDs := runMetadataFilter(filters.Conditions, filters.Logic)
-				docIDs := constrainDocIDs(baseDocIDs, filteredIDs)
-				recordGenerated(record, filters, len(docIDs))
-				if len(docIDs) == 0 {
-					return nil
-				}
-				return docIDs
+				return generatedMetadataDocIDs(metaDataFilter, filters, baseDocIDs, runMetadataFilter, record, diagnostics)
 			}
 		}
 		// None of the selected keys exist in the metadata, so there was
@@ -1118,6 +1104,70 @@ func metaFilterRecorder(diagnostics *common.MetadataFilterDiagnostic, method str
 			MatchedDocumentCount: matched,
 		}
 	}
+}
+
+func generatedRelaxationKeys(config map[string]interface{}) map[string]bool {
+	keys := make(map[string]bool)
+	switch values := config["relax_generated_keys"].(type) {
+	case []interface{}:
+		for _, value := range values {
+			if key, ok := value.(string); ok && (key == "phase" || key == "flow") {
+				keys[key] = true
+			}
+		}
+	case []string:
+		for _, key := range values {
+			if key == "phase" || key == "flow" {
+				keys[key] = true
+			}
+		}
+	}
+	return keys
+}
+
+func generatedMetadataDocIDs(config map[string]interface{}, filters *MetaFilterResult, baseDocIDs []string, run func([]MetaFilterCondition, string) []string, record func(string, []MetaFilterCondition, string, int), diagnostic *common.MetadataFilterDiagnostic) []string {
+	docIDs := constrainDocIDs(baseDocIDs, run(filters.Conditions, filters.Logic))
+	recordGenerated(record, filters, len(docIDs))
+	if len(docIDs) > 0 {
+		return docIDs
+	}
+	keys := generatedRelaxationKeys(config)
+	if len(keys) == 0 || len(filters.Conditions) == 0 {
+		return nil
+	}
+	kept := make([]MetaFilterCondition, 0, len(filters.Conditions))
+	hasProject := false
+	for _, condition := range filters.Conditions {
+		if condition.Key == "project" || condition.Key == "project_id" {
+			value, ok := condition.Value.(string)
+			if ok && strings.TrimSpace(value) != "" && (condition.Op == "=" || condition.Op == "contains") {
+				hasProject = true
+			}
+		}
+		if !keys[condition.Key] {
+			kept = append(kept, condition)
+		}
+	}
+	if !hasProject || (filters.Logic != "" && filters.Logic != "and") || len(kept) == len(filters.Conditions) {
+		if diagnostic != nil {
+			diagnostic.RelaxationStatus = "skipped_unsafe_or_unchanged"
+		}
+		return []string{NoMatchDocIDSentinel}
+	}
+	docIDs = constrainDocIDs(baseDocIDs, run(kept, filters.Logic))
+	recordGenerated(record, &MetaFilterResult{Conditions: kept, Logic: filters.Logic}, len(docIDs))
+	if diagnostic != nil {
+		diagnostic.OriginalConditions = metaConditionMaps(filters.Conditions)
+		diagnostic.RelaxationAttempted = true
+		diagnostic.RelaxationStatus = "no_matches"
+		if len(docIDs) > 0 {
+			diagnostic.RelaxationStatus = "applied"
+		}
+	}
+	if len(docIDs) == 0 {
+		return []string{NoMatchDocIDSentinel}
+	}
+	return docIDs
 }
 
 // recordGenerated records the outcome of an LLM-generated (auto/semi_auto)
