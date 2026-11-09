@@ -309,7 +309,7 @@ func TestCanonicalProjectScopeIsManualAndFailClosed(t *testing.T) {
 			if err == nil && !reflect.DeepEqual(got, tc.ids) {
 				t.Fatalf("scope=%v", got)
 			}
-			want := map[string]any{"method": "manual", "logic": "and", "manual": []any{map[string]any{"key": "project_id", "op": "=", "value": "2015_062"}}}
+			want := map[string]any{"method": "manual", "logic": "and", "manual": []any{map[string]any{"key": "project_id", "op": "in", "value": "2015_062"}}}
 			if !reflect.DeepEqual(e.filter, want) {
 				t.Fatalf("filter=%v", e.filter)
 			}

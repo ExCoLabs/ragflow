@@ -57,7 +57,7 @@ func (a *NLPRetrievalAdapter) resolveProjectScope(ctx context.Context, req Retri
 	if a.enhancer == nil {
 		return nil, fmt.Errorf("retrieval: project scope service is not configured")
 	}
-	filter := map[string]any{"method": "manual", "logic": "and", "manual": []any{map[string]any{"key": "project_id", "op": "=", "value": req.ProjectID}}}
+	filter := map[string]any{"method": "manual", "logic": "and", "manual": []any{map[string]any{"key": "project_id", "op": "in", "value": req.ProjectID}}}
 	ids, err := a.enhancer.FilterDocuments(ctx, filter, "", nil, base, req.DatasetIDs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: resolve project scope: %w", err)
