@@ -255,6 +255,22 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	}
 	query := req.Query
 	docIDs := compactStrings(req.DocScope)
+	var projectDocIDs []string
+	if req.ProjectID != "" {
+		if req.Diagnostics != nil {
+			defer func() { req.Diagnostics.ProjectID = req.ProjectID }()
+		}
+		scopeReq := req
+		scopeReq.DatasetIDs = datasets.kbIDs
+		projectDocIDs, err = a.resolveProjectScope(ctx, scopeReq, docIDs)
+		if err != nil {
+			return nil, err
+		}
+		if len(projectDocIDs) == 0 {
+			return []RetrievalChunk{}, nil
+		}
+		docIDs = projectDocIDs
+	}
 	chunkMeta := req.ChunkMeta
 	if len(req.MetaDataFilter) > 0 {
 		if a.enhancer == nil {
@@ -273,6 +289,12 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		}
 		if err != nil {
 			return nil, fmt.Errorf("retrieval: filter documents: %w", err)
+		}
+	}
+	if req.ProjectID != "" {
+		docIDs = intersectProjectScope(projectDocIDs, docIDs)
+		if len(docIDs) == 0 {
+			return []RetrievalChunk{}, nil
 		}
 	}
 	if len(req.CrossLanguages) > 0 {
@@ -347,6 +369,9 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	}
 	if a.enhancer != nil {
 		rawChunks = a.enhancer.RetrieveByChildren(ctx, rawChunks, datasets.tenantIDs)
+	}
+	if req.ProjectID != "" {
+		rawChunks = projectScopedChunks(rawChunks, docIDs)
 	}
 	out := make([]RetrievalChunk, 0, len(rawChunks))
 	for _, raw := range rawChunks {

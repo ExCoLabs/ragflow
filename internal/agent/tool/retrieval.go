@@ -229,8 +229,13 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			diagnostics.Conditions = []map[string]interface{}{}
 		}
 	}
+	projectID, err := retrievalProjectID(ctx, args.RetrievalFrom, r.defaults.MetaDataFilter)
+	if err != nil {
+		return "", err
+	}
 	searchReq := RetrievalRequest{
 		Query:                    args.Query,
+		ProjectID:                projectID,
 		DatasetIDs:               args.DatasetIDs,
 		MemoryIDs:                args.MemoryIDs,
 		TopN:                     args.TopN,
@@ -307,6 +312,18 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			if diagnostics.AppliedOn != "" {
 				// A filter on the chunks' metadata fields has no document count.
 				diagnostic["applied_on"] = diagnostics.AppliedOn
+			}
+			if diagnostics.ProjectID != "" {
+				diagnostic["project_id"] = diagnostics.ProjectID
+			}
+			if diagnostics.RelaxationAttempted {
+				diagnostic["relaxation_attempted"] = true
+			}
+			if diagnostics.RelaxationStatus != "" {
+				diagnostic["relaxation_status"] = diagnostics.RelaxationStatus
+			}
+			if len(diagnostics.OriginalConditions) > 0 {
+				diagnostic["original_conditions"] = diagnostics.OriginalConditions
 			}
 			state.AppendMetadataFilterDiagnostic(diagnostic)
 		}
