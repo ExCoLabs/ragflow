@@ -65,6 +65,7 @@ type RetrievalChunk struct {
 // RetrievalRequest is the input to RetrievalService.Search.
 type RetrievalRequest struct {
 	Query      string
+	ProjectID  string
 	DatasetIDs []string
 	MemoryIDs  []string
 	TopN       int

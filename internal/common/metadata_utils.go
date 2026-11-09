@@ -74,6 +74,7 @@ type MetaFilterInput struct {
 // metadata_filters.
 type MetadataFilterDiagnostic struct {
 	Method               string                   `json:"method"`
+	ProjectID            string                   `json:"project_id,omitempty"`
 	Status               string                   `json:"status"`
 	Conditions           []map[string]interface{} `json:"conditions"`
 	Logic                string                   `json:"logic"`
