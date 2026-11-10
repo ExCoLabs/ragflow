@@ -416,7 +416,7 @@ check_onnxruntime_deps() {
             echo "Preparing onnxruntime ${ort_version} for $(ort_release_target)"
             local ort_tmp
             ort_tmp="$(mktemp -d)" || return 1
-            if curl -fsSL "https://github.com/infiniflow/ragflow-build/releases/download/onnxruntime-v${ort_version}/${ort_dl}" -o "$ort_tmp/o.zip" \
+            if curl -fsSL "https://github.com/infiniflow/ragflow-build/releases/download/onnxruntime-v${ort_version}-patch2/${ort_dl}" -o "$ort_tmp/o.zip" \
                 && [ "$(sha256sum "$ort_tmp/o.zip" | awk '{print $1}')" = "$ort_sha" ]; then
                 mkdir -p "$ONNXRUNTIME_STATIC_PREFIX"
                 if unzip -oq "$ort_tmp/o.zip" -d "$ONNXRUNTIME_STATIC_PREFIX" 2>/dev/null; then
