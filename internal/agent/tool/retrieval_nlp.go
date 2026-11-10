@@ -28,7 +28,11 @@
 //
 //   tool.RetrievalRequest.Query      → nlp.RetrievalRequest.Question
 //   tool.RetrievalRequest.DatasetIDs → nlp.RetrievalRequest.KbIDs
-//   tool.RetrievalRequest.TopN       → nlp.RetrievalRequest.PageSize
+//   tool.RetrievalRequest.TopN       → nlp.RetrievalRequest.PageSize, widened
+//                                       to the rerank candidate budget so
+//                                       version dedup sees the full pool;
+//                                       results are truncated back to TopN
+//                                       before TOC enhancement
 //   tool.RetrievalRequest.TopK       → nlp.RetrievalRequest.KNNTopK
 //                                       (fallback KNNTopK=TopN*4 so rerank
 //                                        has headroom)
@@ -213,6 +217,17 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	if topN <= 0 {
 		topN = 8
 	}
+	// Fetch the full rerank candidate window so version dedup and project
+	// scoping see duplicates the topN page would have cut; the final
+	// pre-TOC truncation below restores the configured result count.
+	// PageSize must not exceed the rerank budget (nlp enforces
+	// page*pageSize <= RerankCandidatesCount, default 64).
+	fetchN := topN
+	if budget := req.RerankCandidatesCount; budget > fetchN {
+		fetchN = budget
+	} else if budget <= 0 && fetchN < 64 {
+		fetchN = 64
+	}
 
 	datasets, err := a.resolveDatasets(ctx, db, req)
 	if err != nil {
@@ -333,7 +348,7 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	preparedReq.Query = query
 	preparedReq.DocScope = docIDs
 	preparedReq.DatasetIDs = append([]string(nil), datasets.kbIDs...)
-	nlpReq := nlpRequestFromRetrieval(preparedReq, datasets.tenantIDs, topN, embeddingModel, preparedReq.ExcludeCompiled)
+	nlpReq := nlpRequestFromRetrieval(preparedReq, datasets.tenantIDs, fetchN, embeddingModel, preparedReq.ExcludeCompiled)
 	nlpReq.Language = entity.KnowledgebasesLanguage(datasets.kbs)
 	nlpReq.RerankModel = rerankModel
 	nlpReq.ChunkMeta = chunkMeta
@@ -349,6 +364,13 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		return []RetrievalChunk{}, nil
 	}
 	rawChunks := res.Chunks
+	if req.ProjectID != "" {
+		rawChunks = projectScopedChunks(rawChunks, docIDs)
+	}
+	rawChunks = preferNewestDocVersions(rawChunks)
+	if len(rawChunks) > topN {
+		rawChunks = rawChunks[:topN]
+	}
 	if req.TOCEnhance {
 		if a.enhancer == nil {
 			return nil, fmt.Errorf("retrieval: TOC enhancement service is not configured")
@@ -364,7 +386,6 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		)
 		if err != nil {
 			common.Warn("agent retrieval: TOC enhancement failed; using retrieval results", zap.Error(err))
-			rawChunks = res.Chunks
 		}
 	}
 	if a.enhancer != nil {
