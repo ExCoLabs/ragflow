@@ -546,6 +546,20 @@ check_pdfium_deps() {
         return 0
     fi
 
+    echo "  pdfium-static not found in system or user cache"
+    echo "Preparing pdfium-static ${PDFIUM_STATIC_VERSION} for ${TARGET_OS}_${TARGET_ARCH}"
+    local url="https://github.com/kognitos/pdfium-static/releases/download/chromium%2F${PDFIUM_STATIC_VERSION}/$(pdfium_asset)"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)" || return 1
+    if curl -fsSL "$url" | tar xz -C "$tmp_dir" && find "$tmp_dir" -name libpdfium.a -print -quit | grep -q .; then
+        mkdir -p "${PDFIUM_STATIC_PREFIX}"
+        cp -a "$tmp_dir"/. "${PDFIUM_STATIC_PREFIX}/"
+        rm -rf "$tmp_dir"
+        echo "✓ pdfium-static ${PDFIUM_STATIC_VERSION} prepared at ${PDFIUM_STATIC_PREFIX}"
+        return 0
+    fi
+    rm -rf "$tmp_dir"
+
     echo "  pdfium (static) not found"
     echo "  Expected: ${lib_path}"
     echo "  Run: uv run tools/scripts/download_dev_deps.py"
