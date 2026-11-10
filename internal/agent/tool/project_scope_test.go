@@ -71,6 +71,7 @@ type projectPipelineEnhancer struct {
 	canonicalErr, generatedErr error
 	seenBase                   []string
 	tocErr                     error
+	tocInput                   int
 }
 
 func (e *projectPipelineEnhancer) FilterDocuments(_ context.Context, filter map[string]any, _ string, model *modelModule.ChatModel, base, kbs []string, _ *common.MetadataFilterDiagnostic) ([]string, error) {
@@ -90,6 +91,7 @@ func (e *projectPipelineEnhancer) LabelQuestion(context.Context, string, []*enti
 	return nil
 }
 func (e *projectPipelineEnhancer) EnhanceTOC(_ context.Context, _ *modelModule.ChatModel, _, _ []string, _ string, _ int, rows []map[string]any) ([]map[string]any, error) {
+	e.tocInput = len(rows)
 	return append(slices.Clone(rows), map[string]any{"chunk_id": "toc-foreign", "doc_id": "nst-doc", "content_with_weight": "unrelated TOC"}), e.tocErr
 }
 func (e *projectPipelineEnhancer) RetrieveByChildren(_ context.Context, rows []map[string]any, _ []string) []map[string]any {
@@ -186,6 +188,70 @@ func TestProjectScopeThroughRetrievalPipeline(t *testing.T) {
 				t.Fatal("generated filter did not receive canonical base")
 			}
 		})
+	}
+}
+
+// The retrieval page is widened to the rerank candidate budget so version
+// dedup sees duplicates ranked below topN; TOC enhancement still receives at
+// most topN chunks.
+func TestCandidatePoolWideningAndTruncation(t *testing.T) {
+	if err := nlp.InitQueryBuilder(""); err != nil {
+		t.Fatal(err)
+	}
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.AutoMigrate(&entity.Knowledgebase{}, &entity.UserTenant{}, &entity.Document{}); err != nil {
+		t.Fatal(err)
+	}
+	previousDB := dao.DB
+	dao.DB = db
+	t.Cleanup(func() { dao.DB = previousDB })
+	valid := string(entity.StatusValid)
+	kb := &entity.Knowledgebase{ID: "kb-pool", TenantID: "tenant", CreatedBy: "owner", Permission: string(entity.TenantPermissionMe), Status: &valid}
+	if err = db.Create(kb).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Create(&entity.UserTenant{ID: "membership", UserID: "owner", TenantID: "tenant", Role: string(permission.RoleOwner), InvitedBy: "owner", Status: &valid}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"doc-old", "doc-keep", "doc-new"} {
+		if err = db.Create(&entity.Document{ID: d, ParserConfig: entity.JSONMap{}}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := []map[string]any{
+		{"id": "old1", "doc_id": "doc-old", "docnm_kwd": "Brief(1).docx", "kb_id": kb.ID, "content_ltks": "brief", "content_with_weight": "old copy brief", "_score": 0.9},
+		{"id": "old2", "doc_id": "doc-old", "docnm_kwd": "Brief(1).docx", "kb_id": kb.ID, "content_ltks": "brief", "content_with_weight": "old copy second brief", "_score": 0.85},
+		{"id": "keep", "doc_id": "doc-keep", "docnm_kwd": "other.pdf", "kb_id": kb.ID, "content_ltks": "brief", "content_with_weight": "kept brief", "_score": 0.8},
+		{"id": "new1", "doc_id": "doc-new", "docnm_kwd": "Brief(2).docx", "kb_id": kb.ID, "content_ltks": "brief", "content_with_weight": "new copy brief", "_score": 0.75},
+	}
+	docEngine := &projectPipelineEngine{rows: rows}
+	enhancer := &projectPipelineEnhancer{}
+	adapter := &NLPRetrievalAdapter{svc: nlp.NewRetrievalService(docEngine, &dao.DocumentDAO{}), kbDAO: fakeKnowledgebaseLookup{kbs: []*entity.Knowledgebase{kb}}, enhancer: enhancer, modelConstructors: RetrievalModelConstructors{
+		Embedding: func(context.Context, string, string) (*modelModule.EmbeddingModel, error) { return nil, nil },
+		Chat:      func(context.Context, string, string) (*modelModule.ChatModel, error) { return nil, nil },
+	}}
+	state := runtime.NewCanvasState("run", "task")
+	state.Sys["user_id"] = "owner"
+	weight, threshold := 1.0, 0.0
+	got, err := adapter.Search(runtime.WithState(t.Context(), state), db, RetrievalRequest{Query: "brief", TopN: 2, RerankCandidatesCount: 4, DatasetIDs: []string{kb.ID}, KeywordsSimilarityWeight: &weight, SimilarityThreshold: &threshold, TOCEnhance: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docEngine.requests) != 1 {
+		t.Fatalf("search calls=%d", len(docEngine.requests))
+	}
+	if enhancer.tocInput != 2 {
+		t.Fatalf("TOC input=%d want 2", enhancer.tocInput)
+	}
+	docs := map[string]bool{}
+	for _, c := range got {
+		docs[c.DocumentID] = true
+	}
+	if docs["doc-old"] {
+		t.Fatalf("older version survived dedup: %v", got)
 	}
 }
 
