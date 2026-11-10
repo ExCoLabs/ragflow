@@ -403,6 +403,48 @@ check_onnxruntime_deps() {
     done < <(find "$ONNXRUNTIME_STATIC_PREFIX" -type f -name '*.a' 2>/dev/null)
 
     if [ -z "$ORT_A_FILES" ]; then
+        # No ORT in system/user cache: download the pinned release zip and
+        # verify it against the digest below before extracting.
+        local ort_dl="onnxruntime-v${ort_version}-$(ort_release_target).zip" ort_sha=""
+        case "$ort_dl" in
+            onnxruntime-v*-linux-x86_64.zip)  ort_sha="1d41cc9c2a174200e90fd622e8b0f95e6531426bc9c23cfb5a4b92001c274da1" ;;
+            onnxruntime-v*-linux-aarch64.zip) ort_sha="712b65d37d7cf4bf1d41aff0763a084020c0e36a09073170bbaf61c018246a83" ;;
+            onnxruntime-v*-osx-arm64.zip)     ort_sha="f0bebbb13901196757820164fe4ae936149e42021ff40c6450822bd6cd6e958a" ;;
+            onnxruntime-v*-osx-universal.zip) ort_sha="8c1bfab88e17de325376e7e5c2cbe163e5df48af362083912fdbac042f9c80da" ;;
+        esac
+        if [ -n "$ort_sha" ]; then
+            echo "Preparing onnxruntime ${ort_version} for $(ort_release_target)"
+            local ort_tmp
+            ort_tmp="$(mktemp -d)" || return 1
+            if curl -fsSL "https://github.com/infiniflow/ragflow-build/releases/download/onnxruntime-v${ort_version}/${ort_dl}" -o "$ort_tmp/o.zip" \
+                && [ "$(sha256sum "$ort_tmp/o.zip" | awk '{print $1}')" = "$ort_sha" ]; then
+                mkdir -p "$ONNXRUNTIME_STATIC_PREFIX"
+                if unzip -oq "$ort_tmp/o.zip" -d "$ONNXRUNTIME_STATIC_PREFIX" 2>/dev/null; then
+                    :
+                elif python3 -m zipfile -e "$ort_tmp/o.zip" "$ONNXRUNTIME_STATIC_PREFIX/" 2>/dev/null; then
+                    :
+                else
+                    rm -rf "$ort_tmp"; echo "Error: cannot extract $ort_dl" >&2; return 1
+                fi
+                rm -rf "$ort_tmp"
+                ORT_A_FILES=""
+                while IFS= read -r f; do
+                    case "$f" in
+                        */${ort_dir_prefix}${ort_version}*/lib/*.a)
+                            ORT_A_FILES="$ORT_A_FILES $f"
+                            [ -z "$primary" ] && primary="$f"
+                            case "$(basename "$f")" in libonnxruntime.a) primary="$f" ;; esac ;;
+                    esac
+                done < <(find "$ONNXRUNTIME_STATIC_PREFIX" -type f -name '*.a' 2>/dev/null)
+                [ -n "$ORT_A_FILES" ] && echo "✓ onnxruntime ${ort_version} prepared at $ONNXRUNTIME_STATIC_PREFIX"
+            else
+                rm -rf "$ort_tmp"
+                echo "Error: onnxruntime ${ort_version} download or sha256 check failed" >&2
+            fi
+        fi
+    fi
+
+    if [ -z "$ORT_A_FILES" ]; then
         local avail
         avail="$(find "$ONNXRUNTIME_STATIC_PREFIX" -maxdepth 1 -type d \
             -name "${ort_dir_prefix}*" -exec basename {} \; 2>/dev/null | tr '\n' ' ')"
