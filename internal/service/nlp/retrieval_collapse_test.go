@@ -30,6 +30,34 @@ func TestCollapseDuplicateChunksKeepsBestRankedCopy(t *testing.T) {
 	}
 }
 
+func TestPreferNewestDocVersionsKeepsNewestCopy(t *testing.T) {
+	result := &RetrievalSearchResult{
+		IDs: []string{"old1", "old2", "keep", "new1", "dwg"},
+		Field: map[string]map[string]interface{}{
+			"old1": {"doc_id": "doc-old", "docnm_kwd": "Brief(1).docx", "content_with_weight": "x"},
+			"old2": {"doc_id": "doc-old", "docnm_kwd": "Brief(1).docx", "content_with_weight": "y"},
+			"keep": {"doc_id": "doc-keep", "docnm_kwd": "other.pdf", "content_with_weight": "z"},
+			"new1": {"doc_id": "doc-new", "docnm_kwd": "Brief(2).docx", "content_with_weight": "w"},
+			"dwg":  {"doc_id": "doc-dwg", "docnm_kwd": "010_A - t.dwg(9).md", "content_with_weight": "v"},
+		},
+		Chunks: []map[string]interface{}{
+			{"doc_id": "doc-old"}, {"doc_id": "doc-old"}, {"doc_id": "doc-keep"}, {"doc_id": "doc-new"}, {"doc_id": "doc-dwg"},
+		},
+		Highlight: map[string]string{"old1": "h1", "new1": "h4"},
+		Total:     5,
+	}
+	got := preferNewestDocVersions(result)
+	if want := []string{"keep", "new1", "dwg"}; !reflect.DeepEqual(got.IDs, want) {
+		t.Fatalf("IDs = %v, want %v", got.IDs, want)
+	}
+	if got.Total != 3 || len(got.Chunks) != 3 || len(got.Field) != 3 {
+		t.Fatalf("sizes Total=%d Chunks=%d Field=%d", got.Total, len(got.Chunks), len(got.Field))
+	}
+	if got.Highlight["new1"] != "h4" || len(got.Highlight) != 1 {
+		t.Fatalf("Highlight = %v", got.Highlight)
+	}
+}
+
 func collapseRetrievalRows() []map[string]interface{} {
 	return []map[string]interface{}{
 		{"id": "a1", "content_ltks": "alpha", "content_with_weight": "alpha paragraph", "docnm_kwd": "a.pdf", "kb_id": "kb-1", "_score": 0.9},

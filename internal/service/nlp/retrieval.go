@@ -79,6 +79,13 @@ type RetrievalRequest struct {
 	// towards Total, the page, or DocAggs, so duplicate files cannot crowd out
 	// distinct content. nil means true.
 	CollapseDuplicates *bool
+	// PreferDocVersions keeps only the newest copy of each base document in
+	// the candidate pool (highest "(N)" upload suffix, non-DWG beats DWG
+	// derivative), before reranking and pagination, so older re-uploads
+	// cannot occupy candidate slots. The pool is already scoped by the
+	// request's document filters, so only candidates that satisfy them take
+	// part in the comparison. nil means false.
+	PreferDocVersions *bool
 	// ChunkMeta filters and boosts on document metadata stored on chunks
 	// (service.ApplyMetaDataScope). Nil leaves retrieval unchanged.
 	ChunkMeta *common.ChunkMetaScope
@@ -201,6 +208,9 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 	searchResult, err = s.PruneDeletedChunks(ctx, searchResult)
 	if err != nil {
 		return nil, fmt.Errorf("PruneDeletedChunks failed: %w", err)
+	}
+	if req.PreferDocVersions != nil && *req.PreferDocVersions {
+		searchResult = preferNewestDocVersions(searchResult)
 	}
 	if searchResult.Total == 0 {
 		return &RetrievalResult{Chunks: []map[string]interface{}{}, DocAggs: []map[string]interface{}{}, Total: 0}, nil
@@ -517,6 +527,48 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 // for each kept index, the indices of the chunks it stands for. Text is
 // compared after collapsing whitespace; chunks without text are never merged
 // with each other.
+// preferNewestDocVersions removes chunks of older re-uploaded copies and
+// DWG derivatives from the candidate result when a newer copy of the same
+// base document is present, keeping IDs, Chunks, Field, and Highlight
+// consistent. The candidate list stays in rank order.
+func preferNewestDocVersions(result *RetrievalSearchResult) *RetrievalSearchResult {
+	keep := common.PreferNewestDocVersionIDs(result.IDs, result.Field)
+	if len(keep) == len(result.IDs) {
+		return result
+	}
+	kept := make(map[string]bool, len(keep))
+	for _, id := range keep {
+		kept[id] = true
+	}
+	ids := make([]string, 0, len(keep))
+	chunks := make([]map[string]interface{}, 0, len(keep))
+	field := make(map[string]map[string]interface{}, len(keep))
+	highlight := make(map[string]string)
+	for _, id := range result.IDs {
+		if !kept[id] {
+			continue
+		}
+		chunk, ok := result.Field[id]
+		if !ok {
+			continue
+		}
+		ids = append(ids, id)
+		chunks = append(chunks, chunk)
+		field[id] = chunk
+		if result.Highlight != nil {
+			if hl, ok := result.Highlight[id]; ok {
+				highlight[id] = hl
+			}
+		}
+	}
+	result.IDs = ids
+	result.Chunks = chunks
+	result.Field = field
+	result.Highlight = highlight
+	result.Total = int64(len(ids))
+	return result
+}
+
 func collapseDuplicateChunks(searchResult *RetrievalSearchResult, idx []int) ([]int, map[int][]int) {
 	kept := make([]int, 0, len(idx))
 	duplicatesOf := make(map[int][]int)
