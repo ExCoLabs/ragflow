@@ -91,6 +91,65 @@ func intersectProjectScope(canonical, current []string) []string {
 	return out
 }
 
+var docVersionSuffix = regexp.MustCompile(`\(\d+\)\s*$`)
+
+// docBaseName normalizes a document name so that re-uploaded copies
+// ("file(1).pdf", "file(3).pdf") and DWG-derived markdown
+// ("file - titulka.dwg(5).md") group with their source document.
+func docBaseName(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if i := strings.Index(s, ".dwg"); i >= 0 {
+		s = s[:i]
+		if j := strings.LastIndex(s, " - "); j >= 0 {
+			s = s[:j]
+		}
+	} else if i := strings.LastIndex(s, "."); i > 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(docVersionSuffix.ReplaceAllString(s, ""))
+}
+
+// preferNewestDocVersions drops chunks from older re-uploaded copies and
+// DWG-derived files when a newer copy of the same base document was
+// retrieved. A higher "(N)" suffix wins; a non-DWG document beats a DWG
+// derivative regardless of suffix. Chunk order is preserved.
+func preferNewestDocVersions(chunks []map[string]any) []map[string]any {
+	best := make(map[string][2]int)
+	for _, chunk := range chunks {
+		name, _ := chunk["docnm_kwd"].(string)
+		base := docBaseName(name)
+		version := 0
+		if m := regexp.MustCompile(`\((\d+)\)`).FindStringSubmatch(name); m != nil {
+			fmt.Sscanf(m[1], "%d", &version)
+		}
+		nonDWG := 1
+		if strings.Contains(strings.ToLower(name), ".dwg") {
+			nonDWG = 0
+		}
+		cur := [2]int{nonDWG, version}
+		if prev, ok := best[base]; !ok || cur[0] > prev[0] || (cur[0] == prev[0] && cur[1] > prev[1]) {
+			best[base] = cur
+		}
+	}
+	out := make([]map[string]any, 0, len(chunks))
+	for _, chunk := range chunks {
+		name, _ := chunk["docnm_kwd"].(string)
+		base := docBaseName(name)
+		version := 0
+		if m := regexp.MustCompile(`\((\d+)\)`).FindStringSubmatch(name); m != nil {
+			fmt.Sscanf(m[1], "%d", &version)
+		}
+		nonDWG := 1
+		if strings.Contains(strings.ToLower(name), ".dwg") {
+			nonDWG = 0
+		}
+		if b := best[base]; b[0] == nonDWG && b[1] == version {
+			out = append(out, chunk)
+		}
+	}
+	return out
+}
+
 func projectScopedChunks(chunks []map[string]any, ids []string) []map[string]any {
 	allowed := make(map[string]bool, len(ids))
 	for _, id := range ids {
