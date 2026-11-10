@@ -663,6 +663,20 @@ check_pdf_oxide_deps() {
         esac
     fi
 
+    echo "  pdf_oxide not found in system or user cache"
+    echo "Preparing pdf_oxide ${PDF_OXIDE_VERSION} for ${platform_subdir}"
+    local url="https://github.com/yfedoseev/pdf_oxide/releases/download/v${PDF_OXIDE_VERSION}/$(pdf_oxide_asset)"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)" || return 1
+    if curl -fsSL "$url" | tar xz -C "$tmp_dir" && find "$tmp_dir" -name libpdf_oxide.a -print -quit | grep -q .; then
+        mkdir -p "${PDF_OXIDE_PREFIX}"
+        cp -a "$tmp_dir"/. "${PDF_OXIDE_PREFIX}/"
+        rm -rf "$tmp_dir"
+        echo "✓ pdf_oxide ${PDF_OXIDE_VERSION} prepared at ${PDF_OXIDE_PREFIX}"
+        return 0
+    fi
+    rm -rf "$tmp_dir"
+
     echo "  pdf_oxide (static) not found"
     echo "  Expected: ${lib_path}"
     echo "  Run: uv run tools/scripts/download_dev_deps.py"
