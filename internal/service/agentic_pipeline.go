@@ -145,7 +145,7 @@ func (s *ChatPipelineService) agenticRag(
 			emitResult(AsyncChatResult{Answer: fmt.Sprintf("**ERROR**: %s", chainErr.Error()), Final: true})
 			return
 		}
-		docIDs, _ := s.chatMetadataScope(runCtx, chat, lastUserQuestion(messages), chain[0], nil, chatDatasetIDs(chat), nil)
+		docIDs, _ := s.chatMetadataScope(runCtx, chat, lastUserQuestion(messages), chain[0], nil, chatDatasetIDs(chat), nil, nil)
 		modelType := "chat"
 		if info := chain[0].Info(); info != nil && entity.ModelTypeFromStrings(info.ModelTypes).Has(entity.ModelTypeImage2Text) {
 			modelType = "image2text"
