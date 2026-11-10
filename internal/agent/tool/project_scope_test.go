@@ -189,6 +189,30 @@ func TestProjectScopeThroughRetrievalPipeline(t *testing.T) {
 	}
 }
 
+func TestPreferNewestDocVersions(t *testing.T) {
+	chunks := []map[string]any{
+		{"doc_id": "old", "docnm_kwd": "Brief_SK-R00_DSP2024(1).docx"},
+		{"doc_id": "mid", "docnm_kwd": "Brief_SK-R00_DSP2024(2).docx"},
+		{"doc_id": "new", "docnm_kwd": "Brief_SK-R00_DSP2024(3).docx"},
+		{"doc_id": "dwg5", "docnm_kwd": "010_G00_DSP_E1_POZ_TSP_001_R00 - titulka.dwg(5).md"},
+		{"doc_id": "src", "docnm_kwd": "010_G00_DSP_E1_POZ_TSP_001_R00.pdf"},
+		{"doc_id": "solo", "docnm_kwd": "VÝSLEDKY z merania AMBER DNV.pdf"},
+		{"doc_id": "nodup", "docnm_kwd": "plain.pdf"},
+	}
+	got := preferNewestDocVersions(chunks)
+	ids := make([]string, 0, len(got))
+	for _, c := range got {
+		ids = append(ids, c["doc_id"].(string))
+	}
+	want := []string{"new", "src", "solo", "nodup"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("ids=%v want=%v", ids, want)
+	}
+	if docBaseName("010_G00_DSP_E1_POZ_TSP_001_R00 - titulka.dwg(5).md") != docBaseName("010_G00_DSP_E1_POZ_TSP_001_R00.pdf") {
+		t.Fatal("DWG derivative must group with its source document")
+	}
+}
+
 type projectDiagnosticService struct{ runtime.RetrievalService }
 
 func (projectDiagnosticService) Search(_ context.Context, _ *gorm.DB, req RetrievalRequest) ([]RetrievalChunk, error) {

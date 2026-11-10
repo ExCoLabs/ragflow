@@ -373,6 +373,7 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	if req.ProjectID != "" {
 		rawChunks = projectScopedChunks(rawChunks, docIDs)
 	}
+	rawChunks = preferNewestDocVersions(rawChunks)
 	out := make([]RetrievalChunk, 0, len(rawChunks))
 	for _, raw := range rawChunks {
 		out = append(out, translateChunk(raw))
