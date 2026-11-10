@@ -419,12 +419,28 @@ check_onnxruntime_deps() {
             if curl -fsSL "https://github.com/infiniflow/ragflow-build/releases/download/onnxruntime-v${ort_version}-patch2/${ort_dl}" -o "$ort_tmp/o.zip" \
                 && [ "$(sha256sum "$ort_tmp/o.zip" | awk '{print $1}')" = "$ort_sha" ]; then
                 mkdir -p "$ONNXRUNTIME_STATIC_PREFIX"
-                if unzip -oq "$ort_tmp/o.zip" -d "$ONNXRUNTIME_STATIC_PREFIX" 2>/dev/null; then
+                local ort_x="$ort_tmp/x"
+                mkdir -p "$ort_x"
+                if unzip -oq "$ort_tmp/o.zip" -d "$ort_x" 2>/dev/null; then
                     :
-                elif python3 -m zipfile -e "$ort_tmp/o.zip" "$ONNXRUNTIME_STATIC_PREFIX/" 2>/dev/null; then
+                elif python3 -m zipfile -e "$ort_tmp/o.zip" "$ort_x/" 2>/dev/null; then
                     :
                 else
                     rm -rf "$ort_tmp"; echo "Error: cannot extract $ort_dl" >&2; return 1
+                fi
+                # The zip wraps everything under onnxruntime-v<ver>-<target>/;
+                # the lib scan expects onnxruntime-<os>-<arch>-static_lib-<ver>[-glibc2_28].
+                local ort_inner ort_final
+                ort_inner="$(find "$ort_x" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+                case "${TARGET_OS}_${TARGET_ARCH}" in
+                    linux_*)    ort_final="onnxruntime-linux-$( [ "$TARGET_ARCH" = arm64 ] && echo aarch64 || echo x64 )-static_lib-${ort_version}-glibc2_28" ;;
+                    darwin_amd64) ort_final="onnxruntime-osx-universal-static_lib-${ort_version}" ;;
+                    darwin_arm64) ort_final="onnxruntime-osx-arm64-static_lib-${ort_version}" ;;
+                esac
+                if [ -n "$ort_inner" ] && [ -d "$ort_inner/lib" ]; then
+                    mv "$ort_inner" "${ONNXRUNTIME_STATIC_PREFIX}/${ort_final}"
+                else
+                    mv "$ort_x"/* "$ONNXRUNTIME_STATIC_PREFIX/" 2>/dev/null || true
                 fi
                 rm -rf "$ort_tmp"
                 ORT_A_FILES=""
