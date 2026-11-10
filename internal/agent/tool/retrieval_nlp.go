@@ -419,6 +419,7 @@ func nlpRequestFromRetrieval(
 		EmbeddingModel:     embeddingModel,
 		Aggs:               boolPtr(false),
 		Highlight:          boolPtr(false),
+		PreferDocVersions:  boolPtr(true),
 		AllowDenseFallback: req.AllowDenseFallback,
 		VectorOnly:         req.KeywordsSimilarityWeight != nil && *req.KeywordsSimilarityWeight < 0.01,
 	}
