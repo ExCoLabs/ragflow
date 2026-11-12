@@ -3,10 +3,12 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -117,6 +119,25 @@ func (s *RequestScope) Filter() map[string]any {
 		conditions = append(conditions, map[string]any{"key": condition.Key, "op": condition.Op, "value": values})
 	}
 	return map[string]any{"method": "manual", "logic": "and", "manual": conditions}
+}
+
+func (s *RequestScope) Fingerprint() string {
+	if !s.HasFilters() {
+		return ""
+	}
+	datasets := s.DatasetIDs()
+	slices.Sort(datasets)
+	conditions := make([]string, 0, len(s.conditions))
+	for _, condition := range s.conditions {
+		values := slices.Clone(condition.Value)
+		slices.Sort(values)
+		condition.Value = slices.Compact(values)
+		raw, _ := json.Marshal(condition)
+		conditions = append(conditions, string(raw))
+	}
+	slices.Sort(conditions)
+	raw, _ := json.Marshal(map[string]any{"version": 1, "datasets": datasets, "conditions": slices.Compact(conditions)})
+	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 
 func (s *RequestScope) AppliesTo(datasetIDs []string) (bool, error) {

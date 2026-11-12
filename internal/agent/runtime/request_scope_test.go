@@ -97,6 +97,22 @@ func TestRequestScopeDatasetBoundary(t *testing.T) {
 	}
 }
 
+func TestRequestScopeFingerprintTracksSemanticChanges(t *testing.T) {
+	a := mustRequestScope(t, `{"method":"manual","dataset_ids":["a","b"],"manual":[{"key":"project_id","op":"in","value":["2018_055","2020_013"]},{"key":"phase","op":"in","value":["sp"]}]}`)
+	b := mustRequestScope(t, `{"method":"manual","dataset_ids":["b","a","b"],"manual":[{"key":"phase","op":"in","value":["sp"]},{"key":"project_id","op":"in","value":["2020_013","2018_055","2018_055"]}]}`)
+	if len(a.Fingerprint()) != 64 || a.Fingerprint() != b.Fingerprint() {
+		t.Fatal("equivalent scopes produced different fingerprints")
+	}
+	changed := mustRequestScope(t, `{"method":"manual","dataset_ids":["a","b"],"manual":[{"key":"project_id","op":"in","value":["2018_055","2020_013"]},{"key":"phase","op":"in","value":["rp"]}]}`)
+	if a.Fingerprint() == changed.Fingerprint() {
+		t.Fatal("changed phase did not invalidate the scope fingerprint")
+	}
+	var absent *RequestScope
+	if absent.Fingerprint() != "" || mustRequestScope(t, `{"method":"manual","manual":[]}`).Fingerprint() != "" {
+		t.Fatal("absent and empty scopes must share legacy semantics")
+	}
+}
+
 func TestRequestScopeKeepsLiteralMetadataValues(t *testing.T) {
 	scope := mustRequestScope(t, `{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"project","op":"in","value":["{sys.query}"]}]}`)
 	values := scope.Filter()["manual"].([]any)[0].(map[string]any)["value"]
