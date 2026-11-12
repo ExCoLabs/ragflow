@@ -30,6 +30,27 @@ func TestCollapseDuplicateChunksKeepsBestRankedCopy(t *testing.T) {
 	}
 }
 
+func TestCollapseDuplicateChunksPreservesCompilationKinds(t *testing.T) {
+	result := &RetrievalSearchResult{
+		IDs: []string{"ordinary", "ordinary-list", "page", "page-list", "graph", "graph-list"},
+		Field: map[string]map[string]interface{}{
+			"ordinary":      {"content_with_weight": "same  text"},
+			"ordinary-list": {"content_with_weight": "same text", "compile_kwd": []string{}},
+			"page":          {"content_with_weight": "same text", "compile_kwd": "page_index"},
+			"page-list":     {"content_with_weight": "same\ntext", "compile_kwd": []interface{}{"page_index"}},
+			"graph":         {"content_with_weight": "same text", "compile_kwd": "graph"},
+			"graph-list":    {"content_with_weight": "same text", "compile_kwd": []string{"graph"}},
+		},
+	}
+	kept, duplicatesOf := collapseDuplicateChunks(result, []int{2, 0, 4, 3, 1, 5})
+	if want := []int{2, 0, 4}; !reflect.DeepEqual(kept, want) {
+		t.Fatalf("kept = %v, want %v", kept, want)
+	}
+	if want := map[int][]int{2: {3}, 0: {1}, 4: {5}}; !reflect.DeepEqual(duplicatesOf, want) {
+		t.Fatalf("duplicatesOf = %v, want %v", duplicatesOf, want)
+	}
+}
+
 func TestPreferNewestDocVersionsPreservesUnverifiedCopies(t *testing.T) {
 	result := &RetrievalSearchResult{
 		IDs: []string{"old1", "old2", "keep", "new1", "dwg"},

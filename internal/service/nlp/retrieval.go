@@ -523,7 +523,7 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 }
 
 // collapseDuplicateChunks keeps the first (best ranked) chunk of every distinct
-// text. idx is ordered by rank; it returns the kept indices in that order and,
+// text and compilation kind. idx is ordered by rank; it returns the kept indices in that order and,
 // for each kept index, the indices of the chunks it stands for. Text is
 // compared after collapsing whitespace; chunks without text are never merged
 // with each other.
@@ -572,23 +572,28 @@ func preferNewestDocVersions(result *RetrievalSearchResult) *RetrievalSearchResu
 func collapseDuplicateChunks(searchResult *RetrievalSearchResult, idx []int) ([]int, map[int][]int) {
 	kept := make([]int, 0, len(idx))
 	duplicatesOf := make(map[int][]int)
-	firstByText := make(map[string]int)
+	type chunkIdentity struct {
+		text, compilationKind string
+	}
+	firstByIdentity := make(map[chunkIdentity]int)
 	for _, i := range idx {
-		text := ""
+		identity := chunkIdentity{}
 		if i >= 0 && i < len(searchResult.IDs) {
-			if v := searchResult.Field[searchResult.IDs[i]]["content_with_weight"]; v != nil {
-				text = strings.Join(strings.Fields(fmt.Sprint(v)), " ")
+			chunk := searchResult.Field[searchResult.IDs[i]]
+			if v := chunk["content_with_weight"]; v != nil {
+				identity.text = strings.Join(strings.Fields(fmt.Sprint(v)), " ")
 			}
+			identity.compilationKind = firstStringValue(chunk["compile_kwd"])
 		}
-		if text == "" {
+		if identity.text == "" {
 			kept = append(kept, i)
 			continue
 		}
-		if first, ok := firstByText[text]; ok {
+		if first, ok := firstByIdentity[identity]; ok {
 			duplicatesOf[first] = append(duplicatesOf[first], i)
 			continue
 		}
-		firstByText[text] = i
+		firstByIdentity[identity] = i
 		kept = append(kept, i)
 	}
 	return kept, duplicatesOf
