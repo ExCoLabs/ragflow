@@ -770,7 +770,11 @@ func (s *MCPService) ListMCPServers(ctx context.Context, requestedTenantID strin
 		code, normalized := permissionresponse.NormalizeHidden(err)
 		return nil, code, normalized
 	}
-	servers, total, err := s.mcpServerDAO.ListMCPServers(ctx, dao.DB, tenantID, ids, keywords, orderby, desc, page, pageSize, queryScope.Apply)
+	queryPage, queryPageSize := page, pageSize
+	if len(ids) > 0 {
+		queryPage, queryPageSize = 0, 0
+	}
+	servers, total, err := s.mcpServerDAO.ListMCPServers(ctx, dao.DB, tenantID, ids, keywords, orderby, desc, queryPage, queryPageSize, queryScope.Apply)
 	if err != nil {
 		var orderbyErr *dao.InvalidMCPServerOrderByError
 		if errors.As(err, &orderbyErr) {
@@ -839,6 +843,13 @@ func (s *MCPService) ListMCPServers(ctx context.Context, requestedTenantID strin
 		}
 	}
 
+	if len(ids) > 0 && page > 0 && pageSize > 0 {
+		start := len(items)
+		if page-1 <= len(items)/pageSize {
+			start = (page - 1) * pageSize
+		}
+		items = items[start : start+min(pageSize, len(items)-start)]
+	}
 	return &ListMCPServersResponse{
 		MCPServers: items,
 		Total:      total,

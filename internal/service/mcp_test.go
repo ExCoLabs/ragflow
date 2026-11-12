@@ -879,6 +879,50 @@ func TestListMCPServers_IncludesSharedWhenIDsRequested(t *testing.T) {
 	}
 }
 
+func TestListMCPServers_SharedHonorsPagination(t *testing.T) {
+	db := setupServiceTestDB(t)
+	if err := db.AutoMigrate(&entity.MCPServer{}); err != nil {
+		t.Fatal(err)
+	}
+	pushServiceDB(t, db)
+	sharedMCPTestSetup(t, "team", "member", "normal", sharedMCPAgentDSL([]string{"allowed"}))
+	ctx := permission.WithIdentity(t.Context(), "member", "team")
+	resp, code, err := NewMCPService().ListMCPServers(ctx, "team", []string{"server"}, "", 2, 1, "name", false)
+	if err != nil || code != common.CodeSuccess || resp.Total != 1 || len(resp.MCPServers) != 0 {
+		t.Fatalf("page two: response=%+v code=%d err=%v", resp, code, err)
+	}
+}
+
+func TestSharedMCPServerManagementRemainsOwnerOnly(t *testing.T) {
+	db := setupServiceTestDB(t)
+	if err := db.AutoMigrate(&entity.MCPServer{}); err != nil {
+		t.Fatal(err)
+	}
+	pushServiceDB(t, db)
+	sharedMCPTestSetup(t, "team", "member", "normal", sharedMCPAgentDSL([]string{"allowed"}))
+	addMCPOwnerMembership(t, db, "owner", "team")
+	ctx := permission.WithIdentity(t.Context(), "member", "team")
+	s := NewMCPService()
+	shared, code, err := s.GetMCPServer(ctx, "server")
+	if err != nil || code != common.CodeSuccess || shared.URL != "" || len(shared.Headers) != 0 {
+		t.Fatalf("shared detail: server=%+v code=%d err=%v", shared, code, err)
+	}
+	if _, _, err := s.ExportMCPServer(ctx, "server"); err == nil {
+		t.Fatal("shared member could export MCP credentials")
+	}
+	if _, _, err := s.UpdateMCPServer(ctx, "server", UpdateMCPServerRequest{"name": json.RawMessage(`"changed"`)}); err == nil {
+		t.Fatal("shared member could update the MCP registration")
+	}
+	if _, _, err := s.DeleteMCPServer(ctx, "server"); err == nil {
+		t.Fatal("shared member could delete the MCP registration")
+	}
+	ownerCtx := permission.WithIdentity(t.Context(), "owner", "team")
+	owned, _, err := s.GetMCPServer(ownerCtx, "server")
+	if err != nil || owned.URL == "" || len(owned.Headers) == 0 {
+		t.Fatalf("owner detail: server=%+v err=%v", owned, err)
+	}
+}
+
 func TestListMCPServers_NoIDDoesNotEnumerateShared(t *testing.T) {
 	testDB := setupServiceTestDB(t)
 	if err := testDB.AutoMigrate(&entity.MCPServer{}); err != nil {
