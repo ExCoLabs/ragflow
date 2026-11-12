@@ -151,6 +151,10 @@ func (m *MCPToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON strin
 	if mErr != nil {
 		return "", mErr
 	}
+	argsJSON, mErr = authorizeScopedMCP(ctx, m.mcpTool.Name, argsJSON)
+	if mErr != nil {
+		return "", mErr
+	}
 	res, err := mcpclient.CallTool(ctx, mcpclient.CallOptions{
 		URL:               m.serverURL,
 		ServerType:        m.serverType,

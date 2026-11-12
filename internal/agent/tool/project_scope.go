@@ -55,13 +55,17 @@ func (a *NLPRetrievalAdapter) resolveProjectScope(ctx context.Context, req Retri
 	if projectIDPattern.FindString(req.ProjectID) != req.ProjectID {
 		return nil, fmt.Errorf("retrieval: invalid canonical project id")
 	}
-	if a.enhancer == nil {
-		return nil, fmt.Errorf("retrieval: project scope service is not configured")
-	}
 	filter := map[string]any{"method": "manual", "logic": "and", "manual": []any{map[string]any{"key": "project_id", "op": "in", "value": req.ProjectID}}}
-	ids, err := a.enhancer.FilterDocuments(ctx, filter, "", nil, base, req.DatasetIDs, nil)
+	return a.resolveHardScope(ctx, filter, base, req.DatasetIDs, "project")
+}
+
+func (a *NLPRetrievalAdapter) resolveHardScope(ctx context.Context, filter map[string]any, base, datasetIDs []string, name string) ([]string, error) {
+	if a.enhancer == nil {
+		return nil, fmt.Errorf("retrieval: %s scope service is not configured", name)
+	}
+	ids, err := a.enhancer.FilterDocuments(ctx, filter, "", nil, append([]string(nil), base...), datasetIDs, nil)
 	if err != nil {
-		return nil, fmt.Errorf("retrieval: resolve project scope: %w", err)
+		return nil, fmt.Errorf("retrieval: resolve %s scope: %w", name, err)
 	}
 	if len(ids) == 0 {
 		return nil, nil

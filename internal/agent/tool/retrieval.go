@@ -200,6 +200,9 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	if args.RetrievalFrom == "memory" && len(args.MemoryIDs) == 0 {
 		return "", fmt.Errorf("retrieval: memory_ids is required")
 	}
+	if err := r.validateRequestScopeBinding(ctx, args); err != nil {
+		return "", err
+	}
 	resolvedDatasetIDs, err := resolveRetrievalDatasetIDs(ctx, args.DatasetIDs)
 	if err != nil {
 		return "", err
