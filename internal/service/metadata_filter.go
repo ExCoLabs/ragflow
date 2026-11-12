@@ -1188,7 +1188,8 @@ func recordGenerated(record func(string, []MetaFilterCondition, string, int), fi
 // the document scope (docIDs unchanged when the filter does not narrow it) and,
 // when chunkMeta is active on every dataset, the filter and boost to run on the
 // metadata stored on chunks.
-func (s *ChatPipelineService) chatMetadataScope(ctx context.Context, chat *entity.Chat, question string, model *modelModule.ChatModel, docIDs, kbIDs []string, chunkMeta *common.ChunkMetadataConfig) ([]string, *common.ChunkMetaScope) {
+// diagnostics, when non-nil, receives what the filter resolved to.
+func (s *ChatPipelineService) chatMetadataScope(ctx context.Context, chat *entity.Chat, question string, model *modelModule.ChatModel, docIDs, kbIDs []string, chunkMeta *common.ChunkMetadataConfig, diagnostics *common.MetadataFilterDiagnostic) ([]string, *common.ChunkMetaScope) {
 	if chat.MetaDataFilter == nil || len(*chat.MetaDataFilter) == 0 || len(kbIDs) == 0 || question == "" {
 		return docIDs, nil
 	}
@@ -1201,13 +1202,45 @@ func (s *ChatPipelineService) chatMetadataScope(ctx context.Context, chat *entit
 		common.Warn("loadMetaData failed; skipping meta_data_filter", zap.Error(err))
 		return docIDs, nil
 	}
-	scope := ApplyMetaDataScope(ctx, *chat.MetaDataFilter, meta, question, model, docIDs, kbIDs, chunkMeta)
+	scope := ApplyMetaDataScopeWithDiagnostics(ctx, *chat.MetaDataFilter, meta, question, model, docIDs, kbIDs, chunkMeta, diagnostics)
 	// nil means no metadata narrowing: keep the caller's scope.
 	if scope.DocIDs != nil {
 		common.Debug("meta_data_filter applied", zap.Int("filtered_count", len(scope.DocIDs)), zap.Int("pre_filter_count", len(docIDs)))
 		return scope.DocIDs, scope.ChunkMeta
 	}
 	return docIDs, scope.ChunkMeta
+}
+
+// describeAppliedMetaFilter renders the conditions the metadata filter scoped
+// retrieval with, for the system prompt's {meta_filter}: the model sees the
+// retrieved chunks but not why only those. Empty when nothing was applied.
+func describeAppliedMetaFilter(d common.MetadataFilterDiagnostic) string {
+	if (d.Status != "applied" && d.Status != "no_matches") || len(d.Conditions) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(d.Conditions))
+	for _, c := range d.Conditions {
+		key, _ := c["key"].(string)
+		op, _ := c["op"].(string)
+		value := ""
+		switch v := c["value"].(type) {
+		case nil:
+		case []interface{}, []string:
+			value = strings.Join(metaFilterValues(v), ", ")
+		default:
+			value = fmt.Sprintf("%v", v)
+		}
+		parts = append(parts, strings.TrimSpace(fmt.Sprintf("%s %s %s", key, op, value)))
+	}
+	sep := "; "
+	if d.Logic == "or" {
+		sep = " OR "
+	}
+	text := strings.Join(parts, sep)
+	if d.Status == "no_matches" {
+		text += " (no matching documents)"
+	}
+	return text
 }
 
 func constrainDocIDs(baseDocIDs, filteredDocIDs []string) []string {
