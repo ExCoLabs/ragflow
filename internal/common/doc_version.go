@@ -25,7 +25,29 @@ func DocBaseName(name string) string {
 	return strings.TrimSpace(docVersionSuffix.ReplaceAllString(s, ""))
 }
 
-// docVersionRank scores a copy within its basename group: a non-DWG
+type docCopyIdentity struct {
+	name       string
+	dataset    string
+	hash       string
+	content    string
+	documentID string
+}
+
+func docCopyGroup(chunk map[string]any) docCopyIdentity {
+	name, _ := chunk["docnm_kwd"].(string)
+	name = strings.ReplaceAll(strings.TrimSpace(name), `\`, "/")
+	hash, _ := chunk["document_content_hash"].(string)
+	dataset, _ := chunk["kb_id"].(string)
+	content, _ := chunk["content_with_weight"].(string)
+	content = strings.Join(strings.Fields(content), " ")
+	if strings.TrimSpace(hash) != "" && dataset != "" && strings.Contains(name, "/") && content != "" {
+		return docCopyIdentity{name: DocBaseName(name), dataset: dataset, hash: hash, content: content}
+	}
+	docID, _ := chunk["doc_id"].(string)
+	return docCopyIdentity{name: name, documentID: docID}
+}
+
+// docVersionRank scores a copy within its verified group: a non-DWG
 // document beats a DWG derivative regardless of suffix, otherwise the
 // higher "(N)" upload suffix wins.
 func docVersionRank(name string) [2]int {
@@ -40,15 +62,15 @@ func docVersionRank(name string) [2]int {
 	return [2]int{nonDWG, version}
 }
 
-// PreferNewestDocVersions drops chunks from older re-uploaded copies and
-// DWG-derived files when a newer copy of the same base document was
-// retrieved. Chunk order is preserved. Chunks without a docnm_kwd name
-// are kept.
+// PreferNewestDocVersions prefers a representative only when the full
+// source directory, dataset, document hash and chunk text agree.
+// Upload suffixes do not establish revision order or content identity.
+// Unverified documents and chunk order are preserved.
 func PreferNewestDocVersions(chunks []map[string]any) []map[string]any {
-	best := make(map[string][2]int)
+	best := make(map[docCopyIdentity][2]int)
 	for _, chunk := range chunks {
 		name, _ := chunk["docnm_kwd"].(string)
-		base := DocBaseName(name)
+		base := docCopyGroup(chunk)
 		cur := docVersionRank(name)
 		if prev, ok := best[base]; !ok || cur[0] > prev[0] || (cur[0] == prev[0] && cur[1] > prev[1]) {
 			best[base] = cur
@@ -57,7 +79,7 @@ func PreferNewestDocVersions(chunks []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(chunks))
 	for _, chunk := range chunks {
 		name, _ := chunk["docnm_kwd"].(string)
-		if b := best[DocBaseName(name)]; b == docVersionRank(name) {
+		if b := best[docCopyGroup(chunk)]; b == docVersionRank(name) {
 			out = append(out, chunk)
 		}
 	}
@@ -65,14 +87,14 @@ func PreferNewestDocVersions(chunks []map[string]any) []map[string]any {
 }
 
 // PreferNewestDocVersionIDs keeps chunk IDs whose document wins its
-// basename group under the same rule as PreferNewestDocVersions, working
+// verified copy group under the same rule as PreferNewestDocVersions, working
 // directly on the retrieval field map so callers can prune parallel
 // structures. Chunk IDs missing from field are kept.
 func PreferNewestDocVersionIDs(ids []string, field map[string]map[string]any) []string {
-	best := make(map[string][2]int)
+	best := make(map[docCopyIdentity][2]int)
 	for _, id := range ids {
 		name, _ := field[id]["docnm_kwd"].(string)
-		base := DocBaseName(name)
+		base := docCopyGroup(field[id])
 		cur := docVersionRank(name)
 		if prev, ok := best[base]; !ok || cur[0] > prev[0] || (cur[0] == prev[0] && cur[1] > prev[1]) {
 			best[base] = cur
@@ -86,7 +108,7 @@ func PreferNewestDocVersionIDs(ids []string, field map[string]map[string]any) []
 			continue
 		}
 		name, _ := chunk["docnm_kwd"].(string)
-		if b := best[DocBaseName(name)]; b == docVersionRank(name) {
+		if b := best[docCopyGroup(chunk)]; b == docVersionRank(name) {
 			out = append(out, id)
 		}
 	}

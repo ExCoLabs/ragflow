@@ -30,7 +30,7 @@ func TestCollapseDuplicateChunksKeepsBestRankedCopy(t *testing.T) {
 	}
 }
 
-func TestPreferNewestDocVersionsKeepsNewestCopy(t *testing.T) {
+func TestPreferNewestDocVersionsPreservesUnverifiedCopies(t *testing.T) {
 	result := &RetrievalSearchResult{
 		IDs: []string{"old1", "old2", "keep", "new1", "dwg"},
 		Field: map[string]map[string]interface{}{
@@ -47,14 +47,34 @@ func TestPreferNewestDocVersionsKeepsNewestCopy(t *testing.T) {
 		Total:     5,
 	}
 	got := preferNewestDocVersions(result)
-	if want := []string{"keep", "new1", "dwg"}; !reflect.DeepEqual(got.IDs, want) {
+	if want := []string{"old1", "old2", "keep", "new1", "dwg"}; !reflect.DeepEqual(got.IDs, want) {
 		t.Fatalf("IDs = %v, want %v", got.IDs, want)
 	}
-	if got.Total != 3 || len(got.Chunks) != 3 || len(got.Field) != 3 {
+	if got.Total != 5 || len(got.Chunks) != 5 || len(got.Field) != 5 {
 		t.Fatalf("sizes Total=%d Chunks=%d Field=%d", got.Total, len(got.Chunks), len(got.Field))
 	}
-	if got.Highlight["new1"] != "h4" || len(got.Highlight) != 1 {
+	if got.Highlight["new1"] != "h4" || got.Highlight["old1"] != "h1" || len(got.Highlight) != 2 {
 		t.Fatalf("Highlight = %v", got.Highlight)
+	}
+}
+
+func TestVerifiedDocCopyPruningPreservesUniqueEvidence(t *testing.T) {
+	result := &RetrievalSearchResult{
+		IDs: []string{"old-shared", "old-unique", "new-shared"},
+		Field: map[string]map[string]interface{}{
+			"old-shared": {"doc_id": "old", "docnm_kwd": "project/sp/report(1).pdf", "kb_id": "kb", "document_content_hash": "same", "content_with_weight": "same evidence"},
+			"old-unique": {"doc_id": "old", "docnm_kwd": "project/sp/report(1).pdf", "kb_id": "kb", "document_content_hash": "same", "content_with_weight": "Openings 200 mm"},
+			"new-shared": {"doc_id": "new", "docnm_kwd": "project/sp/report(2).pdf", "kb_id": "kb", "document_content_hash": "same", "content_with_weight": "same evidence"},
+		},
+		Highlight: map[string]string{"old-shared": "duplicate", "old-unique": "witness", "new-shared": "copy"},
+		Total:     3,
+	}
+	got := preferNewestDocVersions(result)
+	if !reflect.DeepEqual(got.IDs, []string{"old-unique", "new-shared"}) {
+		t.Fatalf("IDs = %v", got.IDs)
+	}
+	if got.Total != 2 || len(got.Field) != 2 || len(got.Chunks) != 2 || len(got.Highlight) != 2 || got.Highlight["old-unique"] != "witness" {
+		t.Fatalf("parallel result structures lost unique evidence: %#v", got)
 	}
 }
 

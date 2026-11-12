@@ -250,12 +250,12 @@ func TestCandidatePoolWideningAndTruncation(t *testing.T) {
 	for _, c := range got {
 		docs[c.DocumentID] = true
 	}
-	if docs["doc-old"] {
-		t.Fatalf("older version survived dedup: %v", got)
+	if !docs["doc-old"] {
+		t.Fatalf("unverified document content was dropped by filename: %v", got)
 	}
 }
 
-func TestPreferNewestDocVersions(t *testing.T) {
+func TestPreferNewestDocVersionsPreservesUnverifiedDocuments(t *testing.T) {
 	chunks := []map[string]any{
 		{"doc_id": "old", "docnm_kwd": "Brief_SK-R00_DSP2024(1).docx"},
 		{"doc_id": "mid", "docnm_kwd": "Brief_SK-R00_DSP2024(2).docx"},
@@ -270,7 +270,7 @@ func TestPreferNewestDocVersions(t *testing.T) {
 	for _, c := range got {
 		ids = append(ids, c["doc_id"].(string))
 	}
-	want := []string{"new", "src", "solo", "nodup"}
+	want := []string{"old", "mid", "new", "dwg5", "src", "solo", "nodup"}
 	if !reflect.DeepEqual(ids, want) {
 		t.Fatalf("ids=%v want=%v", ids, want)
 	}

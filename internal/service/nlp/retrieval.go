@@ -79,12 +79,12 @@ type RetrievalRequest struct {
 	// towards Total, the page, or DocAggs, so duplicate files cannot crowd out
 	// distinct content. nil means true.
 	CollapseDuplicates *bool
-	// PreferDocVersions keeps only the newest copy of each base document in
-	// the candidate pool (highest "(N)" upload suffix, non-DWG beats DWG
-	// derivative), before reranking and pagination, so older re-uploads
-	// cannot occupy candidate slots. The pool is already scoped by the
-	// request's document filters, so only candidates that satisfy them take
-	// part in the comparison. nil means false.
+	// PreferDocVersions prefers equivalent indexed copies before reranking
+	// and pagination only when full source path, dataset, authoritative
+	// document hash and chunk text agree. Upload suffixes alone cannot
+	// establish revision order: different or unverified contents survive.
+	// The pool remains subject to the request's document filters.
+	// nil means false.
 	PreferDocVersions *bool
 	// ChunkMeta filters and boosts on document metadata stored on chunks
 	// (service.ApplyMetaDataScope). Nil leaves retrieval unchanged.
@@ -527,10 +527,10 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 // for each kept index, the indices of the chunks it stands for. Text is
 // compared after collapsing whitespace; chunks without text are never merged
 // with each other.
-// preferNewestDocVersions removes chunks of older re-uploaded copies and
-// DWG derivatives from the candidate result when a newer copy of the same
-// base document is present, keeping IDs, Chunks, Field, and Highlight
-// consistent. The candidate list stays in rank order.
+// preferNewestDocVersions removes only verified equivalent chunk copies
+// from the candidate result, keeping IDs, Chunks, Field, and Highlight
+// consistent. Unknown content identities and distinct evidence survive;
+// upload suffixes alone cannot select an authoritative revision.
 func preferNewestDocVersions(result *RetrievalSearchResult) *RetrievalSearchResult {
 	keep := common.PreferNewestDocVersionIDs(result.IDs, result.Field)
 	if len(keep) == len(result.IDs) {
