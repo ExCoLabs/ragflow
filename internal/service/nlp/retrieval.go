@@ -79,12 +79,12 @@ type RetrievalRequest struct {
 	// towards Total, the page, or DocAggs, so duplicate files cannot crowd out
 	// distinct content. nil means true.
 	CollapseDuplicates *bool
-	// PreferDocVersions keeps only the newest copy of each base document in
-	// the candidate pool (highest "(N)" upload suffix, non-DWG beats DWG
-	// derivative), before reranking and pagination, so older re-uploads
-	// cannot occupy candidate slots. The pool is already scoped by the
-	// request's document filters, so only candidates that satisfy them take
-	// part in the comparison. nil means false.
+	// PreferDocVersions prefers equivalent indexed copies before reranking
+	// and pagination only when full source path, dataset, authoritative
+	// document hash and chunk text agree. Upload suffixes alone cannot
+	// establish revision order: different or unverified contents survive.
+	// The pool remains subject to the request's document filters.
+	// nil means false.
 	PreferDocVersions *bool
 	// ChunkMeta filters and boosts on document metadata stored on chunks
 	// (service.ApplyMetaDataScope). Nil leaves retrieval unchanged.
@@ -523,14 +523,14 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 }
 
 // collapseDuplicateChunks keeps the first (best ranked) chunk of every distinct
-// text. idx is ordered by rank; it returns the kept indices in that order and,
+// text and compilation kind. idx is ordered by rank; it returns the kept indices in that order and,
 // for each kept index, the indices of the chunks it stands for. Text is
 // compared after collapsing whitespace; chunks without text are never merged
 // with each other.
-// preferNewestDocVersions removes chunks of older re-uploaded copies and
-// DWG derivatives from the candidate result when a newer copy of the same
-// base document is present, keeping IDs, Chunks, Field, and Highlight
-// consistent. The candidate list stays in rank order.
+// preferNewestDocVersions removes only verified equivalent chunk copies
+// from the candidate result, keeping IDs, Chunks, Field, and Highlight
+// consistent. Unknown content identities and distinct evidence survive;
+// upload suffixes alone cannot select an authoritative revision.
 func preferNewestDocVersions(result *RetrievalSearchResult) *RetrievalSearchResult {
 	keep := common.PreferNewestDocVersionIDs(result.IDs, result.Field)
 	if len(keep) == len(result.IDs) {
@@ -572,23 +572,28 @@ func preferNewestDocVersions(result *RetrievalSearchResult) *RetrievalSearchResu
 func collapseDuplicateChunks(searchResult *RetrievalSearchResult, idx []int) ([]int, map[int][]int) {
 	kept := make([]int, 0, len(idx))
 	duplicatesOf := make(map[int][]int)
-	firstByText := make(map[string]int)
+	type chunkIdentity struct {
+		text, compilationKind string
+	}
+	firstByIdentity := make(map[chunkIdentity]int)
 	for _, i := range idx {
-		text := ""
+		identity := chunkIdentity{}
 		if i >= 0 && i < len(searchResult.IDs) {
-			if v := searchResult.Field[searchResult.IDs[i]]["content_with_weight"]; v != nil {
-				text = strings.Join(strings.Fields(fmt.Sprint(v)), " ")
+			chunk := searchResult.Field[searchResult.IDs[i]]
+			if v := chunk["content_with_weight"]; v != nil {
+				identity.text = strings.Join(strings.Fields(fmt.Sprint(v)), " ")
 			}
+			identity.compilationKind = firstStringValue(chunk["compile_kwd"])
 		}
-		if text == "" {
+		if identity.text == "" {
 			kept = append(kept, i)
 			continue
 		}
-		if first, ok := firstByText[text]; ok {
+		if first, ok := firstByIdentity[identity]; ok {
 			duplicatesOf[first] = append(duplicatesOf[first], i)
 			continue
 		}
-		firstByText[text] = i
+		firstByIdentity[identity] = i
 		kept = append(kept, i)
 	}
 	return kept, duplicatesOf
