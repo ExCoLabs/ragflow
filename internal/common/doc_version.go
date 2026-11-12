@@ -2,12 +2,13 @@ package common
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 )
 
 var docVersionSuffix = regexp.MustCompile(`\(\d+\)\s*$`)
-var docVersionNumber = regexp.MustCompile(`\((\d+)\)`)
+var docVersionNumber = regexp.MustCompile(`\((\d+)\)(?:\.[^.()]+)?$`)
 
 // DocBaseName normalizes a document name so that re-uploaded copies
 // ("file(1).pdf", "file(3).pdf") and DWG-derived markdown
@@ -26,6 +27,7 @@ func DocBaseName(name string) string {
 }
 
 type docCopyIdentity struct {
+	directory  string
 	name       string
 	dataset    string
 	hash       string
@@ -40,8 +42,9 @@ func docCopyGroup(chunk map[string]any) docCopyIdentity {
 	dataset, _ := chunk["kb_id"].(string)
 	content, _ := chunk["content_with_weight"].(string)
 	content = strings.Join(strings.Fields(content), " ")
-	if strings.TrimSpace(hash) != "" && dataset != "" && strings.Contains(name, "/") && content != "" {
-		return docCopyIdentity{name: DocBaseName(name), dataset: dataset, hash: hash, content: content}
+	directory, filename := path.Split(name)
+	if strings.TrimSpace(hash) != "" && strings.TrimSpace(dataset) != "" && directory != "" && strings.TrimSpace(filename) != "" && content != "" {
+		return docCopyIdentity{directory: directory, name: DocBaseName(filename), dataset: dataset, hash: hash, content: content}
 	}
 	docID, _ := chunk["doc_id"].(string)
 	return docCopyIdentity{name: name, documentID: docID}
@@ -51,6 +54,7 @@ func docCopyGroup(chunk map[string]any) docCopyIdentity {
 // document beats a DWG derivative regardless of suffix, otherwise the
 // higher "(N)" upload suffix wins.
 func docVersionRank(name string) [2]int {
+	name = path.Base(strings.ReplaceAll(strings.TrimSpace(name), `\`, "/"))
 	version := 0
 	if m := docVersionNumber.FindStringSubmatch(name); m != nil {
 		fmt.Sscanf(m[1], "%d", &version)
