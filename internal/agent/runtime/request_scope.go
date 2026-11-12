@@ -78,7 +78,7 @@ func ParseRequestScope(raw json.RawMessage) (*RequestScope, error) {
 		}
 		scope.conditions = append(scope.conditions, condition)
 	}
-	if scope.Active() && len(scope.datasets) == 0 {
+	if scope.HasFilters() && len(scope.datasets) == 0 {
 		return nil, fmt.Errorf("agent meta_data_filter requires dataset_ids to distinguish project and methodology tools")
 	}
 	return scope, nil
@@ -93,7 +93,7 @@ func RequestScopeFromContext(ctx context.Context) *RequestScope {
 	return scope
 }
 
-func (s *RequestScope) Active() bool {
+func (s *RequestScope) HasFilters() bool {
 	return s != nil && len(s.conditions) > 0
 }
 
@@ -110,13 +110,17 @@ func (s *RequestScope) Filter() map[string]any {
 	}
 	conditions := make([]any, 0, len(s.conditions))
 	for _, condition := range s.conditions {
-		conditions = append(conditions, map[string]any{"key": condition.Key, "op": condition.Op, "value": append([]string(nil), condition.Value...)})
+		values := make([]any, len(condition.Value))
+		for i, value := range condition.Value {
+			values[i] = value
+		}
+		conditions = append(conditions, map[string]any{"key": condition.Key, "op": condition.Op, "value": values})
 	}
 	return map[string]any{"method": "manual", "logic": "and", "manual": conditions}
 }
 
 func (s *RequestScope) AppliesTo(datasetIDs []string) (bool, error) {
-	if !s.Active() {
+	if !s.HasFilters() {
 		return false, nil
 	}
 	selected := make(map[string]bool, len(s.datasets))

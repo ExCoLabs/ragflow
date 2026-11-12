@@ -63,8 +63,8 @@ func TestRequestScopeIsImmutableAndPerTurn(t *testing.T) {
 	ids := a.DatasetIDs()
 	ids[0] = "tampered"
 	filter := a.Filter()
-	filter["manual"].([]any)[0].(map[string]any)["value"].([]string)[0] = "tampered"
-	if !reflect.DeepEqual(a.DatasetIDs(), []string{"kb-project"}) || a.Filter()["manual"].([]any)[0].(map[string]any)["value"].([]string)[0] != "2018_055" {
+	filter["manual"].([]any)[0].(map[string]any)["value"].([]any)[0] = "tampered"
+	if !reflect.DeepEqual(a.DatasetIDs(), []string{"kb-project"}) || a.Filter()["manual"].([]any)[0].(map[string]any)["value"].([]any)[0] != "2018_055" {
 		t.Fatal("caller mutated authoritative scope")
 	}
 	if RequestScopeFromContext(WithRequestScope(first, nil)) != nil {
@@ -89,7 +89,7 @@ func TestRequestScopeDatasetBoundary(t *testing.T) {
 		}
 	}
 	empty := mustRequestScope(t, `{"method":"manual","manual":[]}`)
-	if empty.Active() {
+	if empty.HasFilters() {
 		t.Fatal("empty manual filter must not impose a scope")
 	}
 	if got, err := empty.AppliesTo([]string{"kb-project", "kb-methodology"}); got || err != nil {
@@ -100,7 +100,7 @@ func TestRequestScopeDatasetBoundary(t *testing.T) {
 func TestRequestScopeKeepsLiteralMetadataValues(t *testing.T) {
 	scope := mustRequestScope(t, `{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"project","op":"in","value":["{sys.query}"]}]}`)
 	values := scope.Filter()["manual"].([]any)[0].(map[string]any)["value"]
-	if !reflect.DeepEqual(values, []string{"{sys.query}"}) {
+	if !reflect.DeepEqual(values, []any{"{sys.query}"}) {
 		t.Fatal("request filter values must remain literal")
 	}
 }
