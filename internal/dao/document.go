@@ -336,12 +336,38 @@ func applyDocumentListFilters(query *gorm.DB, opts DocumentListOptions, qualifie
 	// flag false and IDs present, applying them narrows the query instead of
 	// silently widening it, which is the safe direction to fail in.
 	if len(opts.DocIDs) > 0 {
-		query = query.Where(column("id")+" IN ?", opts.DocIDs)
+		query = whereDocIDIn(query, column("id"), opts.DocIDs)
 	}
 	// Note: create_time_from / create_time_to are NOT applied at DB level.
 	// They are filtered post-query in the handler so total reflects the
 	// unfiltered count, matching the Python API contract.
 	return query
+}
+
+// maxDocIDPlaceholders keeps IN lists well under MySQL's 65,535 prepared-statement
+// placeholders; a metadata filter on a large dataset can select 100k+ documents.
+const maxDocIDPlaceholders = 10000
+
+func whereDocIDIn(query *gorm.DB, idColumn string, docIDs []string) *gorm.DB {
+	if len(docIDs) <= maxDocIDPlaceholders || !allPlainDocIDs(docIDs) {
+		return query.Where(idColumn+" IN ?", docIDs)
+	}
+	return query.Where(idColumn + " IN ('" + strings.Join(docIDs, "','") + "')")
+}
+
+// allPlainDocIDs guards the inlined IN list above: only IDs that need no quoting.
+func allPlainDocIDs(docIDs []string) bool {
+	for _, id := range docIDs {
+		if id == "" {
+			return false
+		}
+		for _, r := range id {
+			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-' || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func documentListOrderColumn(orderBy, ingestionStatus string) string {
