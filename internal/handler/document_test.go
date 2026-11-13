@@ -163,6 +163,7 @@ type fakeDocumentService struct {
 	documentList           []*entity.DocumentListItem
 	documentListTotal      int64
 	metadataByKBs          map[string]interface{}
+	metadataPushdown       map[string]map[string][]string
 	hasActiveTasks         bool
 	hasActiveTasksErr      error
 	imageData              []byte
@@ -296,6 +297,16 @@ func (f *fakeDocumentService) GetMetadataByKBs(ctx context.Context, kbIDs []stri
 		return f.metadataByKBs, nil
 	}
 	return map[string]interface{}{}, nil
+}
+func (f *fakeDocumentService) DocIDsWithMetadataValue(ctx context.Context, kbID, key string, values []string) ([]string, bool) {
+	if f.metadataPushdown == nil {
+		return nil, false
+	}
+	var ids []string
+	for _, value := range values {
+		ids = append(ids, f.metadataPushdown[key][value]...)
+	}
+	return ids, true
 }
 func (f *fakeDocumentService) BatchUpdateDocumentStatus(ctx context.Context, userID, datasetID, status string, documentIDs []string) (map[string]interface{}, common.ErrorCode, error) {
 	return map[string]interface{}{}, common.CodeSuccess, nil
@@ -1621,6 +1632,39 @@ func TestListDocumentsHandler_MetadataFilterNarrowsDocumentIDs(t *testing.T) {
 	}
 	if len(fake.listOpts.DocIDs) != 1 || fake.listOpts.DocIDs[0] != "doc-2" {
 		t.Fatalf("expected metadata filter to keep doc-2, got %#v", fake.listOpts.DocIDs)
+	}
+}
+
+func TestListDocumentsHandler_MetadataFilterFindsDocsBeyondFlattenedCap(t *testing.T) {
+	db := setupHandlerAccessDB(t)
+	orig := dao.DB
+	dao.DB = db
+	t.Cleanup(func() { dao.DB = orig })
+
+	gin.SetMode(gin.TestMode)
+
+	fake := &fakeDocumentService{
+		listIDs:       []string{"doc-1", "doc-2", "doc-3"},
+		metadataByKBs: map[string]interface{}{},
+		metadataPushdown: map[string]map[string][]string{
+			"root": {"sharepoint": {"doc-3", "doc-9"}},
+		},
+	}
+	h := &DocumentHandler{
+		documentService: fake,
+		datasetService:  dataset.NewDatasetService(),
+	}
+
+	c, w := setupGinContextWithUser("GET", "/api/v1/datasets/ds-1/documents?metadata[root][]=sharepoint", "")
+	c.Params = gin.Params{{Key: "dataset_id", Value: "ds-1"}}
+
+	h.ListDocuments(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(fake.listOpts.DocIDs) != 1 || fake.listOpts.DocIDs[0] != "doc-3" {
+		t.Fatalf("expected push-down match doc-3, got %#v", fake.listOpts.DocIDs)
 	}
 }
 
