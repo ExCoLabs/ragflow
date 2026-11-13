@@ -144,6 +144,21 @@ func (s *DocumentService) GetDocumentMetadataByID(ctx context.Context, docID str
 	return make(map[string]interface{}), nil
 }
 
+// DocIDsWithMetadataValue returns the docs whose metadata key holds any of
+// values, straight from the metadata index. ok=false means the push-down was
+// not viable; the caller then has only GetMetadataByKBs, which stops at 10k docs.
+func (s *DocumentService) DocIDsWithMetadataValue(ctx context.Context, kbID, key string, values []string) ([]string, bool) {
+	if s.metadataSvc == nil || key == "" || len(values) == 0 {
+		return nil, false
+	}
+	members := make([]interface{}, len(values))
+	for i, value := range values {
+		members[i] = value
+	}
+	filters := []map[string]any{{"key": key, "op": "in", "value": members}}
+	return s.metadataSvc.FilterDocIDsByMetaPushdown(ctx, []string{kbID}, filters, "and")
+}
+
 // GetMetadataByKBs get metadata for knowledge bases
 func (s *DocumentService) GetMetadataByKBs(ctx context.Context, kbIDs []string) (map[string]interface{}, error) {
 	if len(kbIDs) == 0 {

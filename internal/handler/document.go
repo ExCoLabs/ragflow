@@ -60,6 +60,7 @@ type documentServiceIface interface {
 	ListDocumentIDsByDatasetIDWithOptions(ctx context.Context, opts dao.DocumentListOptions) ([]string, error)
 	GetDocumentFiltersByDatasetID(ctx context.Context, opts dao.DocumentListOptions) (map[string]interface{}, int64, error)
 	GetMetadataByKBs(ctx context.Context, kbIDs []string) (map[string]interface{}, error)
+	DocIDsWithMetadataValue(ctx context.Context, kbID, key string, values []string) ([]string, bool)
 	GetDocumentsByAuthorID(ctx context.Context, authorID, page, pageSize int) ([]*document.DocumentResponse, int64, error)
 	GetThumbnails(ctx context.Context, userID string, docIDs []string) (map[string]string, error)
 	GetDocumentImage(ctx context.Context, userID, imageID string) ([]byte, error)
@@ -804,6 +805,14 @@ func (h *DocumentHandler) applyDocumentMetadataFilter(c *gin.Context, opts dao.D
 		rawValues, _ := metadataByKey[key].(map[string][]string)
 		for _, value := range values {
 			for _, docID := range rawValues[value] {
+				valueMatches[docID] = true
+				docIDsWithMetadata[docID] = true
+			}
+		}
+		// metadataByKey covers only the first 10k docs of the dataset, while the
+		// facet counts the UI shows come from the uncapped aggregation.
+		if pushdownIDs, ok := h.documentService.DocIDsWithMetadataValue(ctx, opts.KbID, key, values); ok {
+			for _, docID := range pushdownIDs {
 				valueMatches[docID] = true
 				docIDsWithMetadata[docID] = true
 			}
