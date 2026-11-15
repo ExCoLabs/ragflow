@@ -33,6 +33,7 @@ import (
 	"go.uber.org/zap"
 
 	"ragflow/internal/agent/canvas"
+	agentruntime "ragflow/internal/agent/runtime"
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/engine"
@@ -1077,6 +1078,11 @@ type agentChatCompletionsRequest struct {
 	Model        string                   `json:"model"`
 	Messages     []map[string]interface{} `json:"messages"`
 	ReturnTrace  bool                     `json:"return_trace"`
+	// MetaDataFilter carries the optional explicit request scope
+	// ({"method":"manual","logic":"and","dataset_ids":[...],"manual":[...]}).
+	// Parsed strictly; an invalid shape is an argument error, not a
+	// silently ignored field.
+	MetaDataFilter json.RawMessage `json:"meta_data_filter,omitempty"`
 	// Files carries the uploaded file references for a run, normalized to
 	// the 1D file-dict list. See agentFiles for the two accepted wire
 	// shapes.
@@ -1201,6 +1207,14 @@ func (h *AgentHandler) AgentChatCompletions(c *gin.Context) {
 	if req.OpenAICompat && len(req.Messages) == 0 {
 		common.ResponseWithCodeData(c, common.CodeDataError, nil, "at least one message is required in openai-compatible mode.")
 		return
+	}
+	scope, err := agentruntime.ParseRequestScope(req.MetaDataFilter)
+	if err != nil {
+		common.ResponseWithCodeData(c, common.CodeArgumentError, nil, err.Error())
+		return
+	}
+	if scope != nil && scope.HasFilters() {
+		c.Request = c.Request.WithContext(agentruntime.WithRequestScope(c.Request.Context(), scope))
 	}
 	common.Debug("agent chat completions: request received",
 		zap.String("user_id", user.ID),
