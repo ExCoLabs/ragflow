@@ -1469,6 +1469,9 @@ func (s *AgentService) RunAgent(ctx context.Context, userID, canvasID, sessionID
 		} else if err := checkAgentSessionRunPermission(ctx, userID, sessionID); err != nil {
 			return nil, fmt.Errorf("RunAgent: session %q not found: %w", sessionID, err)
 		}
+		if err := checkSessionScopeBoundary(existingSession, requestScopeFingerprint(ctx)); err != nil {
+			return nil, err
+		}
 	}
 	messageID := common.GenerateToken()
 	questionSaved := false
@@ -1729,6 +1732,9 @@ func (s *AgentService) RunAgent(ctx context.Context, userID, canvasID, sessionID
 		}
 	}
 	if err := validateAgentChatModels(ctx, userID, agentTenantID, dsl); err != nil {
+		return nil, err
+	}
+	if err := s.preflightRequestScope(ctx, userID, agentTenantID, dsl, runtime.RequestScopeFromContext(ctx)); err != nil {
 		return nil, err
 	}
 	// A trusted boundary may allocate the session id before calling RunAgent so
@@ -2464,6 +2470,13 @@ func (s *AgentService) createAgentRunSession(
 	}
 	source := "agent"
 	name := deriveAgentSessionName(userInput)
+	persistedDSL := make(entity.JSONMap, len(runDSL)+1)
+	for key, value := range runDSL {
+		persistedDSL[key] = value
+	}
+	if fingerprint := requestScopeFingerprint(ctx); fingerprint != "" {
+		persistedDSL[requestScopeFingerprintKey] = fingerprint
+	}
 	session := &entity.API4Conversation{
 		ID:        sessionID,
 		Name:      &name,
@@ -2473,7 +2486,7 @@ func (s *AgentService) createAgentRunSession(
 		Message:   json.RawMessage(`[]`),
 		Reference: json.RawMessage(`[]`),
 		Source:    &source,
-		DSL:       entity.JSONMap(runDSL),
+		DSL:       persistedDSL,
 	}
 	if versionRow != nil {
 		session.VersionTitle = versionRow.Title
@@ -2611,7 +2624,11 @@ func (s *AgentService) persistAgentRunSession(
 		"errors": nil,
 	}
 	if state != nil {
-		updates["dsl"] = buildPersistedAgentDSL(runDSL, state)
+		persisted := buildPersistedAgentDSL(runDSL, state)
+		if fingerprint := requestScopeFingerprint(ctx); fingerprint != "" {
+			persisted[requestScopeFingerprintKey] = fingerprint
+		}
+		updates["dsl"] = persisted
 	}
 	return s.api4ConversationDAO.UpdateHistory(ctx, dao.DB, sessionID, agentID, userID, updates, history)
 }

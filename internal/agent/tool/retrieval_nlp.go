@@ -78,8 +78,6 @@ import (
 	"ragflow/internal/engine"
 	"ragflow/internal/entity"
 	modelModule "ragflow/internal/entity/models"
-	"ragflow/internal/permission"
-	permissionresponse "ragflow/internal/permission/response"
 	"ragflow/internal/service/nlp"
 
 	"go.uber.org/zap"
@@ -236,25 +234,16 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	if len(datasets.tenantIDs) != 1 {
 		return nil, fmt.Errorf("retrieval: datasets span multiple tenants")
 	}
+	requestScope := runtime.RequestScopeFromContext(ctx)
+	requestScoped, err := requestScope.AppliesTo(datasets.kbIDs)
+	if err != nil {
+		return nil, fmt.Errorf("retrieval: request scope: %w", err)
+	}
+	scopeEnabled := req.ProjectID != "" || requestScoped
 	// Dataset authorization must use the caller identity established by the
 	// agent run, not req.UserID, which is a configurable per-user memory filter.
-	userID := ""
-	if state, stateErr := runtime.GetStateFromContext(ctx); stateErr == nil && state != nil {
-		userID, _ = state.Sys["user_id"].(string)
-	}
-	userID = strings.TrimSpace(userID)
-	checker := permission.NewDatabaseChecker(db)
-	if err := CheckCanvasDependencies(ctx, db, permission.ResourceKindDataset, datasets.kbIDs); err != nil {
-		_, permissionErr := permissionresponse.Normalize(err)
-		return nil, permissionErr
-	}
-	for _, datasetID := range datasets.kbIDs {
-		if err := checker.CheckResource(ctx, permission.Subject{UserID: userID}, permission.ResourceRef{
-			Kind: permission.ResourceKindDataset, ID: datasetID,
-		}, permission.OperationUse); err != nil {
-			_, permissionErr := permissionresponse.Normalize(err)
-			return nil, permissionErr
-		}
+	if err := authorizeRetrievalDatasets(ctx, db, datasets.kbIDs); err != nil {
+		return nil, err
 	}
 	if err := validateEmbeddingModels(ctx, db, datasets.kbs); err != nil {
 		return nil, err
@@ -270,21 +259,31 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	}
 	query := req.Query
 	docIDs := compactStrings(req.DocScope)
-	var projectDocIDs []string
+	var scopeDocIDs []string
 	if req.ProjectID != "" {
 		if req.Diagnostics != nil {
 			defer func() { req.Diagnostics.ProjectID = req.ProjectID }()
 		}
 		scopeReq := req
 		scopeReq.DatasetIDs = datasets.kbIDs
-		projectDocIDs, err = a.resolveProjectScope(ctx, scopeReq, docIDs)
+		scopeDocIDs, err = a.resolveProjectScope(ctx, scopeReq, docIDs)
 		if err != nil {
 			return nil, err
 		}
-		if len(projectDocIDs) == 0 {
+		if len(scopeDocIDs) == 0 {
 			return []RetrievalChunk{}, nil
 		}
-		docIDs = projectDocIDs
+		docIDs = scopeDocIDs
+	}
+	if requestScoped {
+		scopeDocIDs, err = a.resolveHardScope(ctx, requestScope.Filter(), docIDs, datasets.kbIDs, "request")
+		if err != nil {
+			return nil, err
+		}
+		if len(scopeDocIDs) == 0 {
+			return []RetrievalChunk{}, nil
+		}
+		docIDs = scopeDocIDs
 	}
 	chunkMeta := req.ChunkMeta
 	if len(req.MetaDataFilter) > 0 {
@@ -294,20 +293,20 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		if scoper, ok := a.enhancer.(metadataScopeResolver); ok {
 			var filterMeta *common.ChunkMetaScope
 			docIDs, filterMeta, err = scoper.ScopeDocuments(
-				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbs, req.Diagnostics,
+				ctx, req.MetaDataFilter, query, chatModel, append([]string(nil), docIDs...), datasets.kbs, req.Diagnostics,
 			)
 			chunkMeta = common.MergeChunkMetaScopes(filterMeta, chunkMeta)
 		} else {
 			docIDs, err = a.enhancer.FilterDocuments(
-				ctx, req.MetaDataFilter, query, chatModel, docIDs, datasets.kbIDs, req.Diagnostics,
+				ctx, req.MetaDataFilter, query, chatModel, append([]string(nil), docIDs...), datasets.kbIDs, req.Diagnostics,
 			)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("retrieval: filter documents: %w", err)
 		}
 	}
-	if req.ProjectID != "" {
-		docIDs = intersectProjectScope(projectDocIDs, docIDs)
+	if scopeEnabled {
+		docIDs = intersectProjectScope(scopeDocIDs, docIDs)
 		if len(docIDs) == 0 {
 			return []RetrievalChunk{}, nil
 		}
@@ -364,7 +363,7 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		return []RetrievalChunk{}, nil
 	}
 	rawChunks := res.Chunks
-	if req.ProjectID != "" {
+	if scopeEnabled {
 		rawChunks = projectScopedChunks(rawChunks, docIDs)
 	}
 	rawChunks = preferNewestDocVersions(rawChunks)
@@ -391,7 +390,7 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	if a.enhancer != nil {
 		rawChunks = a.enhancer.RetrieveByChildren(ctx, rawChunks, datasets.tenantIDs)
 	}
-	if req.ProjectID != "" {
+	if scopeEnabled {
 		rawChunks = projectScopedChunks(rawChunks, docIDs)
 	}
 	rawChunks = preferNewestDocVersions(rawChunks)

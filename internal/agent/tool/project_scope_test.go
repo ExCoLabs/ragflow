@@ -72,6 +72,7 @@ type projectPipelineEnhancer struct {
 	seenBase                   []string
 	tocErr                     error
 	tocInput                   int
+	mutateBase                 bool
 }
 
 func (e *projectPipelineEnhancer) FilterDocuments(_ context.Context, filter map[string]any, _ string, model *modelModule.ChatModel, base, kbs []string, _ *common.MetadataFilterDiagnostic) ([]string, error) {
@@ -84,6 +85,10 @@ func (e *projectPipelineEnhancer) ScopeDocuments(_ context.Context, _ map[string
 	e.seenBase = slices.Clone(base)
 	if d != nil {
 		*d = common.MetadataFilterDiagnostic{Method: "semi_auto", Status: "no_matches"}
+	}
+	if e.mutateBase && len(base) > 0 {
+		base[0] = "nst-doc"
+		return base, nil, e.generatedErr
 	}
 	return e.generated, nil, e.generatedErr
 }
@@ -99,6 +104,15 @@ func (e *projectPipelineEnhancer) RetrieveByChildren(_ context.Context, rows []m
 }
 
 func TestProjectScopeThroughRetrievalPipeline(t *testing.T) {
+	testCanonicalScopePipeline(t, false)
+}
+
+func TestRequestScopeThroughRetrievalPipeline(t *testing.T) {
+	testCanonicalScopePipeline(t, true)
+}
+
+func testCanonicalScopePipeline(t *testing.T, requestScoped bool) {
+	t.Helper()
 	if err := nlp.InitQueryBuilder(""); err != nil {
 		t.Fatal(err)
 	}
@@ -113,9 +127,11 @@ func TestProjectScopeThroughRetrievalPipeline(t *testing.T) {
 		canonical, generated, base                    []string
 		canonicalErr, generatedErr, searchErr, tocErr error
 		wantSearch, wantChunk, wantErr                bool
+		mutateBase                                    bool
 	}{
 		{name: "generated no-match retains canonical scope", canonical: []string{"bystricka-doc"}, wantSearch: true, wantChunk: true},
 		{name: "foreign generated results cannot escape", canonical: []string{"bystricka-doc"}, generated: []string{"nst-doc"}},
+		{name: "generated filter cannot mutate canonical scope", canonical: []string{"bystricka-doc"}, mutateBase: true},
 		{name: "explicit empty generated scope stays empty", canonical: []string{"bystricka-doc"}, generated: []string{}},
 		{name: "manual no-match sentinel stays empty", canonical: []string{"bystricka-doc"}, generated: []string{"-999"}},
 		{name: "existing document scope is authoritative", canonical: []string{"bystricka-doc"}, base: []string{"other-doc"}},
@@ -149,7 +165,7 @@ func TestProjectScopeThroughRetrievalPipeline(t *testing.T) {
 				t.Fatal(err)
 			}
 			docEngine := &projectPipelineEngine{rows: []map[string]any{{"id": "witness", "doc_id": "bystricka-doc", "kb_id": kb.ID, "content_ltks": "alpha ventilation", "content_with_weight": "alpha ventilation without opening windows", "_score": 0.9}}, err: tc.searchErr}
-			enhancer := &projectPipelineEnhancer{canonical: tc.canonical, generated: tc.generated, canonicalErr: tc.canonicalErr, generatedErr: tc.generatedErr, tocErr: tc.tocErr}
+			enhancer := &projectPipelineEnhancer{canonical: tc.canonical, generated: tc.generated, canonicalErr: tc.canonicalErr, generatedErr: tc.generatedErr, tocErr: tc.tocErr, mutateBase: tc.mutateBase}
 			adapter := &NLPRetrievalAdapter{svc: nlp.NewRetrievalService(docEngine, &dao.DocumentDAO{}), kbDAO: fakeKnowledgebaseLookup{kbs: []*entity.Knowledgebase{kb}}, enhancer: enhancer, modelConstructors: RetrievalModelConstructors{
 				Embedding: func(context.Context, string, string) (*modelModule.EmbeddingModel, error) { return nil, nil },
 				Chat:      func(context.Context, string, string) (*modelModule.ChatModel, error) { return nil, nil },
@@ -158,7 +174,17 @@ func TestProjectScopeThroughRetrievalPipeline(t *testing.T) {
 			state.Sys["user_id"] = "owner"
 			weight, threshold := 1.0, 0.0
 			diag := &common.MetadataFilterDiagnostic{}
-			got, err := adapter.Search(runtime.WithState(t.Context(), state), db, RetrievalRequest{Query: "alpha ventilation", ProjectID: "2015_062", DatasetIDs: []string{kb.ID}, DocScope: tc.base, MetaDataFilter: projectFilterDefaults(), KeywordsSimilarityWeight: &weight, SimilarityThreshold: &threshold, TOCEnhance: true, Diagnostics: diag})
+			ctx := runtime.WithState(t.Context(), state)
+			projectID := "2015_062"
+			if requestScoped {
+				scope, scopeErr := runtime.ParseRequestScope([]byte(`{"method":"manual","dataset_ids":["kb-project"],"manual":[{"key":"project_id","op":"in","value":["2015_062"]}]}`))
+				if scopeErr != nil {
+					t.Fatal(scopeErr)
+				}
+				ctx = runtime.WithRequestScope(ctx, scope)
+				projectID = ""
+			}
+			got, err := adapter.Search(ctx, db, RetrievalRequest{Query: "alpha ventilation", ProjectID: projectID, DatasetIDs: []string{kb.ID}, DocScope: tc.base, MetaDataFilter: projectFilterDefaults(), KeywordsSimilarityWeight: &weight, SimilarityThreshold: &threshold, TOCEnhance: true, Diagnostics: diag})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error=%v", err)
 			}
@@ -175,11 +201,14 @@ func TestProjectScopeThroughRetrievalPipeline(t *testing.T) {
 			} else if len(got) > 0 {
 				t.Fatalf("unexpected chunks=%v", got)
 			}
-			if diag.ProjectID != "2015_062" {
+			if diag.ProjectID != projectID {
 				t.Fatalf("project diagnostic=%v", diag)
 			}
 			for _, r := range docEngine.requests {
-				scope := r.Filter["doc_id"].([]string)
+				scope, ok := r.Filter["doc_id"].([]string)
+				if !ok {
+					t.Fatal("engine request is missing authoritative document scope")
+				}
 				if !reflect.DeepEqual(scope, tc.canonical) {
 					t.Fatalf("engine scope size=%d want=%d", len(scope), len(tc.canonical))
 				}
