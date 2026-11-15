@@ -61,7 +61,13 @@ func TestScopedDatasetBindings(t *testing.T) {
 				},
 			},
 			"begin:xyz": map[string]any{"obj": map[string]any{"params": map[string]any{"prologue": "hi"}}},
-			"broken":    "not-a-dict",
+			"agent:tool": map[string]any{"obj": map[string]any{"params": map[string]any{
+				"tools": []any{
+					map[string]any{"component_name": "Retrieval", "params": map[string]any{"dataset_ids": []any{"kb-tool-1"}}},
+					map[string]any{"component_name": "Retrieval", "params": map[string]any{"kb_ids": []any{"kb-tool-2"}}},
+				},
+			}}},
+			"broken": "not-a-dict",
 		},
 		"globals": map[string]any{
 			"sys.dataset_id":  "kb-4",
@@ -70,12 +76,12 @@ func TestScopedDatasetBindings(t *testing.T) {
 		},
 	}
 	bound := scopedDatasetBindings(dsl)
-	for _, id := range []string{"kb-1", "kb-2", "kb-3", "kb-4", "kb-5"} {
+	for _, id := range []string{"kb-1", "kb-2", "kb-3", "kb-4", "kb-5", "kb-tool-1", "kb-tool-2"} {
 		if !bound[id] {
 			t.Fatalf("expected %s in bindings %v", id, bound)
 		}
 	}
-	if len(bound) != 5 {
+	if len(bound) != 7 {
 		t.Fatalf("unexpected bindings: %v", bound)
 	}
 	if got := scopedDatasetBindings(map[string]any{}); len(got) != 0 {

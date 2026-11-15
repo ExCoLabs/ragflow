@@ -103,6 +103,23 @@ func scopedDatasetBindings(dsl map[string]any) map[string]bool {
 			for _, key := range []string{"dataset_ids", "kb_ids"} {
 				addValues(params[key])
 			}
+			// Agent components carry their retrieval bindings one level
+			// deeper, on each entry of params.tools.
+			if tools, ok := params["tools"].([]any); ok {
+				for _, rawTool := range tools {
+					toolParams, ok := rawTool.(map[string]any)
+					if !ok {
+						continue
+					}
+					nested, ok := toolParams["params"].(map[string]any)
+					if !ok {
+						nested = toolParams
+					}
+					for _, key := range []string{"dataset_ids", "kb_ids"} {
+						addValues(nested[key])
+					}
+				}
+			}
 		}
 	}
 	if globals, ok := dsl["globals"].(map[string]any); ok {
