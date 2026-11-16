@@ -80,14 +80,22 @@ func authorizeScopedMCP(ctx context.Context, name string, raw json.RawMessage) (
 	if !runtime.RequestScopeFromContext(ctx).HasFilters() {
 		return raw, nil
 	}
-	switch name {
-	case "document_search", "document_read", "file_sheets", "file_preview", "file_query":
-	default:
-		return nil, fmt.Errorf("MCP tool %q does not support explicit request scope", name)
-	}
 	var args map[string]any
 	if err := json.Unmarshal(raw, &args); err != nil || args == nil {
 		return nil, fmt.Errorf("invalid scoped document tool arguments")
+	}
+	switch name {
+	case "document_search", "document_read", "file_sheets", "file_preview", "file_query":
+	default:
+		// Unrelated MCP tools (CRM lookups, calculators) carry no dataset
+		// identity and cannot bypass the scope; only document-shaped
+		// arguments would smuggle a dataset reference past enforcement.
+		for _, key := range []string{"document_id", "document_name", "dataset_id", "kb_id"} {
+			if _, exists := args[key]; exists {
+				return nil, fmt.Errorf("MCP tool %q does not support explicit request scope", name)
+			}
+		}
+		return raw, nil
 	}
 	docID, ok := args["document_id"].(string)
 	if !ok || strings.TrimSpace(docID) == "" {

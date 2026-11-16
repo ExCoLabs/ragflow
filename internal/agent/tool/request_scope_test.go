@@ -58,9 +58,23 @@ func TestScopedMCPRequiresDocumentIdentityAndChecker(t *testing.T) {
 		{"file_query", `{"document_id":"doc","dataset_id":123}`},
 		{"file_preview", `[]`},
 		{"file_sheets", `null`},
+		{"navigo_project_people", `{"project_number":"p","document_name":"x.pdf"}`},
+		{"navigo_find_firm", `{"query":"firm","dataset_id":"kb"}`},
 	} {
 		if _, err := authorizeScopedMCP(ctx, tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Fatalf("unsafe scoped call accepted: %s", tc.name)
+		}
+	}
+	// Non-document MCP tools (CRM lookups, calculators) pass through
+	// unchanged — they carry no dataset identity to enforce.
+	for _, tc := range []struct{ name, args string }{
+		{"navigo_project_people", `{"project_number":"2018_055"}`},
+		{"navigo_find_firm", `{"query":"siebert"}`},
+	} {
+		raw := json.RawMessage(tc.args)
+		got, err := authorizeScopedMCP(ctx, tc.name, raw)
+		if err != nil || string(got) != string(raw) {
+			t.Fatalf("unrelated MCP tool blocked under scope: %s err=%v", tc.name, err)
 		}
 	}
 	if checker.calls != 0 {
