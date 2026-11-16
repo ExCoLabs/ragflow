@@ -436,9 +436,66 @@ func TestEinoChatModelEmptyResponseFailsOver(t *testing.T) {
 				t.Fatalf("failover generate: msg=%v err=%v", msg, err)
 			}
 		}
-		if empty.generateCalls+empty.streamCalls != 1 || healthy.generateCalls+healthy.streamCalls != 1 {
-			t.Fatal("each configured model must be tried at most once")
+		// The empty entry gets one bounded same-model retry before failover.
+		if empty.generateCalls+empty.streamCalls != 2 || healthy.generateCalls+healthy.streamCalls != 1 {
+			t.Fatalf("expected one retry on the empty entry then failover, got empty=%d healthy=%d",
+				empty.generateCalls+empty.streamCalls, healthy.generateCalls+healthy.streamCalls)
 		}
+	}
+}
+
+func TestEinoChatModelRetriesEmptyResponseOnce(t *testing.T) {
+	key, name, answer := "key", "chat", "Final answer"
+	for _, streaming := range []bool{false, true} {
+		flaky := &captureToolDriver{script: []*ChatResponse{{}, {Answer: &answer}}}
+		backup := &captureToolDriver{resp: &ChatResponse{Answer: &answer}}
+		mdl, err := NewFailoverEinoChatModel([]*ChatModel{
+			NewChatModel(flaky, &name, &APIConfig{ApiKey: &key}),
+			NewChatModel(backup, &name, &APIConfig{ApiKey: &key}),
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if streaming {
+			stream, err := mdl.Stream(t.Context(), []*schema.Message{schema.UserMessage("answer")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			for {
+				msg, rerr := stream.Recv()
+				if rerr != nil {
+					break
+				}
+				got += msg.Content
+			}
+			stream.Close()
+			if got != answer {
+				t.Fatalf("stream: expected retried answer, got %q", got)
+			}
+		} else {
+			msg, err := mdl.Generate(t.Context(), []*schema.Message{schema.UserMessage("answer")})
+			if err != nil || msg.Content != answer {
+				t.Fatalf("generate: msg=%v err=%v", msg, err)
+			}
+		}
+		if flaky.generateCalls+flaky.streamCalls != 2 || backup.generateCalls+backup.streamCalls != 0 {
+			t.Fatalf("expected exactly one same-entry retry and no failover, got flaky=%d backup=%d",
+				flaky.generateCalls+flaky.streamCalls, backup.generateCalls+backup.streamCalls)
+		}
+	}
+}
+
+func TestEinoChatModelRetryBoundedOnce(t *testing.T) {
+	key, name := "key", "chat"
+	driver := &captureToolDriver{resp: &ChatResponse{}}
+	mdl := NewEinoChatModel(NewChatModel(driver, &name, &APIConfig{ApiKey: &key}), nil)
+	_, err := mdl.Generate(t.Context(), []*schema.Message{schema.UserMessage("answer")})
+	if err == nil || !strings.Contains(err.Error(), "no answer content") {
+		t.Fatalf("expected empty-response error, got %v", err)
+	}
+	if driver.generateCalls != 2 {
+		t.Fatalf("expected one retry (2 calls), got %d", driver.generateCalls)
 	}
 }
 
@@ -600,6 +657,7 @@ func TestToInternalMessagesPreservesToolMessages(t *testing.T) {
 
 type captureToolDriver struct {
 	resp          *ChatResponse
+	script        []*ChatResponse
 	lastConfig    *ChatConfig
 	generateCalls int
 	streamCalls   int
@@ -639,24 +697,34 @@ func (d *streamSentinelDriver) ChatStreamlyWithSender(ctx context.Context, _ str
 
 func (d *captureToolDriver) NewInstance(baseURL map[string]string) ModelDriver { return d }
 func (d *captureToolDriver) Name() string                                      { return "capture" }
+func (d *captureToolDriver) nextResp() *ChatResponse {
+	if len(d.script) == 0 {
+		return d.resp
+	}
+	resp := d.script[0]
+	d.script = d.script[1:]
+	return resp
+}
+
 func (d *captureToolDriver) ChatWithMessages(ctx context.Context, _ string, _ []Message, _ *APIConfig, cfg *ChatConfig, modelUsage *common.ModelUsage) (*ChatResponse, error) {
 	d.lastConfig = cfg
 	d.generateCalls++
-	return d.resp, nil
+	return d.nextResp(), nil
 }
 func (d *captureToolDriver) ChatStreamlyWithSender(ctx context.Context, _ string, _ []Message, _ *APIConfig, cfg *ChatConfig, _ *common.ModelUsage, sender func(*string, *string) error) error {
 	d.lastConfig = cfg
 	d.streamCalls++
-	if d.resp == nil {
+	resp := d.nextResp()
+	if resp == nil {
 		return nil
 	}
-	if cfg != nil && len(d.resp.ToolCalls) > 0 {
-		tcs := append([]map[string]interface{}(nil), d.resp.ToolCalls...)
+	if cfg != nil && len(resp.ToolCalls) > 0 {
+		tcs := append([]map[string]interface{}(nil), resp.ToolCalls...)
 		cfg.ToolCallsResult = &tcs
 		return nil
 	}
-	if d.resp.Answer != nil {
-		return sender(d.resp.Answer, d.resp.ReasonContent)
+	if resp.Answer != nil {
+		return sender(resp.Answer, resp.ReasonContent)
 	}
 	return nil
 }
