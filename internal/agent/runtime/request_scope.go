@@ -21,6 +21,10 @@ type scopeCondition struct {
 type RequestScope struct {
 	datasets   []string
 	conditions []scopeCondition
+	// relax lists condition keys the request itself allows the server to
+	// drop, cumulatively and in order, when scoped retrieval comes back
+	// sparse. Keys not listed here stay hard ceilings.
+	relax []string
 }
 
 type requestScopeKey struct{}
@@ -40,6 +44,7 @@ func ParseRequestScope(raw json.RawMessage) (*RequestScope, error) {
 		Logic      string            `json:"logic"`
 		DatasetIDs []string          `json:"dataset_ids"`
 		Manual     *[]scopeCondition `json:"manual"`
+		Relax      []string          `json:"relax"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -83,6 +88,21 @@ func ParseRequestScope(raw json.RawMessage) (*RequestScope, error) {
 	if scope.HasFilters() && len(scope.datasets) == 0 {
 		return nil, fmt.Errorf("agent meta_data_filter requires dataset_ids to distinguish project and methodology tools")
 	}
+	declared := make(map[string]bool, len(scope.conditions))
+	for _, condition := range scope.conditions {
+		declared[condition.Key] = true
+	}
+	seenRelax := make(map[string]bool, len(input.Relax))
+	for _, key := range input.Relax {
+		if !scopeMetadataKey.MatchString(key) || !declared[key] {
+			return nil, fmt.Errorf("meta_data_filter relax must name declared condition keys")
+		}
+		if seenRelax[key] {
+			return nil, fmt.Errorf("meta_data_filter relax lists %q twice", key)
+		}
+		seenRelax[key] = true
+		scope.relax = append(scope.relax, key)
+	}
 	return scope, nil
 }
 
@@ -104,6 +124,71 @@ func (s *RequestScope) DatasetIDs() []string {
 		return nil
 	}
 	return append([]string(nil), s.datasets...)
+}
+
+// RelaxLevels returns how many scope levels the request permits beyond the
+// strict filter: level 0 is the full filter, level n drops the first n relax
+// keys. A caller iterates levels 0..RelaxLevels() inclusive.
+func (s *RequestScope) RelaxLevels() int {
+	if s == nil {
+		return 0
+	}
+	return len(s.relax)
+}
+
+func (s *RequestScope) filterWithDropped(dropped int) map[string]any {
+	omit := make(map[string]bool, dropped)
+	for i := 0; i < dropped && i < len(s.relax); i++ {
+		omit[s.relax[i]] = true
+	}
+	conditions := make([]any, 0, len(s.conditions))
+	for _, condition := range s.conditions {
+		if omit[condition.Key] {
+			continue
+		}
+		values := make([]any, len(condition.Value))
+		for i, value := range condition.Value {
+			values[i] = value
+		}
+		conditions = append(conditions, map[string]any{"key": condition.Key, "op": condition.Op, "value": values})
+	}
+	if len(conditions) == 0 {
+		return nil
+	}
+	return map[string]any{"method": "manual", "logic": "and", "manual": conditions}
+}
+
+// FilterAtLevel returns the request filter for relaxation level n: the full
+// filter minus the first n declared-relaxable conditions. Nil means no
+// metadata conditions remain — only dataset bindings still gate the request.
+func (s *RequestScope) FilterAtLevel(level int) map[string]any {
+	if s == nil {
+		return nil
+	}
+	return s.filterWithDropped(level)
+}
+
+// DroppedKeys reports which declared-relaxable condition keys a given level
+// removes, for diagnostics.
+func (s *RequestScope) DroppedKeys(level int) []string {
+	if s == nil || level <= 0 {
+		return nil
+	}
+	if level > len(s.relax) {
+		level = len(s.relax)
+	}
+	return append([]string(nil), s.relax[:level]...)
+}
+
+// FloorFilter is the narrowest filter the request can ever reach — every
+// declared-relaxable condition dropped. Document-tool authorization checks
+// against it so hard keys (e.g. project_id) still bound what a relaxed
+// retrieval may hand out.
+func (s *RequestScope) FloorFilter() map[string]any {
+	if s == nil {
+		return nil
+	}
+	return s.filterWithDropped(len(s.relax))
 }
 
 func (s *RequestScope) Filter() map[string]any {
@@ -136,7 +221,8 @@ func (s *RequestScope) Fingerprint() string {
 		conditions = append(conditions, string(raw))
 	}
 	slices.Sort(conditions)
-	raw, _ := json.Marshal(map[string]any{"version": 1, "datasets": datasets, "conditions": slices.Compact(conditions)})
+	relax := append([]string(nil), s.relax...)
+	raw, _ := json.Marshal(map[string]any{"version": 1, "datasets": datasets, "conditions": slices.Compact(conditions), "relax": relax})
 	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 

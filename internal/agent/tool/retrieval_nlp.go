@@ -275,42 +275,6 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		}
 		docIDs = scopeDocIDs
 	}
-	if requestScoped {
-		scopeDocIDs, err = a.resolveHardScope(ctx, requestScope.Filter(), docIDs, datasets.kbIDs, "request")
-		if err != nil {
-			return nil, err
-		}
-		if len(scopeDocIDs) == 0 {
-			return []RetrievalChunk{}, nil
-		}
-		docIDs = scopeDocIDs
-	}
-	chunkMeta := req.ChunkMeta
-	if len(req.MetaDataFilter) > 0 {
-		if a.enhancer == nil {
-			return nil, fmt.Errorf("retrieval: metadata filter service is not configured")
-		}
-		if scoper, ok := a.enhancer.(metadataScopeResolver); ok {
-			var filterMeta *common.ChunkMetaScope
-			docIDs, filterMeta, err = scoper.ScopeDocuments(
-				ctx, req.MetaDataFilter, query, chatModel, append([]string(nil), docIDs...), datasets.kbs, req.Diagnostics,
-			)
-			chunkMeta = common.MergeChunkMetaScopes(filterMeta, chunkMeta)
-		} else {
-			docIDs, err = a.enhancer.FilterDocuments(
-				ctx, req.MetaDataFilter, query, chatModel, append([]string(nil), docIDs...), datasets.kbIDs, req.Diagnostics,
-			)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("retrieval: filter documents: %w", err)
-		}
-	}
-	if scopeEnabled {
-		docIDs = intersectProjectScope(scopeDocIDs, docIDs)
-		if len(docIDs) == 0 {
-			return []RetrievalChunk{}, nil
-		}
-	}
 	if len(req.CrossLanguages) > 0 {
 		if a.enhancer == nil {
 			return nil, fmt.Errorf("retrieval: cross-language service is not configured")
@@ -342,6 +306,107 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	rerankModel, err := a.resolveRerankModel(ctx, req, datasets.kbs[0].TenantID)
 	if err != nil {
 		return nil, err
+	}
+
+	// Bounded scope relaxation: the request itself may declare which filter
+	// keys the server may drop when scoped retrieval is sparse. Level 0 is
+	// the strict filter; each further level drops the next declared key.
+	// Keys the request did not relax (e.g. project_id) stay hard.
+	levels := 1
+	if requestScoped {
+		levels = requestScope.RelaxLevels() + 1
+	}
+	sparseMin := topN
+	if sparseMin > requestScopeSparseMin {
+		sparseMin = requestScopeSparseMin
+	}
+	var out []RetrievalChunk
+	usedLevel := 0
+	for level := 0; level < levels; level++ {
+		usedLevel = level
+		attemptDocIDs := docIDs
+		attemptScopeIDs := scopeDocIDs
+		if requestScoped {
+			filter := requestScope.FilterAtLevel(level)
+			if filter != nil {
+				attemptScopeIDs, err = a.resolveHardScope(ctx, filter, docIDs, datasets.kbIDs, "request")
+				if err != nil {
+					return nil, err
+				}
+				if len(attemptScopeIDs) == 0 {
+					continue
+				}
+				attemptDocIDs = attemptScopeIDs
+			} else {
+				// Open floor: every declared-relaxable key dropped; only the
+				// dataset binding and any project scope still narrow the pool.
+				attemptScopeIDs = append([]string(nil), docIDs...)
+			}
+		}
+		out, err = a.retrieve(ctx, req, datasets, attemptDocIDs, attemptScopeIDs, scopeEnabled, chatModel, query, rankFeature, rerankModel, embeddingModel, fetchN, topN)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) >= sparseMin {
+			break
+		}
+	}
+	if usedLevel > 0 {
+		if req.Diagnostics != nil {
+			req.Diagnostics.ScopeDroppedKeys = requestScope.DroppedKeys(usedLevel)
+		}
+		common.Debug("agent retrieval: request scope relaxed",
+			zap.Int("level", usedLevel),
+			zap.Int("chunks", len(out)),
+			zap.Strings("dropped", requestScope.DroppedKeys(usedLevel)),
+		)
+	}
+	return out, nil
+}
+
+// requestScopeSparseMin bounds the relaxation trigger: a scoped retrieval
+// returning fewer chunks than this tries the next declared-relaxable level.
+const requestScopeSparseMin = 3
+
+func (a *NLPRetrievalAdapter) retrieve(
+	ctx context.Context,
+	req RetrievalRequest,
+	datasets *resolvedDatasets,
+	docIDs, scopeDocIDs []string,
+	scopeEnabled bool,
+	chatModel *modelModule.ChatModel,
+	query string,
+	rankFeature map[string]float64,
+	rerankModel *modelModule.RerankModel,
+	embeddingModel *modelModule.EmbeddingModel,
+	fetchN, topN int,
+) ([]RetrievalChunk, error) {
+	var err error
+	chunkMeta := req.ChunkMeta
+	if len(req.MetaDataFilter) > 0 {
+		if a.enhancer == nil {
+			return nil, fmt.Errorf("retrieval: metadata filter service is not configured")
+		}
+		if scoper, ok := a.enhancer.(metadataScopeResolver); ok {
+			var filterMeta *common.ChunkMetaScope
+			docIDs, filterMeta, err = scoper.ScopeDocuments(
+				ctx, req.MetaDataFilter, query, chatModel, append([]string(nil), docIDs...), datasets.kbs, req.Diagnostics,
+			)
+			chunkMeta = common.MergeChunkMetaScopes(filterMeta, chunkMeta)
+		} else {
+			docIDs, err = a.enhancer.FilterDocuments(
+				ctx, req.MetaDataFilter, query, chatModel, append([]string(nil), docIDs...), datasets.kbIDs, req.Diagnostics,
+			)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("retrieval: filter documents: %w", err)
+		}
+	}
+	if scopeEnabled {
+		docIDs = intersectProjectScope(scopeDocIDs, docIDs)
+		if len(docIDs) == 0 {
+			return []RetrievalChunk{}, nil
+		}
 	}
 	preparedReq := req
 	preparedReq.Query = query

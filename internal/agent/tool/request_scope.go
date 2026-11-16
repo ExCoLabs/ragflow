@@ -60,20 +60,30 @@ func (a *NLPRetrievalAdapter) checkDocumentScope(ctx context.Context, db *gorm.D
 	if err != nil || !applies || (datasetID != "" && datasetID != doc.KbID) {
 		return scopedDocument{}, fmt.Errorf("document is outside the selected dataset scope")
 	}
-	ids, err := a.resolveHardScope(ctx, scope.Filter(), []string{doc.ID}, []string{doc.KbID}, "request document")
-	if err != nil {
-		return scopedDocument{}, err
-	}
-	for _, id := range ids {
-		if id == doc.ID {
-			name := ""
-			if doc.Name != nil {
-				name = *doc.Name
-			}
-			return scopedDocument{datasetID: doc.KbID, documentID: doc.ID, documentName: name}, nil
+	// Authorize against the floor filter: document tools must accept any
+	// document a declared-relaxable retrieval could legitimately return,
+	// while keys the request did not relax still bound the result.
+	if floor := scope.FloorFilter(); floor != nil {
+		ids, err := a.resolveHardScope(ctx, floor, []string{doc.ID}, []string{doc.KbID}, "request document")
+		if err != nil {
+			return scopedDocument{}, err
 		}
+		for _, id := range ids {
+			if id == doc.ID {
+				name := ""
+				if doc.Name != nil {
+					name = *doc.Name
+				}
+				return scopedDocument{datasetID: doc.KbID, documentID: doc.ID, documentName: name}, nil
+			}
+		}
+		return scopedDocument{}, fmt.Errorf("document does not match the explicit request filters")
 	}
-	return scopedDocument{}, fmt.Errorf("document does not match the explicit request filters")
+	name := ""
+	if doc.Name != nil {
+		name = *doc.Name
+	}
+	return scopedDocument{datasetID: doc.KbID, documentID: doc.ID, documentName: name}, nil
 }
 
 func authorizeScopedMCP(ctx context.Context, name string, raw json.RawMessage) (json.RawMessage, error) {
