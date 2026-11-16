@@ -108,7 +108,13 @@ func authorizeScopedMCP(ctx context.Context, name string, raw json.RawMessage) (
 			return nil, fmt.Errorf("scoped document tools require a string dataset_id")
 		}
 	}
-	checker, ok := GetRetrievalService().(scopedDocumentChecker)
+	svc := GetRetrievalService()
+	// The runtime registry may hold a bridge adapter; scope checks live on the
+	// concrete retrieval service it wraps.
+	if unwrapper, ok := svc.(interface{ Unwrap() RetrievalService }); ok {
+		svc = unwrapper.Unwrap()
+	}
+	checker, ok := svc.(scopedDocumentChecker)
 	if !ok {
 		return nil, fmt.Errorf("document scope checker is not configured")
 	}

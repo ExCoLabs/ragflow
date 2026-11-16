@@ -25,6 +25,13 @@ type scopedMCPChecker struct {
 	err   error
 }
 
+type unwrapStub struct {
+	RetrievalService
+	svc RetrievalService
+}
+
+func (u *unwrapStub) Unwrap() RetrievalService { return u.svc }
+
 func (c *scopedMCPChecker) checkDocumentScope(_ context.Context, _ *gorm.DB, doc, dataset string) (scopedDocument, error) {
 	c.calls++
 	return scopedDocument{datasetID: "kb", documentID: doc, documentName: "canonical.xlsx"}, c.err
@@ -98,6 +105,13 @@ func TestScopedMCPRequiresDocumentIdentityAndChecker(t *testing.T) {
 	SetRetrievalService(&struct{ RetrievalService }{})
 	if _, err := authorizeScopedMCP(ctx, "document_read", json.RawMessage(`{"document_id":"doc"}`)); err == nil {
 		t.Fatal("missing scope checker must fail closed")
+	}
+	// The registry may hold a bridge wrapper; the inner checker must still
+	// be found through Unwrap.
+	checker.err = nil
+	SetRetrievalService(&unwrapStub{svc: checker})
+	if _, err := authorizeScopedMCP(ctx, "document_read", json.RawMessage(`{"document_id":"doc"}`)); err != nil {
+		t.Fatalf("wrapped scope checker not resolved: %v", err)
 	}
 	raw := json.RawMessage(`{"document_name":"legacy.pdf"}`)
 	if got, err := authorizeScopedMCP(t.Context(), "legacy_tool", raw); err != nil || string(got) != string(raw) {
