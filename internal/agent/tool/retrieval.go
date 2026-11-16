@@ -270,7 +270,8 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			Error: err.Error(),
 		}), err
 	}
-	filtersRelaxed := diagnostics != nil && diagnostics.RelaxationAttempted
+	filtersRelaxed := diagnostics != nil &&
+		(diagnostics.RelaxationAttempted || len(diagnostics.ScopeDroppedKeys) > 0)
 	common.Debug("agent retrieval tool: search result",
 		zap.Int("chunks_count", len(chunks)),
 		zap.Bool("filters_relaxed", filtersRelaxed),
@@ -324,6 +325,9 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			}
 			if diagnostics.RelaxationStatus != "" {
 				diagnostic["relaxation_status"] = diagnostics.RelaxationStatus
+			}
+			if len(diagnostics.ScopeDroppedKeys) > 0 {
+				diagnostic["scope_dropped_keys"] = diagnostics.ScopeDroppedKeys
 			}
 			if len(diagnostics.OriginalConditions) > 0 {
 				diagnostic["original_conditions"] = diagnostics.OriginalConditions
