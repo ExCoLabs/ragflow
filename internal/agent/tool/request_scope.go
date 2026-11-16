@@ -124,7 +124,14 @@ func (r *RetrievalTool) validateRequestScopeBinding(ctx context.Context, args re
 	if !runtime.RequestScopeFromContext(ctx).HasFilters() {
 		return nil
 	}
-	if args.RetrievalFrom != "dataset" || r.defaults.RetrievalFrom != "dataset" {
+	// Tool bindings persisted without retrieval_from mean dataset retrieval
+	// whenever dataset_ids/kb_ids are configured (same fallback as arg
+	// normalization); only an explicit non-dataset mode is unsupported.
+	defaultsFrom := r.defaults.RetrievalFrom
+	if defaultsFrom == "" && len(compactStrings(r.defaults.DatasetIDs)) > 0 {
+		defaultsFrom = "dataset"
+	}
+	if args.RetrievalFrom != "dataset" || defaultsFrom != "dataset" {
 		return fmt.Errorf("explicit request scope supports configured dataset retrieval only")
 	}
 	configured := compactStrings(r.defaults.DatasetIDs)
