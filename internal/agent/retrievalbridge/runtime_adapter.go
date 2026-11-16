@@ -50,6 +50,13 @@ func NewRuntimeAdapter(svc agenttool.RetrievalService) *RuntimeAdapter {
 	return &RuntimeAdapter{svc: svc}
 }
 
+// Unwrap returns the wrapped service. The runtime registry holds this adapter
+// while scope-enforcement code needs interfaces implemented only on the inner
+// service (its methods are package-private, so the adapter cannot forward them).
+func (a *RuntimeAdapter) Unwrap() agenttool.RetrievalService {
+	return a.svc
+}
+
 // Search forwards a runtime retrieval request to the installed tool service and
 // translates the result back to the runtime chunk shape.
 func (a *RuntimeAdapter) Search(ctx context.Context, db *gorm.DB, req agentrunt.RetrievalRequest) ([]agentrunt.RetrievalChunk, error) {
