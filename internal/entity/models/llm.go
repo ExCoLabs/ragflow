@@ -344,6 +344,11 @@ func (m *EinoChatModel) Generate(ctx context.Context, msgs []*schema.Message, op
 			return nil, err
 		}
 		resp, err := m.generateOnce(ctx, cm, msgs, opts...)
+		if isEmptyModelResponse(err) {
+			// Empty answer is a transient sampling outcome; one same-entry
+			// retry is cheaper than burning the whole chain slot.
+			resp, err = m.generateOnce(ctx, cm, msgs, opts...)
+		}
 		if err == nil {
 			m.mu.Lock()
 			m.cursor = idx
@@ -474,6 +479,20 @@ func (m *EinoChatModel) generateOnce(ctx context.Context, cm *ChatModel, msgs []
 	return msg, nil
 }
 
+// emptyModelResponse marks a turn where the provider returned without any
+// answer content (no tool calls either). Unlike request-level errors it is a
+// transient sampling outcome, so callers may retry the same chain entry once.
+type emptyModelResponse struct{ kind string }
+
+func (e *emptyModelResponse) Error() string {
+	return "model returned no answer content (" + e.kind + ")"
+}
+
+func isEmptyModelResponse(err error) bool {
+	var e *emptyModelResponse
+	return errors.As(err, &e)
+}
+
 func emptyModelResponseError(modelName, mode string, contentBytes, reasoningBytes int) error {
 	kind := "empty"
 	if reasoningBytes > 0 {
@@ -481,7 +500,7 @@ func emptyModelResponseError(modelName, mode string, contentBytes, reasoningByte
 	}
 	common.Info(fmt.Sprintf("model_empty_response model=%q mode=%s response_kind=%s content_bytes=%d reasoning_bytes=%d",
 		modelName, mode, kind, contentBytes, reasoningBytes))
-	return fmt.Errorf("model returned no answer content (%s)", kind)
+	return &emptyModelResponse{kind: kind}
 }
 
 // modelNameOf returns the model's display name (best-effort; nil-safe).
@@ -926,37 +945,47 @@ func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts
 			sendMu.Lock()
 			sentBefore := sentAny
 			sendMu.Unlock()
-			// Attempt-local config: the driver writes ToolCallsResult/UsageResult
-			// INTO the config it is handed, so reusing one instance would let a
-			// failed attempt's leftovers be attributed to the model that actually
-			// served the turn.
-			attemptCfg := &ChatConfig{}
-			if chatCfg != nil {
-				cp := *chatCfg
-				attemptCfg = &cp
-			}
-			attemptCfg.ToolCallsResult = nil
-			attemptCfg.UsageResult = nil
-			err := cm.ModelDriver.ChatStreamlyWithSender(ctx, *cm.ModelName, internalMessage, cm.APIConfig, attemptCfg, nil, sender)
-			sendMu.Lock()
-			emptyAnswer := !hasAnswer
-			answerSize, reasoningSize := contentBytes, reasoningBytes
-			sendMu.Unlock()
-			hasToolCalls := attemptCfg.ToolCallsResult != nil && len(*attemptCfg.ToolCallsResult) > 0
-			if err == nil && emptyAnswer && !hasToolCalls {
-				if attemptCfg.UsageResult != nil && attemptCfg.UsageResult.TotalTokens > 0 {
-					recordUsage(ctx, *cm.ModelName, attemptCfg.UsageResult)
+			var err error
+			var attemptCfg *ChatConfig
+			for attempt := 0; attempt < 2; attempt++ {
+				// Attempt-local config: the driver writes ToolCallsResult/UsageResult
+				// INTO the config it is handed, so reusing one instance would let a
+				// failed attempt's leftovers be attributed to the model that actually
+				// served the turn.
+				attemptCfg = &ChatConfig{}
+				if chatCfg != nil {
+					cp := *chatCfg
+					attemptCfg = &cp
 				}
-				err = emptyModelResponseError(*cm.ModelName, "stream", answerSize, reasoningSize)
-			}
-			if err != nil {
-				// Same user-visible shape as generateOnce's error: lead with the
-				// model name and keep the provider's own sentence. Tagging it HERE
-				// rather than at the sink keeps the name honest — the sweep may
-				// forward this as lastErr, and the deltas-already-sent branch sends
-				// it as-is. cacheableSweepFailure classifies via errors.As, so the
-				// %w wrapping does not change its verdict.
-				err = fmt.Errorf("%s: %w", *cm.ModelName, err)
+				attemptCfg.ToolCallsResult = nil
+				attemptCfg.UsageResult = nil
+				err = cm.ModelDriver.ChatStreamlyWithSender(ctx, *cm.ModelName, internalMessage, cm.APIConfig, attemptCfg, nil, sender)
+				sendMu.Lock()
+				emptyAnswer := !hasAnswer
+				answerSize, reasoningSize := contentBytes, reasoningBytes
+				sendMu.Unlock()
+				hasToolCalls := attemptCfg.ToolCallsResult != nil && len(*attemptCfg.ToolCallsResult) > 0
+				if err == nil && emptyAnswer && !hasToolCalls {
+					if attemptCfg.UsageResult != nil && attemptCfg.UsageResult.TotalTokens > 0 {
+						recordUsage(ctx, *cm.ModelName, attemptCfg.UsageResult)
+					}
+					err = emptyModelResponseError(*cm.ModelName, "stream", answerSize, reasoningSize)
+				}
+				if err != nil {
+					// Same user-visible shape as generateOnce's error: lead with the
+					// model name and keep the provider's own sentence. Tagging it HERE
+					// rather than at the sink keeps the name honest — the sweep may
+					// forward this as lastErr, and the deltas-already-sent branch sends
+					// it as-is. cacheableSweepFailure classifies via errors.As, so the
+					// %w wrapping does not change its verdict.
+					err = fmt.Errorf("%s: %w", *cm.ModelName, err)
+				}
+				// Retry only while nothing reached the client: an "empty"
+				// attempt sent no deltas, but "reasoning_only" already
+				// streamed reasoning, and replaying it would duplicate it.
+				if !isEmptyModelResponse(err) || sentAny {
+					break
+				}
 			}
 			if err == nil {
 				// Streamed turns report their token usage through the config
