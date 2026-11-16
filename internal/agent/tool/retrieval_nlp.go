@@ -320,6 +320,13 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	if sparseMin > requestScopeSparseMin {
 		sparseMin = requestScopeSparseMin
 	}
+	// A narrow scope can still fill the page with weak hits; chunk count alone
+	// misses that. Accept a level once it fills the page or its best hit clears
+	// the weak bar — otherwise declared keys keep dropping.
+	weakMin := requestScopeWeakSimilarity
+	if req.SimilarityThreshold != nil && *req.SimilarityThreshold > weakMin {
+		weakMin = *req.SimilarityThreshold
+	}
 	var out []RetrievalChunk
 	usedLevel := 0
 	for level := 0; level < levels; level++ {
@@ -347,7 +354,7 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		if err != nil {
 			return nil, err
 		}
-		if len(out) >= sparseMin {
+		if len(out) >= sparseMin && (len(out) >= topN || topChunkScore(out) >= weakMin) {
 			break
 		}
 	}
@@ -367,6 +374,20 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 // requestScopeSparseMin bounds the relaxation trigger: a scoped retrieval
 // returning fewer chunks than this tries the next declared-relaxable level.
 const requestScopeSparseMin = 3
+
+// requestScopeWeakSimilarity marks a page of chunks whose best hit scores
+// below the bar as weak, so a declared-relaxable scope keeps widening.
+const requestScopeWeakSimilarity = 0.4
+
+func topChunkScore(chunks []RetrievalChunk) float64 {
+	best := 0.0
+	for _, c := range chunks {
+		if c.Score > best {
+			best = c.Score
+		}
+	}
+	return best
+}
 
 func (a *NLPRetrievalAdapter) retrieve(
 	ctx context.Context,

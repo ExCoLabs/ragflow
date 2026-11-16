@@ -13,6 +13,7 @@ import (
 	"ragflow/internal/agent/runtime"
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
+	"ragflow/internal/engine"
 	"ragflow/internal/entity"
 	modelModule "ragflow/internal/entity/models"
 	mcpclient "ragflow/internal/mcp/client"
@@ -270,7 +271,32 @@ func (e *relaxScopeEnhancer) RetrieveByChildren(_ context.Context, rows []map[st
 	return rows
 }
 
-func newRelaxPipeline(t *testing.T, scopeJSON string) (*NLPRetrievalAdapter, *relaxScopeEnhancer, *projectPipelineEngine, *gorm.DB, context.Context) {
+// relaxRows gives the relaxed doc three confident hits; strict-only fixtures
+// that need weak strict hits swap them in via newRelaxPipelineRows.
+func relaxRows(kbID string) []map[string]any {
+	return []map[string]any{
+		{"id": "w1", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kbID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures", "_score": 0.9},
+		{"id": "w2", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kbID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures detail", "_score": 0.8},
+		{"id": "w3", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kbID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures table", "_score": 0.7},
+	}
+}
+
+// knnEngine overrides the flat 0.9 vector similarity so a level can be made
+// to look weak without changing which documents the scope selects.
+type knnEngine struct {
+	projectPipelineEngine
+	score float64
+}
+
+func (e *knnEngine) KNNScores(_ context.Context, rows []map[string]any, _ []float64, _ int) (map[string]any, error) {
+	out := make(map[string]any)
+	for _, r := range rows {
+		out[r["id"].(string)] = e.score
+	}
+	return out, nil
+}
+
+func newRelaxPipelineRows(t *testing.T, scopeJSON string, rows []map[string]any, knnScore float64) (*NLPRetrievalAdapter, *relaxScopeEnhancer, *projectPipelineEngine, *gorm.DB, context.Context) {
 	t.Helper()
 	if err := nlp.InitQueryBuilder(""); err != nil {
 		t.Fatal(err)
@@ -298,13 +324,16 @@ func newRelaxPipeline(t *testing.T, scopeJSON string) (*NLPRetrievalAdapter, *re
 			t.Fatal(err)
 		}
 	}
-	docEngine := &projectPipelineEngine{rows: []map[string]any{
-		{"id": "w1", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kb.ID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures", "_score": 0.9},
-		{"id": "w2", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kb.ID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures detail", "_score": 0.8},
-		{"id": "w3", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kb.ID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures table", "_score": 0.7},
-	}}
+	if rows == nil {
+		rows = relaxRows(kb.ID)
+	}
+	docEngine := &projectPipelineEngine{rows: rows}
+	var searchEngine engine.DocEngine = docEngine
+	if knnScore > 0 {
+		searchEngine = &knnEngine{projectPipelineEngine: *docEngine, score: knnScore}
+	}
 	enhancer := &relaxScopeEnhancer{}
-	adapter := &NLPRetrievalAdapter{svc: nlp.NewRetrievalService(docEngine, &dao.DocumentDAO{}), kbDAO: fakeKnowledgebaseLookup{kbs: []*entity.Knowledgebase{kb}}, enhancer: enhancer, modelConstructors: RetrievalModelConstructors{
+	adapter := &NLPRetrievalAdapter{svc: nlp.NewRetrievalService(searchEngine, &dao.DocumentDAO{}), kbDAO: fakeKnowledgebaseLookup{kbs: []*entity.Knowledgebase{kb}}, enhancer: enhancer, modelConstructors: RetrievalModelConstructors{
 		Embedding: func(context.Context, string, string) (*modelModule.EmbeddingModel, error) { return nil, nil },
 		Chat:      func(context.Context, string, string) (*modelModule.ChatModel, error) { return nil, nil },
 	}}
@@ -316,6 +345,10 @@ func newRelaxPipeline(t *testing.T, scopeJSON string) (*NLPRetrievalAdapter, *re
 	state.Sys["user_id"] = "owner"
 	ctx := runtime.WithRequestScope(runtime.WithState(t.Context(), state), scope)
 	return adapter, enhancer, docEngine, db, ctx
+}
+
+func newRelaxPipeline(t *testing.T, scopeJSON string) (*NLPRetrievalAdapter, *relaxScopeEnhancer, *projectPipelineEngine, *gorm.DB, context.Context) {
+	return newRelaxPipelineRows(t, scopeJSON, nil, 0)
 }
 
 func TestRequestScopeRelaxesOnlyDeclaredKeys(t *testing.T) {
@@ -357,5 +390,64 @@ func TestRequestScopeWithoutRelaxStaysStrict(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("strict scope leaked chunks=%v", got)
+	}
+}
+
+func TestRequestScopeRelaxesOnWeakHits(t *testing.T) {
+	rows := []map[string]any{
+		{"id": "s1", "doc_id": "doc-strict", "docnm_kwd": "TS-b.pdf", "kb_id": "kb-project", "content_ltks": "acoustic", "content_with_weight": "acoustic faint", "_score": 0.2},
+		{"id": "s2", "doc_id": "doc-strict", "docnm_kwd": "TS-b.pdf", "kb_id": "kb-project", "content_ltks": "acoustic", "content_with_weight": "acoustic faint detail", "_score": 0.18},
+		{"id": "s3", "doc_id": "doc-strict", "docnm_kwd": "TS-b.pdf", "kb_id": "kb-project", "content_ltks": "acoustic", "content_with_weight": "acoustic faint table", "_score": 0.15},
+	}
+	rows = append(rows, relaxRows("kb-project")...)
+	adapter, enhancer, _, db, ctx := newRelaxPipelineRows(t,
+		`{"method":"manual","dataset_ids":["kb-project"],"manual":[{"key":"project_id","op":"in","value":["2018_055"]},{"key":"flow","op":"in","value":["in"]}],"relax":["flow"]}`,
+		rows, 0.1)
+	weight, threshold := 0.0, 0.0
+	diag := &common.MetadataFilterDiagnostic{}
+	got, err := adapter.Search(ctx, db, RetrievalRequest{Query: "acoustic", TopN: 5, DatasetIDs: []string{"kb-project"}, KeywordsSimilarityWeight: &weight, SimilarityThreshold: &threshold, Diagnostics: diag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enhancer.calls) != 2 {
+		scores := make([]float64, 0, len(got))
+		for _, c := range got {
+			scores = append(scores, c.Score)
+		}
+		t.Fatalf("scope calls=%d want 2 (weak strict page relaxes); got=%v scores=%v", len(enhancer.calls), len(got), scores)
+	}
+	if len(got) == 0 || got[0].DocumentID != "doc-relaxed" {
+		t.Fatalf("expected relaxed-doc chunks on top, got %v", got)
+	}
+	if len(diag.ScopeDroppedKeys) != 1 || diag.ScopeDroppedKeys[0] != "flow" {
+		t.Fatalf("diagnostics=%v", diag.ScopeDroppedKeys)
+	}
+}
+
+func TestRequestScopeFullPageStaysStrict(t *testing.T) {
+	rows := []map[string]any{
+		{"id": "f1", "doc_id": "doc-strict", "docnm_kwd": "TS-c.pdf", "kb_id": "kb-project", "content_ltks": "acoustic", "content_with_weight": "acoustic a", "_score": 0.2},
+		{"id": "f2", "doc_id": "doc-strict", "docnm_kwd": "TS-c.pdf", "kb_id": "kb-project", "content_ltks": "acoustic", "content_with_weight": "acoustic b", "_score": 0.19},
+		{"id": "f3", "doc_id": "doc-strict", "docnm_kwd": "TS-c.pdf", "kb_id": "kb-project", "content_ltks": "acoustic", "content_with_weight": "acoustic c", "_score": 0.18},
+		{"id": "f4", "doc_id": "doc-strict", "docnm_kwd": "TS-c.pdf", "kb_id": "kb-project", "content_ltks": "acoustic", "content_with_weight": "acoustic d", "_score": 0.17},
+		{"id": "f5", "doc_id": "doc-strict", "docnm_kwd": "TS-c.pdf", "kb_id": "kb-project", "content_ltks": "acoustic", "content_with_weight": "acoustic e", "_score": 0.16},
+	}
+	adapter, enhancer, _, db, ctx := newRelaxPipelineRows(t,
+		`{"method":"manual","dataset_ids":["kb-project"],"manual":[{"key":"project_id","op":"in","value":["2018_055"]},{"key":"flow","op":"in","value":["in"]}],"relax":["flow"]}`,
+		rows, 0)
+	weight, threshold := 1.0, 0.0
+	diag := &common.MetadataFilterDiagnostic{}
+	got, err := adapter.Search(ctx, db, RetrievalRequest{Query: "acoustic", TopN: 5, DatasetIDs: []string{"kb-project"}, KeywordsSimilarityWeight: &weight, SimilarityThreshold: &threshold, Diagnostics: diag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enhancer.calls) != 1 {
+		t.Fatalf("scope calls=%d want 1 (full strict page wins)", len(enhancer.calls))
+	}
+	if len(got) != 5 || got[0].DocumentID != "doc-strict" {
+		t.Fatalf("chunks=%v", got)
+	}
+	if len(diag.ScopeDroppedKeys) != 0 {
+		t.Fatalf("unexpected relaxation: %v", diag.ScopeDroppedKeys)
 	}
 }
