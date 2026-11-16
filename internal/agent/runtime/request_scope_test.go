@@ -120,3 +120,59 @@ func TestRequestScopeKeepsLiteralMetadataValues(t *testing.T) {
 		t.Fatal("request filter values must remain literal")
 	}
 }
+
+func TestRequestScopeRelaxLevels(t *testing.T) {
+	scope := mustRequestScope(t, `{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"project_id","op":"in","value":["2018_055"]},{"key":"phase","op":"in","value":["sp"]},{"key":"flow","op":"in","value":["in"]}],"relax":["flow","phase"]}`)
+	if scope.RelaxLevels() != 2 {
+		t.Fatalf("levels=%d", scope.RelaxLevels())
+	}
+	keys := func(f map[string]any) []string {
+		var out []string
+		if f == nil {
+			return out
+		}
+		for _, c := range f["manual"].([]any) {
+			out = append(out, c.(map[string]any)["key"].(string))
+		}
+		return out
+	}
+	if got := keys(scope.FilterAtLevel(0)); !reflect.DeepEqual(got, []string{"project_id", "phase", "flow"}) {
+		t.Fatalf("level0=%v", got)
+	}
+	if got := keys(scope.FilterAtLevel(1)); !reflect.DeepEqual(got, []string{"project_id", "phase"}) {
+		t.Fatalf("level1=%v", got)
+	}
+	if got := keys(scope.FilterAtLevel(2)); !reflect.DeepEqual(got, []string{"project_id"}) {
+		t.Fatalf("level2=%v", got)
+	}
+	if got := keys(scope.FloorFilter()); !reflect.DeepEqual(got, []string{"project_id"}) {
+		t.Fatalf("floor=%v", got)
+	}
+	if !reflect.DeepEqual(scope.DroppedKeys(2), []string{"flow", "phase"}) || scope.DroppedKeys(0) != nil {
+		t.Fatalf("dropped=%v", scope.DroppedKeys(2))
+	}
+	open := mustRequestScope(t, `{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"phase","op":"in","value":["sp"]}],"relax":["phase"]}`)
+	if open.FloorFilter() != nil {
+		t.Fatal("fully relaxed scope must have no metadata floor")
+	}
+}
+
+func TestRequestScopeRelaxValidation(t *testing.T) {
+	for _, raw := range []string{
+		`{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"phase","op":"in","value":["sp"]}],"relax":["flow"]}`,
+		`{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"phase","op":"in","value":["sp"]}],"relax":["phase","phase"]}`,
+		`{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"phase","op":"in","value":["sp"]}],"relax":["bad.key"]}`,
+	} {
+		if _, err := ParseRequestScope(json.RawMessage(raw)); err == nil {
+			t.Fatalf("invalid relax accepted: %s", raw)
+		}
+	}
+}
+
+func TestRequestScopeRelaxChangesFingerprint(t *testing.T) {
+	a := mustRequestScope(t, `{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"project_id","op":"in","value":["2018_055"]},{"key":"flow","op":"in","value":["in"]}]}`)
+	b := mustRequestScope(t, `{"method":"manual","dataset_ids":["kb"],"manual":[{"key":"project_id","op":"in","value":["2018_055"]},{"key":"flow","op":"in","value":["in"]}],"relax":["flow"]}`)
+	if a.Fingerprint() == b.Fingerprint() {
+		t.Fatal("relax policy must be part of the session scope boundary")
+	}
+}

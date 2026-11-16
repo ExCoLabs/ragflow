@@ -11,9 +11,13 @@ import (
 	"time"
 
 	"ragflow/internal/agent/runtime"
+	"ragflow/internal/common"
+	"ragflow/internal/dao"
 	"ragflow/internal/entity"
+	modelModule "ragflow/internal/entity/models"
 	mcpclient "ragflow/internal/mcp/client"
 	"ragflow/internal/permission"
+	"ragflow/internal/service/nlp"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -227,5 +231,131 @@ func TestCheckDocumentScopeEnforcesActorAndMetadata(t *testing.T) {
 				t.Fatalf("document=%+v error=%v", got, err)
 			}
 		})
+	}
+}
+
+// relaxScopeEnhancer resolves the request scope per filter level: a filter
+// still containing "flow" yields only the strict doc, a relaxed filter yields
+// the relaxed doc. Engine rows exist only for the relaxed doc, so the strict
+// level must come back sparse and trigger the bounded relaxation.
+type relaxScopeEnhancer struct {
+	retrievalEnhancer
+	calls []map[string]any
+}
+
+func relaxFilterHasKey(filter map[string]any, key string) bool {
+	for _, c := range filter["manual"].([]any) {
+		if c.(map[string]any)["key"] == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *relaxScopeEnhancer) FilterDocuments(_ context.Context, filter map[string]any, _ string, _ *modelModule.ChatModel, base, kbs []string, _ *common.MetadataFilterDiagnostic) ([]string, error) {
+	e.calls = append(e.calls, filter)
+	if relaxFilterHasKey(filter, "flow") {
+		return []string{"doc-strict"}, nil
+	}
+	return []string{"doc-relaxed"}, nil
+}
+
+func (e *relaxScopeEnhancer) LabelQuestion(context.Context, string, []*entity.Knowledgebase) map[string]float64 {
+	return nil
+}
+func (e *relaxScopeEnhancer) EnhanceTOC(_ context.Context, _ *modelModule.ChatModel, _, _ []string, _ string, _ int, rows []map[string]any) ([]map[string]any, error) {
+	return rows, nil
+}
+func (e *relaxScopeEnhancer) RetrieveByChildren(_ context.Context, rows []map[string]any, _ []string) []map[string]any {
+	return rows
+}
+
+func newRelaxPipeline(t *testing.T, scopeJSON string) (*NLPRetrievalAdapter, *relaxScopeEnhancer, *projectPipelineEngine, *gorm.DB, context.Context) {
+	t.Helper()
+	if err := nlp.InitQueryBuilder(""); err != nil {
+		t.Fatal(err)
+	}
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.AutoMigrate(&entity.Knowledgebase{}, &entity.UserTenant{}, &entity.Document{}); err != nil {
+		t.Fatal(err)
+	}
+	previousDB := dao.DB
+	dao.DB = db
+	t.Cleanup(func() { dao.DB = previousDB })
+	valid := string(entity.StatusValid)
+	kb := &entity.Knowledgebase{ID: "kb-project", TenantID: "tenant", CreatedBy: "owner", Permission: string(entity.TenantPermissionMe), Status: &valid}
+	if err = db.Create(kb).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Create(&entity.UserTenant{ID: "membership", UserID: "owner", TenantID: "tenant", Role: string(permission.RoleOwner), InvitedBy: "owner", Status: &valid}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, docID := range []string{"doc-strict", "doc-relaxed"} {
+		if err = db.Create(&entity.Document{ID: docID, KbID: kb.ID, ParserConfig: entity.JSONMap{}}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	docEngine := &projectPipelineEngine{rows: []map[string]any{
+		{"id": "w1", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kb.ID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures", "_score": 0.9},
+		{"id": "w2", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kb.ID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures detail", "_score": 0.8},
+		{"id": "w3", "doc_id": "doc-relaxed", "docnm_kwd": "TS-a.pdf", "kb_id": kb.ID, "content_ltks": "acoustic", "content_with_weight": "acoustic measures table", "_score": 0.7},
+	}}
+	enhancer := &relaxScopeEnhancer{}
+	adapter := &NLPRetrievalAdapter{svc: nlp.NewRetrievalService(docEngine, &dao.DocumentDAO{}), kbDAO: fakeKnowledgebaseLookup{kbs: []*entity.Knowledgebase{kb}}, enhancer: enhancer, modelConstructors: RetrievalModelConstructors{
+		Embedding: func(context.Context, string, string) (*modelModule.EmbeddingModel, error) { return nil, nil },
+		Chat:      func(context.Context, string, string) (*modelModule.ChatModel, error) { return nil, nil },
+	}}
+	scope, err := runtime.ParseRequestScope(json.RawMessage(scopeJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := runtime.NewCanvasState("run", "task")
+	state.Sys["user_id"] = "owner"
+	ctx := runtime.WithRequestScope(runtime.WithState(t.Context(), state), scope)
+	return adapter, enhancer, docEngine, db, ctx
+}
+
+func TestRequestScopeRelaxesOnlyDeclaredKeys(t *testing.T) {
+	adapter, enhancer, _, db, ctx := newRelaxPipeline(t,
+		`{"method":"manual","dataset_ids":["kb-project"],"manual":[{"key":"project_id","op":"in","value":["2018_055"]},{"key":"flow","op":"in","value":["in"]}],"relax":["flow"]}`)
+	weight, threshold := 1.0, 0.0
+	diag := &common.MetadataFilterDiagnostic{}
+	got, err := adapter.Search(ctx, db, RetrievalRequest{Query: "acoustic", TopN: 5, DatasetIDs: []string{"kb-project"}, KeywordsSimilarityWeight: &weight, SimilarityThreshold: &threshold, Diagnostics: diag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enhancer.calls) != 2 {
+		t.Fatalf("scope calls=%d want 2 (strict + relaxed)", len(enhancer.calls))
+	}
+	if !relaxFilterHasKey(enhancer.calls[0], "flow") || relaxFilterHasKey(enhancer.calls[1], "flow") {
+		t.Fatalf("relaxation did not drop flow: %v", enhancer.calls)
+	}
+	if !relaxFilterHasKey(enhancer.calls[1], "project_id") {
+		t.Fatal("undeclared key was relaxed")
+	}
+	if len(got) != 3 || got[0].DocumentID != "doc-relaxed" {
+		t.Fatalf("chunks=%v", got)
+	}
+	if len(diag.ScopeDroppedKeys) != 1 || diag.ScopeDroppedKeys[0] != "flow" {
+		t.Fatalf("diagnostics=%v", diag.ScopeDroppedKeys)
+	}
+}
+
+func TestRequestScopeWithoutRelaxStaysStrict(t *testing.T) {
+	adapter, enhancer, _, db, ctx := newRelaxPipeline(t,
+		`{"method":"manual","dataset_ids":["kb-project"],"manual":[{"key":"project_id","op":"in","value":["2018_055"]},{"key":"flow","op":"in","value":["in"]}]}`)
+	weight, threshold := 1.0, 0.0
+	got, err := adapter.Search(ctx, db, RetrievalRequest{Query: "acoustic", DatasetIDs: []string{"kb-project"}, KeywordsSimilarityWeight: &weight, SimilarityThreshold: &threshold})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enhancer.calls) != 1 {
+		t.Fatalf("scope calls=%d want 1 (no relaxation declared)", len(enhancer.calls))
+	}
+	if len(got) != 0 {
+		t.Fatalf("strict scope leaked chunks=%v", got)
 	}
 }

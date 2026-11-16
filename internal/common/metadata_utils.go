@@ -86,6 +86,10 @@ type MetadataFilterDiagnostic struct {
 	// document metadata stored on chunks (no document id list, so
 	// MatchedDocumentCount is not known); empty for the document id path.
 	AppliedOn string `json:"applied_on,omitempty"`
+	// ScopeDroppedKeys lists the request-scope condition keys the bounded
+	// relaxation dropped to reach a non-sparse result. Empty means the strict
+	// scope held.
+	ScopeDroppedKeys []string `json:"scope_dropped_keys,omitempty"`
 }
 
 // operatorMapping translates Python-style operators to internal symbols.
