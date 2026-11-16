@@ -143,6 +143,24 @@ func TestScopedRetrievalCannotOverrideBindings(t *testing.T) {
 	}
 }
 
+func TestScopedRetrievalAcceptsImplicitDatasetBinding(t *testing.T) {
+	previous := GetRetrievalService()
+	t.Cleanup(func() { SetRetrievalService(previous) })
+	// Persisted agent tools carry dataset_ids without retrieval_from; the
+	// scope check must apply the same implicit-dataset fallback as arg
+	// normalization instead of rejecting the configured binding.
+	recorder := &scopedRetrievalRecorder{}
+	SetRetrievalService(recorder)
+	ctx := scopedToolContext(t, "owner", "kb")
+	adapter := NewRetrievalToolWithDefaults(retrievalArgs{DatasetIDs: []string{"kb"}})
+	if _, err := adapter.InvokableRun(ctx, `{"query":"q"}`); err != nil {
+		t.Fatalf("implicit dataset binding rejected under scope: %v", err)
+	}
+	if recorder.calls != 1 {
+		t.Fatalf("retrieval did not reach the service: calls=%d", recorder.calls)
+	}
+}
+
 func TestCheckDocumentScopeEnforcesActorAndMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		name, user, target, requested, doc string
