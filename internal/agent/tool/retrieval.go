@@ -63,8 +63,12 @@ type retrievalArgs struct {
 	CrossLanguages           []string       `json:"cross_languages,omitempty"`
 	TOCEnhance               bool           `json:"toc_enhance,omitempty"`
 	MetaDataFilter           map[string]any `json:"meta_data_filter,omitempty"`
-	RetrievalFrom            string         `json:"retrieval_from,omitempty"`
-	EmptyResponse            string         `json:"empty_response,omitempty"`
+	// ScopeDrop lets the model explicitly relax declared request-scope keys
+	// (see `relax` in the request's meta_data_filter) when strict evidence
+	// looks insufficient. Undeclared keys are ignored server-side.
+	ScopeDrop     []string `json:"scope_drop,omitempty"`
+	RetrievalFrom string   `json:"retrieval_from,omitempty"`
+	EmptyResponse string   `json:"empty_response,omitempty"`
 	// FunctionName is the agent-visible tool name from the DSL. It is not
 	// exposed to the model as part of the tool arguments.
 	FunctionName string `json:"-"`
@@ -80,8 +84,13 @@ type retrievalResult struct {
 	FormalizedContent string         `json:"formalized_content"`
 	Chunks            []chunkPayload `json:"chunks,omitempty"`
 	FiltersRelaxed    bool           `json:"filters_relaxed,omitempty"`
-	Stub              bool           `json:"stub,omitempty"`
-	Error             string         `json:"_ERROR,omitempty"`
+	// ScopeDroppedKeys reports which declared-relaxable request-scope keys
+	// were dropped for this call; ScopeRelaxable tells the model which keys
+	// it may still drop via scope_drop on a follow-up call.
+	ScopeDroppedKeys []string `json:"scope_dropped_keys,omitempty"`
+	ScopeRelaxable   []string `json:"scope_relaxable,omitempty"`
+	Stub             bool     `json:"stub,omitempty"`
+	Error            string   `json:"_ERROR,omitempty"`
 }
 
 // chunkPayload is the minimal chunk shape we surface. We don't try to
@@ -252,6 +261,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		CrossLanguages:           append([]string(nil), args.CrossLanguages...),
 		TOCEnhance:               args.TOCEnhance,
 		MetaDataFilter:           cloneStringAnyMap(args.MetaDataFilter),
+		ScopeDrop:                append([]string(nil), args.ScopeDrop...),
 		RetrievalFrom:            args.RetrievalFrom,
 		UserID:                   args.UserID,
 		TenantID:                 retrievalTenantID(ctx),
@@ -296,6 +306,21 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		formalizedContent = args.EmptyResponse
 	}
 	out := retrievalResult{FormalizedContent: formalizedContent, Chunks: payload, FiltersRelaxed: filtersRelaxed}
+	if scope := runtime.RequestScopeFromContext(ctx); scope != nil {
+		var dropped map[string]bool
+		if diagnostics != nil {
+			out.ScopeDroppedKeys = diagnostics.ScopeDroppedKeys
+			dropped = make(map[string]bool, len(diagnostics.ScopeDroppedKeys))
+			for _, k := range diagnostics.ScopeDroppedKeys {
+				dropped[k] = true
+			}
+		}
+		for _, k := range scope.RelaxableKeys() {
+			if !dropped[k] {
+				out.ScopeRelaxable = append(out.ScopeRelaxable, k)
+			}
+		}
+	}
 	// Record chunks into canvas state so the Agent's post-stream
 	// citation grounding call can read them. The recording is
 	// best-effort — when the canvas state is not
