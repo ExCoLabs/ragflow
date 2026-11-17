@@ -100,3 +100,20 @@ func TestSimpleRetrievalService_RespectsTopN(t *testing.T) {
 		t.Errorf("expected simple-0, got %q", chunks[0].ID)
 	}
 }
+
+// The model must be able to discover scope_drop: it is the only way for an
+// agent to relax a declared request scope when strict evidence is irrelevant.
+func TestRetrievalTool_InfoExposesScopeDrop(t *testing.T) {
+	tool := NewRetrievalTool()
+	info, err := tool.Info(t.Context())
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	if err != nil {
+		t.Fatalf("ToJSONSchema: %v", err)
+	}
+	if _, ok := js.Properties.Get("scope_drop"); !ok {
+		t.Fatalf("scope_drop missing from tool schema: %v", js.Properties)
+	}
+}
