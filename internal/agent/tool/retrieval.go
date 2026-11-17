@@ -154,6 +154,10 @@ func (r *RetrievalTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 				Desc:     "The keywords to search the dataset. The keywords should be the most important words/terms (including synonyms) from the original request.",
 				Required: true,
 			},
+			"scope_drop": {
+				Type: schema.Array,
+				Desc: "Optional list of request-scope filter keys to drop for this call. Only keys returned earlier as scope_relaxable are allowed; other keys are ignored server-side. Use it when strict-scoped results look irrelevant to the request — not merely sparse.",
+			},
 		}),
 	}, nil
 }
