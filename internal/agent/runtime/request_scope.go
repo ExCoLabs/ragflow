@@ -180,6 +180,54 @@ func (s *RequestScope) DroppedKeys(level int) []string {
 	return append([]string(nil), s.relax[:level]...)
 }
 
+// RelaxableKeys returns the declared-relaxable condition keys in drop order.
+func (s *RequestScope) RelaxableKeys() []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string(nil), s.relax...)
+}
+
+// FilterDropping returns the filter with exactly the given keys removed —
+// the model-facing counterpart of FilterAtLevel. Only declared-relaxable keys
+// may drop; the second return value reports which of the requested keys were
+// actually dropped, so undeclared keys surface as no-ops in diagnostics.
+func (s *RequestScope) FilterDropping(keys []string) (map[string]any, []string) {
+	if s == nil {
+		return nil, nil
+	}
+	want := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		want[k] = true
+	}
+	declared := make(map[string]bool, len(s.relax))
+	for _, k := range s.relax {
+		declared[k] = true
+	}
+	conditions := make([]any, 0, len(s.conditions))
+	dropped := make([]string, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, condition := range s.conditions {
+		if want[condition.Key] && declared[condition.Key] {
+			if !seen[condition.Key] {
+				seen[condition.Key] = true
+				dropped = append(dropped, condition.Key)
+			}
+			continue
+		}
+		values := make([]any, len(condition.Value))
+		for i, value := range condition.Value {
+			values[i] = value
+		}
+		conditions = append(conditions, map[string]any{"key": condition.Key, "op": condition.Op, "value": values})
+	}
+	var filter map[string]any
+	if len(conditions) > 0 {
+		filter = map[string]any{"method": "manual", "logic": "and", "manual": conditions}
+	}
+	return filter, dropped
+}
+
 // FloorFilter is the narrowest filter the request can ever reach — every
 // declared-relaxable condition dropped. Document-tool authorization checks
 // against it so hard keys (e.g. project_id) still bound what a relaxed

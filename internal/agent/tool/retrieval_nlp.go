@@ -308,6 +308,33 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		return nil, err
 	}
 
+	// Model-driven scope drop: when the model names declared-relaxable keys
+	// (scope_drop), run exactly that filter — the model judges evidence
+	// quality better than chunk-count heuristics. Hard keys stay hard.
+	if requestScoped && len(req.ScopeDrop) > 0 {
+		filter, dropped := requestScope.FilterDropping(req.ScopeDrop)
+		attemptScopeIDs := scopeDocIDs
+		attemptDocIDs := docIDs
+		if filter != nil {
+			attemptScopeIDs, err = a.resolveHardScope(ctx, filter, docIDs, datasets.kbIDs, "request")
+			if err != nil {
+				return nil, err
+			}
+			if len(attemptScopeIDs) == 0 {
+				return []RetrievalChunk{}, nil
+			}
+			attemptDocIDs = attemptScopeIDs
+		}
+		out, err := a.retrieve(ctx, req, datasets, attemptDocIDs, attemptScopeIDs, scopeEnabled, chatModel, query, rankFeature, rerankModel, embeddingModel, fetchN, topN)
+		if err != nil {
+			return nil, err
+		}
+		if req.Diagnostics != nil && len(dropped) > 0 {
+			req.Diagnostics.ScopeDroppedKeys = dropped
+		}
+		return out, nil
+	}
+
 	// Bounded scope relaxation: the request itself may declare which filter
 	// keys the server may drop when scoped retrieval is sparse. Level 0 is
 	// the strict filter; each further level drops the next declared key.

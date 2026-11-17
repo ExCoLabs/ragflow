@@ -451,3 +451,29 @@ func TestRequestScopeFullPageStaysStrict(t *testing.T) {
 		t.Fatalf("unexpected relaxation: %v", diag.ScopeDroppedKeys)
 	}
 }
+
+func TestRequestScopeModelDropUsesExactKeys(t *testing.T) {
+	adapter, enhancer, _, db, ctx := newRelaxPipeline(t,
+		`{"method":"manual","dataset_ids":["kb-project"],"manual":[{"key":"project_id","op":"in","value":["2018_055"]},{"key":"flow","op":"in","value":["in"]}],"relax":["flow"]}`)
+	weight, threshold := 1.0, 0.0
+	diag := &common.MetadataFilterDiagnostic{}
+	got, err := adapter.Search(ctx, db, RetrievalRequest{Query: "acoustic", TopN: 5, DatasetIDs: []string{"kb-project"}, KeywordsSimilarityWeight: &weight, SimilarityThreshold: &threshold, Diagnostics: diag, ScopeDrop: []string{"flow", "project_id"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enhancer.calls) != 1 {
+		t.Fatalf("scope calls=%d want 1 (explicit drop runs once)", len(enhancer.calls))
+	}
+	if relaxFilterHasKey(enhancer.calls[0], "flow") {
+		t.Fatalf("flow should be dropped: %v", enhancer.calls)
+	}
+	if !relaxFilterHasKey(enhancer.calls[0], "project_id") {
+		t.Fatal("undeclared project_id must stay hard")
+	}
+	if len(diag.ScopeDroppedKeys) != 1 || diag.ScopeDroppedKeys[0] != "flow" {
+		t.Fatalf("diagnostics=%v", diag.ScopeDroppedKeys)
+	}
+	if len(got) != 3 || got[0].DocumentID != "doc-relaxed" {
+		t.Fatalf("chunks=%v", got)
+	}
+}

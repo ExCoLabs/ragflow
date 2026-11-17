@@ -92,6 +92,10 @@ type RetrievalRequest struct {
 	// DocScope restricts retrieval to a set of document ids (the doc_id list
 	// routed by the dataset_navigation_by_tree tool). Empty = no doc filter.
 	DocScope []string
+	// ScopeDrop lists declared-relaxable request-scope keys the model asked to
+	// drop for this call (tool arg `scope_drop`). Keys outside the request's
+	// declared relax set are ignored and reported as no-ops in diagnostics.
+	ScopeDrop []string
 	// TenantID is the tenant that owns the running canvas.
 	TenantID string
 	// RankFeature is the label_question term→weight map passed through to the
