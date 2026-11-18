@@ -156,7 +156,7 @@ func (r *RetrievalTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 			},
 			"scope_drop": {
 				Type: schema.Array,
-				Desc: "Optional list of request-scope filter keys to drop for this call. Only keys returned earlier as scope_relaxable are allowed; other keys are ignored server-side. Use it when strict-scoped results look irrelevant to the request — not merely sparse.",
+				Desc: "Drop request-scope filter keys for this call, e.g. [\"phase\"] or [\"flow\",\"phase\"]. If a previous response reported scope_relaxable keys and its documents do not answer the request, call this tool again listing those keys here to broaden the search before concluding the information is missing. Only keys returned as scope_relaxable are accepted; other keys are ignored.",
 			},
 		}),
 	}, nil
