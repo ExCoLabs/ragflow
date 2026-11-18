@@ -46,6 +46,7 @@ import (
 	"go.uber.org/zap"
 
 	"ragflow/internal/common"
+	"ragflow/internal/llmaudit"
 )
 
 // EinoChatModel adapts one or more RAGFlow *ChatModels to eino's chat model
@@ -435,7 +436,9 @@ func (m *EinoChatModel) generateOnce(ctx context.Context, cm *ChatModel, msgs []
 	)
 	common.Debug("models: eino generate message skeleton",
 		zap.String("skeleton", describeInternalMessages(internal)))
+	callStart := time.Now()
 	resp, err := cm.ModelDriver.ChatWithMessages(ctx, *cm.ModelName, internal, cm.APIConfig, chatCfg, nil)
+	auditGenerate(ctx, *cm.ModelName, callStart, internal, chatCfg, resp, err)
 	if err != nil {
 		// The chat paths surface this to the user as `**ERROR**: <err>`
 		// (errorAnswerText in agentic-rag/agentic_rag_graph.go, chat_pipeline.go),
@@ -873,6 +876,7 @@ func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts
 	var sendMu sync.Mutex
 	var sentAny, hasAnswer bool
 	var contentBytes, reasoningBytes int
+	streamed := streamCapture{enabled: llmaudit.FromContext(ctx).Capturing()}
 	sender := func(content *string, reasoning *string) error {
 		sendMu.Lock()
 		defer sendMu.Unlock()
@@ -885,6 +889,7 @@ func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts
 		if content != nil && *content == "[DONE]" {
 			return nil
 		}
+		streamed.add(content, reasoning)
 		msg := &schema.Message{Role: schema.Assistant}
 		if content != nil {
 			msg.Content = *content
@@ -959,7 +964,14 @@ func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts
 				}
 				attemptCfg.ToolCallsResult = nil
 				attemptCfg.UsageResult = nil
+				sendMu.Lock()
+				streamed.reset()
+				sendMu.Unlock()
+				callStart := time.Now()
 				err = cm.ModelDriver.ChatStreamlyWithSender(ctx, *cm.ModelName, internalMessage, cm.APIConfig, attemptCfg, nil, sender)
+				sendMu.Lock()
+				auditStream(ctx, *cm.ModelName, callStart, internalMessage, attemptCfg, &streamed, err)
+				sendMu.Unlock()
 				sendMu.Lock()
 				emptyAnswer := !hasAnswer
 				answerSize, reasoningSize := contentBytes, reasoningBytes

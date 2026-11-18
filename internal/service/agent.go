@@ -42,6 +42,7 @@ import (
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
+	"ragflow/internal/llmaudit"
 	"ragflow/internal/permission"
 	permissionresponse "ragflow/internal/permission/response"
 	"ragflow/internal/tokenizer"
@@ -1980,6 +1981,13 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 		sessionID, _ := root["__session_id__"].(string)
 		userID, _ := root["user_id"].(string)
 
+		ctx, auditRun := startAgentAudit(ctx, sessionID, messageID, canvasID, userID)
+		auditTenantID, _ := root["tenant_id"].(string)
+		auditRun.SetTenant(auditTenantID)
+		defer func() {
+			finishAgentAudit(ctx, auditRun, runErr, canvas.IsInterruptError(runErr))
+		}()
+
 		// A failed first-touch run with no question should not leave an empty session.
 		// Sessions with accepted user questions remain in history on failure.
 		// Interrupts (UserFillUp waits) and user-initiated cancels keep
@@ -2140,6 +2148,7 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 		state.RefreshSysDate()
 		query := agentRunQuery(userInput)
 		state.Sys["query"] = query
+		llmaudit.FromContext(ctx).SetQuestion(stringifyAgentUserInput(query))
 		state.AppendCurrentUser(query)
 		state.AppendSysHistory("user: " + renderUserHistoryValue(query))
 		// Trusted caller identity is seeded through the same entry the debug
@@ -2378,6 +2387,7 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 			// this cannot duplicate output.
 			if answer == "" && !contentEventsEmitted {
 				failureText := agentRunFailureText(err)
+				llmaudit.FromContext(ctx).SetAnswer(failureText)
 				emitAgentMessageEvents(emit, failureText, thinking, referencePayload)
 				meData, _ := json.Marshal(canvas.MessageEndEvent{
 					Attachment: attachment,
@@ -2608,6 +2618,7 @@ func (s *AgentService) persistAgentRunSession(
 	state *canvas.CanvasState,
 	appendAssistantMessage bool,
 ) error {
+	llmaudit.FromContext(ctx).SetAnswer(answer)
 	now := float64(time.Now().UnixNano()) / 1e9
 	if sessionID == "" || s == nil || s.api4ConversationDAO == nil || dao.DB == nil {
 		return nil
