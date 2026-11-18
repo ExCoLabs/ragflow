@@ -43,6 +43,7 @@ import (
 	agenttool "ragflow/internal/agent/tool"
 	"ragflow/internal/common"
 	"ragflow/internal/entity/models"
+	"ragflow/internal/llmaudit"
 
 	"go.uber.org/zap"
 )
@@ -1880,12 +1881,25 @@ func (c *AgentComponent) invokeNow(ctx context.Context, db *gorm.DB, inputs map[
 		case out["_ERROR"] != nil:
 			outcome = "agent_error"
 		}
+		totalMS := time.Since(runStart).Milliseconds()
+		run := llmaudit.FromContext(ctx)
+		var messageID, agentID, userID string
+		if run != nil {
+			messageID, agentID, userID = run.MessageID, run.AgentID, run.UserID
+		}
+		run.AddAgentTiming(llmaudit.AgentTiming{
+			Outcome: outcome, Model: p.ModelID, TotalMS: totalMS,
+			LLMMS: llm.Milliseconds(), ToolsMS: tools.Milliseconds(), GroundingMS: grounding.Milliseconds(),
+			LLMCalls: llmCalls, ToolCalls: toolCalls, GroundingStatus: groundingStatus,
+		})
 		common.Info(fmt.Sprintf(
 			"agent_run_timings outcome=%s total_ms=%d llm_ms=%d tools_ms=%d grounding_ms=%d "+
-				"llm_calls=%d tool_calls=%d grounding_status=%q model=%s grounding_model=%s session=%s tenant=%s",
-			outcome, time.Since(runStart).Milliseconds(), llm.Milliseconds(),
+				"llm_calls=%d tool_calls=%d grounding_status=%q model=%s grounding_model=%s session=%s tenant=%s "+
+				"run=%s message=%s agent=%s user=%s",
+			outcome, totalMS, llm.Milliseconds(),
 			tools.Milliseconds(), grounding.Milliseconds(), llmCalls, toolCalls,
-			groundingStatus, p.ModelID, p.GroundingLLMID, sessionID, tenantID))
+			groundingStatus, p.ModelID, p.GroundingLLMID, sessionID, tenantID,
+			run.RunID(), messageID, agentID, userID))
 	}()
 
 	var err error
