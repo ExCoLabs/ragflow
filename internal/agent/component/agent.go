@@ -336,37 +336,76 @@ func (m *roundLimitedChatModel) Generate(ctx context.Context, input []*schema.Me
 	return m.ToolCallingChatModel.Generate(ctx, input, m.roundOptions(opts)...)
 }
 
+// emptyRoundMaxRetries bounds replays of a model round that ends with no
+// answer content and no tool calls (reasoning-only or empty finish). Only
+// the model call is replayed — nothing reached the caller, so the tool
+// loop is not re-run and no duplicate output is emitted.
+const emptyRoundMaxRetries = 2
+
 func (m *roundLimitedChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	start := time.Now()
 	input = m.roundInput(input)
-	stream, err := m.ToolCallingChatModel.Stream(ctx, input, m.roundOptions(opts)...)
+	opts = m.roundOptions(opts)
 	timings := runtime.PhaseTimingsFromContext(ctx)
-	if timings == nil {
-		return stream, err
+	finish := sync.OnceFunc(func() {
+		if timings != nil {
+			timings.AddLLM(time.Since(start))
+		}
+	})
+
+	var buffered []*schema.Message
+	var streamErr error
+	hasOutput := false
+	for attempt := 0; ; attempt++ {
+		stream, err := m.ToolCallingChatModel.Stream(ctx, input, opts...)
+		if err != nil {
+			streamErr = err
+		} else {
+			buffered = buffered[:0]
+			hasOutput = false
+			streamErr = nil
+			for {
+				message, err := stream.Recv()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					streamErr = err
+					break
+				}
+				if message == nil {
+					continue
+				}
+				buffered = append(buffered, message)
+				if message.Content != "" || len(message.ToolCalls) > 0 {
+					hasOutput = true
+				}
+			}
+			stream.Close()
+		}
+		if streamErr == nil && hasOutput {
+			break
+		}
+		if attempt >= emptyRoundMaxRetries {
+			break
+		}
 	}
-	if err != nil {
-		timings.AddLLM(time.Since(start))
-		return nil, err
+	if streamErr != nil && len(buffered) == 0 {
+		finish()
+		return nil, streamErr
 	}
+
 	reader, writer := schema.Pipe[*schema.Message](1)
-	finish := sync.OnceFunc(func() { timings.AddLLM(time.Since(start)) })
 	go func() {
-		defer stream.Close()
 		defer writer.Close()
 		defer finish()
-		for {
-			message, err := stream.Recv()
-			if errors.Is(err, io.EOF) {
-				return
-			}
-			if err != nil {
-				finish()
-				writer.Send(nil, err)
-				return
-			}
+		for _, message := range buffered {
 			if writer.Send(message, nil) {
 				return
 			}
+		}
+		if streamErr != nil {
+			writer.Send(nil, streamErr)
 		}
 	}()
 	return reader, nil
