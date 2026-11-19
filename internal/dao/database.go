@@ -114,7 +114,9 @@ func InitDB(ctx context.Context, migrateDB bool) error {
 	globalConfig := server.GetConfig()
 	databaseConfig := globalConfig.GetMySQLConfig()
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=True&loc=Local",
+	// maxAllowedPacket=0 takes the server's limit: the driver's own default (4 MiB in
+	// v1.7) rejects a document query whose inlined id list passes ~120k ids.
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=True&loc=Local&maxAllowedPacket=0",
 		databaseConfig.User,
 		databaseConfig.Password,
 		databaseConfig.Host,
