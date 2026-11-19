@@ -1590,3 +1590,45 @@ func TestAgentDisabledTemperatureAndTopP(t *testing.T) {
 		}
 	}
 }
+
+type emptyThenRecoverModel struct {
+	calls int
+}
+
+func (m *emptyThenRecoverModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func (m *emptyThenRecoverModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("answer", nil), nil
+}
+
+func (m *emptyThenRecoverModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	m.calls++
+	sr, sw := schema.Pipe[*schema.Message](1)
+	go func(attempt int) {
+		defer sw.Close()
+		if attempt == 1 {
+			sw.Send(&schema.Message{Role: schema.Assistant, ReasoningContent: "thinking only"}, nil)
+			return
+		}
+		sw.Send(schema.AssistantMessage("answer", nil), nil)
+	}(m.calls)
+	return sr, nil
+}
+
+func TestRoundLimitedModelRetriesEmptyRound(t *testing.T) {
+	mdl := &roundLimitedChatModel{ToolCallingChatModel: &emptyThenRecoverModel{}, remaining: 3}
+	stream, err := mdl.Stream(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	message, err := stream.Recv()
+	if err != nil || message.Content != "answer" {
+		t.Fatalf("message=%v err=%v, want recovered answer", message, err)
+	}
+	if inner, ok := mdl.ToolCallingChatModel.(*emptyThenRecoverModel); !ok || inner.calls != 2 {
+		t.Fatalf("stream calls = %v, want one empty-round retry", inner)
+	}
+}
