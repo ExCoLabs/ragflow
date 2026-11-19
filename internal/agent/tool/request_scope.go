@@ -25,6 +25,14 @@ type scopedDocumentChecker interface {
 	checkDocumentScope(context.Context, *gorm.DB, string, string) (scopedDocument, error)
 }
 
+// scopeArgError marks request-scope argument problems the model can fix by
+// retrying the tool with valid arguments (a document_id taken verbatim from a
+// scoped retrieval result). Callers surface these as tool output instead of
+// aborting the run; unexpected lookup failures stay plain errors.
+type scopeArgError struct{ msg string }
+
+func (e *scopeArgError) Error() string { return e.msg }
+
 func authorizeRetrievalDatasets(ctx context.Context, db *gorm.DB, datasetIDs []string) error {
 	userID := ""
 	if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
@@ -51,14 +59,14 @@ func (a *NLPRetrievalAdapter) checkDocumentScope(ctx context.Context, db *gorm.D
 	}
 	doc, err := dao.NewDocumentDAO().GetByID(ctx, db, documentID)
 	if err != nil || doc == nil || doc.Status == nil || *doc.Status != string(entity.StatusValid) {
-		return scopedDocument{}, fmt.Errorf("document is unavailable for scoped tools")
+		return scopedDocument{}, &scopeArgError{"this document_id is unavailable; retry with document_id from the retrieval result"}
 	}
 	if err := authorizeRetrievalDatasets(ctx, db, []string{doc.KbID}); err != nil {
 		return scopedDocument{}, err
 	}
 	applies, err := scope.AppliesTo([]string{doc.KbID})
 	if err != nil || !applies || (datasetID != "" && datasetID != doc.KbID) {
-		return scopedDocument{}, fmt.Errorf("document is outside the selected dataset scope")
+		return scopedDocument{}, &scopeArgError{"document is outside the selected dataset scope; retry with document_id from the retrieval result"}
 	}
 	// Authorize against the floor filter: document tools must accept any
 	// document a declared-relaxable retrieval could legitimately return,
@@ -77,7 +85,7 @@ func (a *NLPRetrievalAdapter) checkDocumentScope(ctx context.Context, db *gorm.D
 				return scopedDocument{datasetID: doc.KbID, documentID: doc.ID, documentName: name}, nil
 			}
 		}
-		return scopedDocument{}, fmt.Errorf("document does not match the explicit request filters")
+		return scopedDocument{}, &scopeArgError{"document does not match the request filters; retry with document_id from the retrieval result"}
 	}
 	name := ""
 	if doc.Name != nil {
@@ -92,7 +100,7 @@ func authorizeScopedMCP(ctx context.Context, name string, raw json.RawMessage) (
 	}
 	var args map[string]any
 	if err := json.Unmarshal(raw, &args); err != nil || args == nil {
-		return nil, fmt.Errorf("invalid scoped document tool arguments")
+		return nil, &scopeArgError{"invalid document tool arguments"}
 	}
 	switch name {
 	case "document_search", "document_read", "file_sheets", "file_preview", "file_query":
@@ -102,20 +110,20 @@ func authorizeScopedMCP(ctx context.Context, name string, raw json.RawMessage) (
 		// arguments would smuggle a dataset reference past enforcement.
 		for _, key := range []string{"document_id", "document_name", "dataset_id", "kb_id"} {
 			if _, exists := args[key]; exists {
-				return nil, fmt.Errorf("MCP tool %q does not support explicit request scope", name)
+				return nil, &scopeArgError{fmt.Sprintf("tool %q does not accept document or dataset arguments; call it without them", name)}
 			}
 		}
 		return raw, nil
 	}
 	docID, ok := args["document_id"].(string)
 	if !ok || strings.TrimSpace(docID) == "" {
-		return nil, fmt.Errorf("scoped document tools require document_id from a scoped retrieval result")
+		return nil, &scopeArgError{"document_id is required: reuse a document_id exactly as returned by the retrieval tool result"}
 	}
 	datasetID := ""
 	if value, exists := args["dataset_id"]; exists {
 		datasetID, ok = value.(string)
 		if !ok {
-			return nil, fmt.Errorf("scoped document tools require a string dataset_id")
+			return nil, &scopeArgError{"dataset_id must be a string taken from the retrieval result"}
 		}
 	}
 	svc := GetRetrievalService()
@@ -133,7 +141,7 @@ func authorizeScopedMCP(ctx context.Context, name string, raw json.RawMessage) (
 		return nil, err
 	}
 	if trusted.datasetID == "" || trusted.documentID == "" {
-		return nil, fmt.Errorf("document scope checker returned no document identity")
+		return nil, &scopeArgError{"document identity could not be resolved; retry with document_id from the retrieval result"}
 	}
 	args["document_id"] = trusted.documentID
 	args["dataset_id"] = trusted.datasetID
