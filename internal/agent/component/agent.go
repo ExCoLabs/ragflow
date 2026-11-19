@@ -417,7 +417,9 @@ func (m *roundLimitedChatModel) roundInput(input []*schema.Message) []*schema.Me
 	}
 	final := make([]*schema.Message, 0, len(input)+1)
 	final = append(final, input...)
-	return append(final, schema.SystemMessage("The configured tool-call budget is exhausted. Do not call any more tools. Produce your final answer using the evidence already collected. State any missing evidence or uncertainty; do not claim that unperformed searches were completed."))
+	// User role: providers reject a system message outside position 0, and
+	// this instruction always lands at the end of the conversation.
+	return append(final, schema.UserMessage("The configured tool-call budget is exhausted. Do not call any more tools. Produce your final answer using the evidence already collected. State any missing evidence or uncertainty; do not claim that unperformed searches were completed."))
 }
 
 // scanAllStreamForToolCall consumes the whole model response, then branches
