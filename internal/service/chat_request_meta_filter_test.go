@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"testing"
 
+	"ragflow/internal/common"
 	"ragflow/internal/entity"
 )
 
@@ -90,6 +91,33 @@ func TestApplyRequestMetaDataFilterAbsentKeepsChatFilter(t *testing.T) {
 	for _, kwargs := range []map[string]interface{}{{}, {"meta_data_filter": nil}} {
 		if err := applyRequestMetaDataFilter(dialog, kwargs); err != nil || dialog.MetaDataFilter != &stored {
 			t.Fatalf("kwargs %v: the chat's filter must stay (err %v)", kwargs, err)
+		}
+	}
+}
+
+func TestDescribeAppliedMetaFilter(t *testing.T) {
+	cases := []struct {
+		name string
+		diag common.MetadataFilterDiagnostic
+		want string
+	}{
+		{"nothing applied", common.MetadataFilterDiagnostic{Method: "disabled", Status: "disabled"}, ""},
+		{"not generated", common.MetadataFilterDiagnostic{Method: "semi_auto", Status: "not_generated"}, ""},
+		{"applied", common.MetadataFilterDiagnostic{Status: "applied", Logic: "and", Conditions: []map[string]interface{}{
+			{"key": "project", "op": "in", "value": []interface{}{"2023_079 nemocnica bb"}},
+			{"key": "discipline", "op": "in", "value": []interface{}{"structure", "geotechnics"}},
+			{"key": "phase", "op": "=", "value": "rp"},
+		}}, "project in 2023_079 nemocnica bb; discipline in structure, geotechnics; phase = rp"},
+		{"or", common.MetadataFilterDiagnostic{Status: "applied", Logic: "or", Conditions: []map[string]interface{}{
+			{"key": "ext", "op": "=", "value": "pdf"}, {"key": "ext", "op": "empty"},
+		}}, "ext = pdf OR ext empty"},
+		{"no matches", common.MetadataFilterDiagnostic{Status: "no_matches", Logic: "and", Conditions: []map[string]interface{}{
+			{"key": "project", "op": "in", "value": []string{"x"}},
+		}}, "project in x (no matching documents)"},
+	}
+	for _, c := range cases {
+		if got := describeAppliedMetaFilter(c.diag); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
 	}
 }
