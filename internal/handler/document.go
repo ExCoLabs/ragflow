@@ -634,6 +634,7 @@ func (h *DocumentHandler) ListDocuments(c *gin.Context) {
 	if c.Query("type") == "filter" {
 		filters, total, err := h.documentService.GetDocumentFiltersByDatasetID(ctx, opts)
 		if err != nil {
+			common.Warn("Document filters failed", zap.String("dataset_id", datasetID), zap.Int("doc_ids", len(opts.DocIDs)), zap.Error(err))
 			common.ResponseWithCodeData(c, common.CodeExceptionError, map[string]interface{}{"total": 0, "filter": map[string]interface{}{}}, "failed to get document filters")
 			return
 		}
