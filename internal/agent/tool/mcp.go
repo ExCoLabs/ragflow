@@ -23,6 +23,7 @@
 package tool
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -153,6 +154,13 @@ func (m *MCPToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}
 	argsJSON, mErr = authorizeScopedMCP(ctx, m.mcpTool.Name, argsJSON)
 	if mErr != nil {
+		var argErr *scopeArgError
+		if errors.As(mErr, &argErr) {
+			// The model supplied document arguments the scope rejects;
+			// answer as tool output so it can correct the call instead
+			// of failing the whole run.
+			return "scope error: " + argErr.Error(), nil
+		}
 		return "", mErr
 	}
 	res, err := mcpclient.CallTool(ctx, mcpclient.CallOptions{

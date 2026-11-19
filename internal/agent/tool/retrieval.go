@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"ragflow/internal/dao"
+	"regexp"
 	"strings"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -284,6 +285,10 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			Error: err.Error(),
 		}), err
 	}
+	// Duplicate document variants ((N).pdf copies of the same file) can
+	// crowd top-N on large datasets; cap chunks per normalized document
+	// name so distinct documents keep their slots. Rank order is preserved.
+	chunks = capChunksPerDocument(chunks, maxChunksPerDocument)
 	filtersRelaxed := diagnostics != nil &&
 		(diagnostics.RelaxationAttempted || len(diagnostics.ScopeDroppedKeys) > 0)
 	common.Debug("agent retrieval tool: search result",
@@ -713,4 +718,34 @@ func stubJSON(r retrievalResult) string {
 		return fmt.Sprintf(`{"_ERROR":"retrieval: marshal stub result: %s","stub":true}`, err)
 	}
 	return string(b)
+}
+
+// maxChunksPerDocument bounds how many top-ranked chunks a single
+// (normalized) document may occupy in one retrieval result.
+const maxChunksPerDocument = 2
+
+var dupSuffixRe = regexp.MustCompile(`\(\d+\)(\.[A-Za-z0-9]+)?$`)
+
+// capChunksPerDocument keeps at most max chunks per logical document,
+// identified by normalized document name (duplicate "(N)" file variants
+// count as one) with document_id as fallback when no name is present.
+func capChunksPerDocument(chunks []RetrievalChunk, max int) []RetrievalChunk {
+	if max <= 0 {
+		return chunks
+	}
+	seen := map[string]int{}
+	out := chunks[:0]
+	for _, c := range chunks {
+		key := c.DocumentName
+		if key == "" {
+			key = c.DocumentID
+		}
+		key = dupSuffixRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(key)), "$1")
+		if seen[key] >= max {
+			continue
+		}
+		seen[key]++
+		out = append(out, c)
+	}
+	return out
 }

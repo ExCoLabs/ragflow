@@ -131,9 +131,9 @@ func TestScopedMCPRejectsBeforeNetwork(t *testing.T) {
 	defer server.Close()
 	adapter := NewMCPToolAdapterFull(mcpclient.Tool{Name: "document_read"}, server.URL, nil, time.Second, server.Client())
 	adapter.SetVisibleName("document_read_alias")
-	_, err := adapter.InvokableRun(scopedToolContext(t, "owner", "kb"), `{"document_name":"unverified.pdf"}`)
-	if err == nil || !strings.Contains(err.Error(), "require document_id") || calls != 0 {
-		t.Fatalf("request escaped before scope validation: calls=%d error=%v", calls, err)
+	out, err := adapter.InvokableRun(scopedToolContext(t, "owner", "kb"), `{"document_name":"unverified.pdf"}`)
+	if err != nil || !strings.Contains(out, "document_id") || calls != 0 {
+		t.Fatalf("request escaped before scope validation: calls=%d err=%v out=%q", calls, err, out)
 	}
 }
 
