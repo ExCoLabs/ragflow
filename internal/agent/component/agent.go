@@ -2759,6 +2759,13 @@ func agentToolObject(item map[string]any) (string, map[string]any, bool) {
 		}
 		toolParams["function_name"] = strings.TrimSpace(fn)
 	}
+	// Every retrieval instance shares component_name "Retrieval", and params
+	// are keyed by tool name: under the component name the last instance
+	// would overwrite the others and the agent would lose those datasets.
+	if fn, _ := toolParams["function_name"].(string); strings.EqualFold(toolName, "Retrieval") && strings.TrimSpace(fn) != "" {
+		toolParams["component_name"] = toolName
+		toolName = strings.TrimSpace(fn)
+	}
 	return toolName, toolParams, true
 }
 

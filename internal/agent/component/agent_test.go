@@ -1632,3 +1632,33 @@ func TestRoundLimitedModelRetriesEmptyRound(t *testing.T) {
 		t.Fatalf("stream calls = %v, want one empty-round retry", inner)
 	}
 }
+
+// TestAgent_CanvasRetrievalToolsKeepTheirOwnDatasets covers the canvas DSL
+// shape, where every retrieval instance shares component_name "Retrieval".
+func TestAgent_CanvasRetrievalToolsKeepTheirOwnDatasets(t *testing.T) {
+	p := agentParamFromMap(map[string]any{
+		"tools": []any{
+			map[string]any{"component_name": "Retrieval", "name": "search_archa_metodika", "params": map[string]any{
+				"function_name": "search_archa_metodika", "description": "Metodika a predpisy.", "kb_ids": []any{"kb-metodika"},
+			}},
+			map[string]any{"component_name": "Retrieval", "name": "search_archa_data", "params": map[string]any{
+				"function_name": "search_archa_data", "description": "Projektová dokumentácia.", "kb_ids": []any{"kb-data"},
+			}},
+		},
+	})
+	tools, err := buildAgentTools(t.Context(), p)
+	if err != nil {
+		t.Fatalf("buildAgentTools: %v", err)
+	}
+	datasets := make(map[string]string)
+	for _, tool := range tools {
+		info, err := tool.Info(t.Context())
+		if err != nil {
+			t.Fatalf("tool.Info: %v", err)
+		}
+		datasets[info.Name] = fmt.Sprint(info.Extra["dataset_ids"])
+	}
+	if len(datasets) != 2 || datasets["search_archa_metodika"] != "[kb-metodika]" || datasets["search_archa_data"] != "[kb-data]" {
+		t.Fatalf("retrieval tools = %v, want each instance with its own dataset", datasets)
+	}
+}
