@@ -50,6 +50,9 @@ func TestAgentMCPModelDispatch(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+authToken {
 			t.Errorf("Authorization = %q, want MCP bearer token", got)
 		}
+		if got := r.Header.Get("X-Run"); got != "tenant/canvas/session" {
+			t.Errorf("X-Run = %q, want runtime user/canvas/session", got)
+		}
 		if r.Method == "DELETE" {
 			w.WriteHeader(204)
 			return
@@ -81,7 +84,7 @@ func TestAgentMCPModelDispatch(t *testing.T) {
 	pinned := utility.PinnedHTTPClient
 	utility.PinnedHTTPClient = func(string, string, time.Duration) *http.Client { return mcp.Client() }
 	t.Cleanup(func() { utility.PinnedHTTPClient = pinned })
-	if err := db.Create(&entity.MCPServer{ID: "mcp", TenantID: "tenant", Name: "route server", URL: mcp.URL, ServerType: mcpclient.TransportStreamableHTTP, Headers: entity.JSONMap{"Authorization": "Bearer ${authorization_token}"}, Variables: entity.JSONMap{"authorization_token": authToken}}).Error; err != nil {
+	if err := db.Create(&entity.MCPServer{ID: "mcp", TenantID: "tenant", Name: "route server", URL: mcp.URL, ServerType: mcpclient.TransportStreamableHTTP, Headers: entity.JSONMap{"Authorization": "Bearer ${authorization_token}", "X-Run": "${sys_user_id}/${sys_canvas_id}/${sys_session_id}"}, Variables: entity.JSONMap{"authorization_token": authToken}}).Error; err != nil {
 		t.Fatal(err)
 	}
 	addAgentMCPPermissionFixtures(t, db)
@@ -89,6 +92,7 @@ func TestAgentMCPModelDispatch(t *testing.T) {
 	state.Sys["tenant_id"] = "tenant"
 	state.Sys["user_id"] = "tenant"
 	state.Sys["canvas_id"] = "canvas"
+	state.Sys["session_id"] = "session"
 	ctx := withStateForTest(t.Context(), state)
 	p := mergeAgentParam(AgentParam{}, map[string]any{"mcp": []any{map[string]any{"mcp_id": "mcp", "tools": map[string]any{"route": map[string]any{"name": "route", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"origin": map[string]any{"type": "string"}}, "required": []string{"origin"}}}}}}})
 	tools, err := buildAgentTools(ctx, p)
@@ -296,5 +300,16 @@ func addAgentMCPPermissionFixtures(t *testing.T, db *gorm.DB) {
 		ID: "canvas", UserID: "tenant", Permission: string(entity.TenantPermissionMe),
 	}).Error; err != nil {
 		t.Fatalf("create canvas permission fixture: %v", err)
+	}
+}
+
+func TestAgentDeferredTimeoutFromEnv(t *testing.T) {
+	t.Setenv("RAGFLOW_AGENT_TIMEOUT", "30m")
+	if got := agentDeferredTimeout(); got != 30*time.Minute {
+		t.Fatalf("timeout = %v, want 30m", got)
+	}
+	t.Setenv("RAGFLOW_AGENT_TIMEOUT", "junk")
+	if got := agentDeferredTimeout(); got != defaultAgentDeferredTimeout {
+		t.Fatalf("timeout = %v, want default", got)
 	}
 }
