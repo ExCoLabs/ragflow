@@ -195,6 +195,27 @@ func (h *UserHandler) oauthCallback(c *gin.Context, channel string) {
 	}
 	operationLog.ResourceName = info.Email
 
+	var groupPlan *oauth.TeamPlan
+	if channelCfg.GroupSync.RequireMappedGroup {
+		syncer := oauth.GetGroupSyncer(channel, channelCfg)
+		if syncer == nil || !syncer.Applies(info.Email) {
+			fail("access_denied")
+			return
+		}
+		lookupCtx, cancel := context.WithTimeout(ctx, groupSyncTimeout)
+		groupPlan, err = syncer.Plan(lookupCtx, info)
+		cancel()
+		if err != nil {
+			common.Warn("SSO access group lookup failed", zap.String("channel", channel))
+			fail("group_lookup_failed")
+			return
+		}
+		if !groupPlan.HasMappedGroup {
+			fail("access_denied")
+			return
+		}
+	}
+
 	user, created, err := h.userService.LoginOAuthUser(ctx, channel, info, cfg.OAuthAutoRegister())
 	switch {
 	case errors.Is(err, service.ErrOAuthRegistrationDisabled):
@@ -209,7 +230,10 @@ func (h *UserHandler) oauthCallback(c *gin.Context, channel string) {
 		return
 	}
 	operationLog.UserID = user.ID
-	syncGroups(ctx, h.userService, channel, channelCfg, user, info)
+	if err := syncGroups(ctx, h.userService, channel, channelCfg, user, info, groupPlan); err != nil && channelCfg.GroupSync.RequireMappedGroup {
+		fail("group_sync_failed")
+		return
+	}
 
 	authToken, err := common.DumpAccessToken(*user.AccessToken, "", secretKey)
 	if err != nil {
@@ -233,21 +257,25 @@ func (h *UserHandler) oauthCallback(c *gin.Context, channel string) {
 }
 
 // syncGroups applies the channel's group -> team mapping to the user. It is
-// bounded by groupSyncTimeout and never fails the login: errors are logged and
-// the user keeps the memberships they had.
-func syncGroups(ctx context.Context, userService *service.UserService, channel string, cfg config.OAuthChannelConfig, user *entity.User, info *oauth.UserInfo) {
+// bounded by groupSyncTimeout; the caller rejects login on failure when
+// mapped group membership is required.
+func syncGroups(ctx context.Context, userService *service.UserService, channel string, cfg config.OAuthChannelConfig, user *entity.User, info *oauth.UserInfo, plan *oauth.TeamPlan) error {
 	syncer := oauth.GetGroupSyncer(channel, cfg)
 	if syncer == nil || !syncer.Applies(user.Email) {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), groupSyncTimeout)
 	defer cancel()
-	plan, err := syncer.Plan(ctx, info)
+	var err error
+	if plan == nil {
+		plan, err = syncer.Plan(ctx, info)
+	}
 	if err == nil {
 		err = userService.SyncTeamMemberships(ctx, user, plan)
 	}
 	if err != nil {
-		common.Warn("SSO group sync failed; login continues", zap.String("user_id", user.ID),
+		common.Warn("SSO group sync failed", zap.String("user_id", user.ID),
 			zap.String("channel", channel), zap.Error(err))
 	}
+	return err
 }

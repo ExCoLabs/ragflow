@@ -51,7 +51,8 @@ type OAuthChannelConfig struct {
 // named by their owner's email) mapped from the groups they belong to, and
 // removed from mapped teams they no longer qualify for.
 type GroupSyncConfig struct {
-	Enabled bool `mapstructure:"enabled"`
+	Enabled            bool `mapstructure:"enabled"`
+	RequireMappedGroup bool `mapstructure:"require_mapped_group"`
 	// Source is "graph" (Microsoft Graph checkMemberGroups, the default) or
 	// "claim" (the groups claim of the ID token / userinfo, falling back to
 	// Graph on an Entra group overage).
@@ -121,6 +122,9 @@ func (c *Config) ParseOAuthConfig(v *viper.Viper) error {
 		}
 		if ch.GroupSync.Enabled {
 			applyGroupSyncEnv(&ch.GroupSync)
+		}
+		if ch.GroupSync.RequireMappedGroup && (!ch.GroupSync.Enabled || len(ch.GroupSync.Mapping) == 0) {
+			return fmt.Errorf("oauth channel %s: require_mapped_group needs enabled group sync and a nonempty mapping", name)
 		}
 		c.oAuth.Channels[name] = ch
 	}

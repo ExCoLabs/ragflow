@@ -43,6 +43,73 @@ func groupSyncChannel(name string, g *oauthtest.Graph, gs config.GroupSyncConfig
 	}
 }
 
+func TestGroupSyncMappedMembershipExcludesDefaultTeams(t *testing.T) {
+	g := oauthtest.NewGraph(t)
+	g.Members["member@example.com"] = []string{groupEngineering}
+	g.Members["nonmember@example.com"] = []string{}
+	syncer := oauth.GetGroupSyncer(groupSyncChannel(t.Name(), g, config.GroupSyncConfig{
+		Mapping:      map[string][]string{groupEngineering: {"everyone@example.com"}},
+		DefaultTeams: []string{"everyone@example.com"},
+	}))
+	for _, email := range []string{"member@example.com", "nonmember@example.com", "unknown@example.com"} {
+		plan, err := syncer.Plan(context.Background(), &oauth.UserInfo{Email: email})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.HasMappedGroup != (email == "member@example.com") {
+			t.Fatalf("mapped membership for %s = %v", email, plan.HasMappedGroup)
+		}
+	}
+}
+
+func TestGroupSyncAmbiguousDisplayNameDoesNotGrantMembership(t *testing.T) {
+	g := oauthtest.NewGraph(t)
+	g.Groups["Engineering"] = groupEngineering
+	g.Groups["engineering"] = groupSales
+	g.Members["member@example.com"] = []string{groupEngineering, groupSales}
+	syncer := oauth.GetGroupSyncer(groupSyncChannel(t.Name(), g, config.GroupSyncConfig{
+		Mapping: map[string][]string{"Engineering": {"eng-team@example.com"}},
+	}))
+	plan, err := syncer.Plan(context.Background(), &oauth.UserInfo{Email: "member@example.com"})
+	if err == nil && (plan.HasMappedGroup || len(plan.Desired) != 0) {
+		t.Fatal("ambiguous directory group granted membership")
+	}
+}
+
+func TestGroupSyncArchaAccessMatrix(t *testing.T) {
+	g := oauthtest.NewGraph(t)
+	g.Groups["ARCHA vyrobna"], g.Groups["ARCHA administrativna"] = groupEngineering, groupSales
+	syncer := oauth.GetGroupSyncer(groupSyncChannel(t.Name(), g, config.GroupSyncConfig{
+		Mapping: map[string][]string{
+			"ARCHA vyrobna":         {"group-projekty@example.com"},
+			"ARCHA administrativna": {"group-projekty@example.com", "group-navigo@example.com"},
+		},
+		DefaultTeams: []string{"group-projekty@example.com"},
+	}))
+	for _, tc := range []struct {
+		name   string
+		groups []string
+		teams  []string
+	}{
+		{"production", []string{groupEngineering}, []string{"group-projekty@example.com"}},
+		{"administration", []string{groupSales}, []string{"group-navigo@example.com", "group-projekty@example.com"}},
+		{"both", []string{groupEngineering, groupSales}, []string{"group-navigo@example.com", "group-projekty@example.com"}},
+		{"neither", []string{}, []string{"group-projekty@example.com"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			email := tc.name + "@example.com"
+			g.Members[email] = tc.groups
+			plan, err := syncer.Plan(context.Background(), &oauth.UserInfo{Email: email})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(plan.Desired, tc.teams) || plan.HasMappedGroup != (len(tc.groups) > 0) {
+				t.Fatalf("team plan = %+v", plan)
+			}
+		})
+	}
+}
+
 func TestGroupSyncPlanFromGraph(t *testing.T) {
 	g := oauthtest.NewGraph(t)
 	g.Groups["Sales Team"] = groupSales
