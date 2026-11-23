@@ -32,6 +32,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
+	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
 	"ragflow/internal/server"
@@ -39,7 +40,6 @@ import (
 	"ragflow/internal/service"
 	"ragflow/internal/service/oauth"
 	"ragflow/internal/service/oauth/oauthtest"
-	"ragflow/internal/common"
 )
 
 const oauthTestSecretKey = "oauth-handler-test-secret-key"
@@ -312,6 +312,7 @@ func TestOAuthCallbackGroupSyncAndDefaultModels(t *testing.T) {
 
 	env := setupOAuthTest(t, "true", "", fmt.Sprintf(`    group_sync:
       enabled: true
+      require_mapped_group: true
       graph_url: %q
       graph_token_url: %q
       default_teams: ["everyone@example.com"]
@@ -356,6 +357,153 @@ user_default_llm:
 	}
 	if tenant.LLMID != "chat-1@main@OpenAI-API-Compatible" || tenant.EmbdID != "embed-1@main@OpenAI-API-Compatible" {
 		t.Errorf("tenant defaults = %q / %q", tenant.LLMID, tenant.EmbdID)
+	}
+}
+
+func TestOAuthRequiredGroupRejectsInvalidConfiguration(t *testing.T) {
+	t.Setenv("ENTRA_GROUP_SYNC", "")
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "service_conf.yaml")
+			data := fmt.Sprintf("oauth:\n  sso:\n    type: oidc\n    group_sync:\n      enabled: %t\n      require_mapped_group: true\n", enabled)
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := server.Init(path); err == nil || !strings.Contains(err.Error(), "require_mapped_group") {
+				t.Fatalf("configuration error = %v", err)
+			}
+		})
+	}
+}
+
+func TestOAuthCallbackRequiresMappedGroup(t *testing.T) {
+	const group = "44444444-4444-4444-4444-444444444444"
+	for _, tc := range []struct {
+		name      string
+		email     string
+		member    bool
+		existing  bool
+		graphDown bool
+	}{
+		{name: "nonmember", email: "new.user@example.com"},
+		{name: "existing nonmember", email: "new.user@example.com", existing: true},
+		{name: "outside domain", email: "new.user@external.com", member: true},
+		{name: "directory unavailable", email: "new.user@example.com", graphDown: true},
+		{name: "member", email: "new.user@example.com", member: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			graph := oauthtest.NewGraph(t)
+			graph.Members[tc.email] = []string{}
+			if tc.member {
+				graph.Members[tc.email] = []string{group}
+			}
+			t.Setenv("ENTRA_GROUP_SYNC", "")
+			t.Setenv("SSO_DOMAINS", "example.com")
+			graphURL := graph.URL()
+			if tc.graphDown {
+				graphURL = "http://127.0.0.1:1/v1.0"
+			}
+			env := setupOAuthTest(t, "true", "", fmt.Sprintf(`    group_sync:
+      enabled: true
+      require_mapped_group: true
+      graph_url: %q
+      graph_token_url: %q
+      default_teams: ["everyone@example.com"]
+      mapping:
+        %q: ["eng-team@example.com"]
+`, graphURL, graph.TokenURL(), group))
+			env.provider.Email = tc.email
+			if tc.existing {
+				token := "original-token"
+				if err := env.db.Create(&entity.User{ID: "existing", Email: tc.email, IsActive: "1", AccessToken: &token}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			allowed := tc.member && !tc.graphDown && strings.HasSuffix(tc.email, "@example.com")
+			for attempt := 0; attempt < 2; attempt++ {
+				state, cookies := env.login(t)
+				response := env.callback(state, cookies)
+				if allowed {
+					userByToken(t, env.db, expectRedirect(t, response, "auth"))
+					continue
+				}
+				want := "access_denied"
+				if tc.graphDown {
+					want = "group_lookup_failed"
+				}
+				if got := expectRedirect(t, response, "error"); got != want {
+					t.Fatalf("error = %q, want %q", got, want)
+				}
+				for _, cookie := range response.Result().Cookies() {
+					if cookie.Name == "ragflow_auth" && cookie.Value != "" {
+						t.Fatal("denied login issued an auth cookie")
+					}
+				}
+			}
+			if allowed {
+				if got := graph.CallCount("check"); got != 2 {
+					t.Fatalf("directory checks = %d, want one per login", got)
+				}
+				graph.Members[tc.email] = []string{}
+				state, cookies := env.login(t)
+				if got := expectRedirect(t, env.callback(state, cookies), "error"); got != "access_denied" {
+					t.Fatalf("revoked member error = %q", got)
+				}
+				return
+			}
+			wantUsers := int64(0)
+			if tc.existing {
+				wantUsers = 1
+				var user entity.User
+				if err := env.db.First(&user, "id = ?", "existing").Error; err != nil || user.AccessToken == nil || *user.AccessToken != "original-token" {
+					t.Fatal("denied login modified existing user token")
+				}
+			}
+			if got := countRows(t, env.db, &entity.User{}, "1 = 1"); got != wantUsers {
+				t.Fatalf("users = %d, want %d", got, wantUsers)
+			}
+			if countRows(t, env.db, &entity.UserTenant{}, "1 = 1") != 0 {
+				t.Fatal("denied login created team memberships")
+			}
+		})
+	}
+}
+
+func TestOAuthRequiredGroupSyncFailureBlocksTokenIssuance(t *testing.T) {
+	graph := oauthtest.NewGraph(t)
+	const group = "55555555-5555-5555-5555-555555555555"
+	graph.Members["existing@example.com"] = []string{group}
+	t.Setenv("ENTRA_GROUP_SYNC", "")
+	t.Setenv("SSO_DOMAINS", "example.com")
+	env := setupOAuthTest(t, "true", "", fmt.Sprintf(`    group_sync:
+      enabled: true
+      require_mapped_group: true
+      graph_url: %q
+      graph_token_url: %q
+      mapping:
+        %q: ["eng-team@example.com"]
+`, graph.URL(), graph.TokenURL(), group))
+	env.provider.Email = "existing@example.com"
+	token := "original-token"
+	if err := env.db.Create(&entity.User{ID: "existing", Email: env.provider.Email, IsActive: "1", AccessToken: &token}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := env.db.Callback().Query().Before("gorm:query").Register("deny_group_sync", func(tx *gorm.DB) {
+		if tx.Statement.Table == "user_tenant" {
+			tx.AddError(fmt.Errorf("team membership database unavailable"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, cookies := env.login(t)
+	response := env.callback(state, cookies)
+	if got := expectRedirect(t, response, "error"); got != "group_sync_failed" {
+		t.Fatalf("error = %q", got)
+	}
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == oauthAuthCookie && cookie.Value != "" {
+			t.Fatal("failed membership sync issued an auth cookie")
+		}
 	}
 }
 

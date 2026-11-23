@@ -52,6 +52,7 @@ var errUserNotInDirectory = errors.New("user not found in directory")
 // TeamPlan is the outcome of a group lookup: the teams (owner emails) the
 // user must belong to and the teams the sync manages.
 type TeamPlan struct {
+	HasMappedGroup bool
 	// Desired are the mapped teams of the user's groups plus the default teams.
 	Desired []string
 	// Managed are all mapping targets; memberships in managed teams outside
@@ -127,6 +128,7 @@ func (s *GroupSyncer) Plan(ctx context.Context, info *UserInfo) (*TeamPlan, erro
 	}
 	for key, teams := range s.cfg.Mapping {
 		if memberOf[key] {
+			plan.HasMappedGroup = true
 			for _, t := range normalizeEmails(teams) {
 				desired[t] = true
 			}
@@ -418,7 +420,7 @@ func (g *graphClient) groupIDByName(ctx context.Context, name string) (string, e
 		return "", errors.New("no group with this display name")
 	case 1:
 	default:
-		common.Warn("Several groups share a display name; using the first", zap.String("group", name))
+		return "", errors.New("several groups share this display name")
 	}
 	return resp.Value[0].ID, nil
 }

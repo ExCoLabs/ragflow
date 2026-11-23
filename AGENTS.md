@@ -162,3 +162,8 @@ npm run type-check
 - Collapse duplicate implementations to one path.
 - Drop stale comments and documentation that describe a superseded design.
 - Keep exported APIs only when the current code actually needs them.
+
+## SSO access gate (OP#1538)
+- `oauth.<channel>.group_sync.require_mapped_group: true` requires membership in at least one mapped identity-provider group before OAuth account creation or token rotation. Default teams do not grant login access; users outside the configured sync domains, directory lookup failures and team-membership synchronization failures are denied. The gate requires enabled group sync and a nonempty mapping, including mappings supplied through `ENTRA_GROUP_SYNC`.
+- This login gate does not revoke previously issued sessions. Deploy the supporting backend before enabling it in ARCHA configuration; verify an allowed user and two consecutive denied logins with an unassigned test user before considering production remediation complete.
+- Verification: `bash build.sh --test ./internal/handler/... ./internal/service/oauth/... ./internal/server/config/...`.
