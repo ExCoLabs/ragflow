@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"ragflow/internal/dao"
 	"regexp"
 	"sort"
@@ -49,6 +50,15 @@ import (
 
 const maxSubAgentDepth = 8
 const defaultAgentDeferredTimeout = 10 * time.Minute
+
+// agentDeferredTimeout lets long tool-driven agents (document assistants) run past
+// the default; RAGFLOW_AGENT_TIMEOUT takes a Go duration such as "30m".
+func agentDeferredTimeout() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("RAGFLOW_AGENT_TIMEOUT"))); err == nil && d > 0 {
+		return d
+	}
+	return defaultAgentDeferredTimeout
+}
 
 // Citation grounding prompt size guards. The grounding prompt embeds
 // retrieved chunks plus the full answer; a single oversized call
@@ -1870,7 +1880,7 @@ func (c *AgentComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[str
 	if runtime.ComponentExecutionOptionsFromContext(ctx).DeferAgentToMessage {
 		// Preserve the Agent-class duration installed by the node wrapper, then
 		// start a fresh deadline when Message opens the lazy stream.
-		timeout := defaultAgentDeferredTimeout
+		timeout := agentDeferredTimeout()
 		if deadline, ok := ctx.Deadline(); ok {
 			if remaining := time.Until(deadline); remaining > 0 {
 				timeout = remaining

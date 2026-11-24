@@ -83,6 +83,12 @@ func buildAgentMCPTools(ctx context.Context, db *gorm.DB, raw any, timeout time.
 		for key, value := range server.Variables {
 			variables[key] = fmt.Sprint(value)
 		}
+		// Lets a server's header templates (e.g. ${sys_session_id}) tell the MCP
+		// server which run and user a call belongs to; each call is its own MCP session.
+		sessionID, _ := state.Sys["session_id"].(string)
+		variables["sys_user_id"] = userID
+		variables["sys_canvas_id"] = canvasID
+		variables["sys_session_id"] = sessionID
 		allowPrivateHosts := servercfg.MCPAllowPrivateHosts()
 		for _, name := range slices.Sorted(maps.Keys(selection.Tools)) {
 			descriptor := selection.Tools[name]
