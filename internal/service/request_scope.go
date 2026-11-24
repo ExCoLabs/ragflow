@@ -8,18 +8,14 @@ import (
 
 	agruntime "ragflow/internal/agent/runtime"
 	"ragflow/internal/dao"
-	"ragflow/internal/entity"
 	"ragflow/internal/permission"
 )
 
 // requestScopeFingerprintKey is an inert root key stamped into the persisted
-// session DSL. It records which validated request scope the session's history
-// belongs to; it is bookkeeping, never the authority for the filter itself.
+// session DSL. It records the validated request scope of the session's latest
+// round; it is bookkeeping, never the authority for the filter itself, and a
+// session may change scope between rounds.
 const requestScopeFingerprintKey = "request_scope_fingerprint"
-
-// ErrAgentSessionScopeMismatch rejects reusing a session whose persisted
-// history was produced under a different validated retrieval scope.
-var ErrAgentSessionScopeMismatch = errors.New("agent session scope changed")
 
 // ErrRequestScopeInvalid rejects a request scope that fails preflight: filter
 // targets the agent cannot reach or datasets the caller or canvas owner may
@@ -32,32 +28,6 @@ func requestScopeFingerprint(ctx context.Context) string {
 		return ""
 	}
 	return scope.Fingerprint()
-}
-
-func sessionScopeFingerprint(session *entity.API4Conversation) string {
-	if session == nil || len(session.DSL) == 0 {
-		return ""
-	}
-	fingerprint, _ := session.DSL[requestScopeFingerprintKey].(string)
-	return fingerprint
-}
-
-// checkSessionScopeBoundary keeps a persisted session bound to the scope it
-// was created with. A scope change requires a new session so prior answers
-// and retrieval state cannot bleed across projects/phases. A fresh session
-// with no rounds may still adopt the first scope its caller sends.
-func checkSessionScopeBoundary(session *entity.API4Conversation, incoming string) error {
-	if session == nil {
-		return nil
-	}
-	stored := sessionScopeFingerprint(session)
-	if stored == incoming {
-		return nil
-	}
-	if incoming != "" && stored == "" && session.Round == 0 {
-		return nil
-	}
-	return fmt.Errorf("session %s was created with a different retrieval scope; start a new session: %w", session.ID, ErrAgentSessionScopeMismatch)
 }
 
 // scopedDatasetBindings collects the dataset ids statically bound to the

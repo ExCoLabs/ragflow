@@ -1469,9 +1469,6 @@ func (s *AgentService) RunAgent(ctx context.Context, userID, canvasID, sessionID
 		} else if err := checkAgentSessionRunPermission(ctx, userID, sessionID); err != nil {
 			return nil, fmt.Errorf("RunAgent: session %q not found: %w", sessionID, err)
 		}
-		if err := checkSessionScopeBoundary(existingSession, requestScopeFingerprint(ctx)); err != nil {
-			return nil, err
-		}
 	}
 	messageID := common.GenerateToken()
 	questionSaved := false
@@ -2627,6 +2624,8 @@ func (s *AgentService) persistAgentRunSession(
 		persisted := buildPersistedAgentDSL(runDSL, state)
 		if fingerprint := requestScopeFingerprint(ctx); fingerprint != "" {
 			persisted[requestScopeFingerprintKey] = fingerprint
+		} else {
+			delete(persisted, requestScopeFingerprintKey)
 		}
 		updates["dsl"] = persisted
 	}
