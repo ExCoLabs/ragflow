@@ -525,6 +525,7 @@ func emitAgentModelStreams(ctx context.Context, future react.MessageFuture, cite
 	done := make(chan error, 1)
 	go func() {
 		var firstErr error
+		reasonedBefore := false
 		iter := future.GetMessageStreams()
 		for {
 			msgStream, hasNext, err := iter.Next()
@@ -538,6 +539,7 @@ func emitAgentModelStreams(ctx context.Context, future react.MessageFuture, cite
 			if msgStream == nil {
 				continue
 			}
+			reasonedThisCall := false
 			for {
 				msg, err := msgStream.Recv()
 				if errors.Is(err, io.EOF) {
@@ -566,8 +568,13 @@ func emitAgentModelStreams(ctx context.Context, future react.MessageFuture, cite
 				// but still stream thinking so the client sees progress
 				// and the SSE connection stays alive.
 				if cite {
-					if msg.ReasoningContent != "" {
-						runtime.EmitAgentMessage(ctx, "", msg.ReasoningContent)
+					if delta := msg.ReasoningContent; delta != "" {
+						// Each tool round is a new model call; keep its reasoning apart.
+						if !reasonedThisCall && reasonedBefore {
+							delta = "\n\n" + delta
+						}
+						reasonedThisCall = true
+						runtime.EmitAgentMessage(ctx, "", delta)
 					}
 					continue
 				}
@@ -577,6 +584,7 @@ func emitAgentModelStreams(ctx context.Context, future react.MessageFuture, cite
 				runtime.EmitAgentMessage(ctx, msg.Content, msg.ReasoningContent)
 			}
 			msgStream.Close()
+			reasonedBefore = reasonedBefore || reasonedThisCall
 		}
 		done <- firstErr
 	}()
