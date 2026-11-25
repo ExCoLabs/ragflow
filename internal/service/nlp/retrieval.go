@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
@@ -200,7 +201,10 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		ChunkMeta:              req.ChunkMeta,
 		Language:               req.Language,
 	}
+	timings := retrievalTimingsFrom(ctx)
+	searchStart := time.Now()
 	searchResult, err := s.Search(ctx, searchReq)
+	timings.add(searchPhase, searchStart)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
@@ -222,7 +226,9 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		common.InfoCtx(ctx, "Retrieval candidates captured", zap.Int("count", len(searchResult.IDs)))
 	}
 
+	rerankStart := time.Now()
 	sim, termSimilarity, vectorSimilarity, err := s.scoreSearchResult(ctx, req, searchResult)
+	timings.add(rerankPhase, rerankStart)
 	if err != nil {
 		return nil, err
 	}
@@ -959,7 +965,9 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 			if similarityForGetVector <= 0 {
 				similarityForGetVector = 0.1
 			}
+			embedStart := time.Now()
 			matchDense, err := s.GetVector(ctx, req.Question, req.EmbeddingModel, knnTopK, numCandidates, similarityForGetVector)
+			retrievalTimingsFrom(ctx).add(embedPhase, embedStart)
 			if err != nil {
 				return nil, fmt.Errorf("GetVector failed: %w", err)
 			}

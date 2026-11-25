@@ -181,8 +181,18 @@ func BuildAll(names []string, perToolParams map[string]map[string]any) ([]einoto
 			return nil, err
 		}
 		tools = append(tools, t)
+		if owner, ok := t.(companionToolProvider); ok {
+			tools = append(tools, owner.CompanionTools()...)
+		}
 	}
 	return tools, nil
+}
+
+// companionToolProvider is implemented by tools that bring further tools
+// with them when listed on an Agent (a Retrieval tool with filter_args brings
+// its metadata value lister).
+type companionToolProvider interface {
+	CompanionTools() []einotool.BaseTool
 }
 
 // normalizeToolName returns the canonical registry key for a DSL or Agent
@@ -442,7 +452,7 @@ func buildRetrievalTool(params map[string]any) (einotool.BaseTool, error) {
 			"keywords_similarity_weight", "use_kg", "rerank_id", "empty_response",
 			"toc_enhance", "meta_data_filter", "retrieval_from", "memory_ids",
 			"kb_vars", "cross_languages", "function_name", "description", "meta",
-			"inputs", "outputs", "user_id":
+			"inputs", "outputs", "user_id", "filter_args":
 		default:
 			return nil, fmt.Errorf("agent tool: retrieval tool does not accept node-level param %s", key)
 		}
@@ -540,6 +550,16 @@ func buildRetrievalTool(params map[string]any) (einotool.BaseTool, error) {
 			return nil, fmt.Errorf("agent tool: retrieval tool requires retrieval_from to be dataset or memory")
 		}
 		defaults.RetrievalFrom = retrievalFrom
+	}
+	if value, ok := params["filter_args"]; ok && value != nil {
+		cfg, err := parseFilterArgs(value)
+		if err != nil {
+			return nil, fmt.Errorf("agent tool: retrieval config: %w", err)
+		}
+		if defaults.RetrievalFrom == "memory" {
+			return nil, fmt.Errorf("agent tool: retrieval config: filter_args applies to dataset retrieval only")
+		}
+		defaults.FilterArgs = cfg
 	}
 	return NewRetrievalToolWithDefaults(defaults), nil
 }

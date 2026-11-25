@@ -70,6 +70,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"ragflow/internal/agent/runtime"
 	"ragflow/internal/common"
@@ -100,6 +101,13 @@ type metadataScopeResolver interface {
 		kbs []*entity.Knowledgebase,
 		diagnostics *common.MetadataFilterDiagnostic,
 	) ([]string, *common.ChunkMetaScope, error)
+}
+
+// pushdownScopeResolver is the optional enhancer surface that resolves a
+// manual filter through the metadata index before falling back to
+// FilterDocuments. Only explicit-filter tools use it.
+type pushdownScopeResolver interface {
+	PushdownDocuments(ctx context.Context, filter map[string]any, baseDocIDs, kbIDs []string) ([]string, error)
 }
 
 // NLPRetrievalAdapter wraps *nlp.RetrievalService behind the
@@ -239,7 +247,17 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: request scope: %w", err)
 	}
-	scopeEnabled := req.ProjectID != "" || requestScoped
+	var modelConditions []map[string]any
+	if req.Explicit != nil {
+		modelConditions = req.Explicit.Conditions
+		timings := &nlp.RetrievalTimings{}
+		ctx = nlp.WithRetrievalTimings(ctx, timings)
+		defer func() {
+			trace := &req.Explicit.Trace
+			trace.Embed, trace.Search, trace.Rerank = timings.Snapshot()
+		}()
+	}
+	scopeEnabled := req.ProjectID != "" || requestScoped || len(modelConditions) > 0
 	// Dataset authorization must use the caller identity established by the
 	// agent run, not req.UserID, which is a configurable per-user memory filter.
 	if err := authorizeRetrievalDatasets(ctx, db, datasets.kbIDs); err != nil {
@@ -266,7 +284,9 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		}
 		scopeReq := req
 		scopeReq.DatasetIDs = datasets.kbIDs
+		scopeStart := time.Now()
 		scopeDocIDs, err = a.resolveProjectScope(ctx, scopeReq, docIDs)
+		req.Explicit.TraceScope(scopeStart, len(scopeDocIDs))
 		if err != nil {
 			return nil, err
 		}
@@ -313,10 +333,11 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	// quality better than chunk-count heuristics. Hard keys stay hard.
 	if requestScoped && len(req.ScopeDrop) > 0 {
 		filter, dropped := requestScope.FilterDropping(req.ScopeDrop)
+		filter = withModelConditions(filter, modelConditions)
 		attemptScopeIDs := scopeDocIDs
 		attemptDocIDs := docIDs
 		if filter != nil {
-			attemptScopeIDs, err = a.resolveHardScope(ctx, filter, docIDs, datasets.kbIDs, "request")
+			attemptScopeIDs, err = a.resolveAttemptScope(ctx, req, filter, docIDs, datasets.kbIDs)
 			if err != nil {
 				return nil, err
 			}
@@ -360,22 +381,26 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		usedLevel = level
 		attemptDocIDs := docIDs
 		attemptScopeIDs := scopeDocIDs
+		var filter map[string]any
 		if requestScoped {
-			filter := requestScope.FilterAtLevel(level)
-			if filter != nil {
-				attemptScopeIDs, err = a.resolveHardScope(ctx, filter, docIDs, datasets.kbIDs, "request")
-				if err != nil {
-					return nil, err
-				}
-				if len(attemptScopeIDs) == 0 {
-					continue
-				}
-				attemptDocIDs = attemptScopeIDs
-			} else {
-				// Open floor: every declared-relaxable key dropped; only the
-				// dataset binding and any project scope still narrow the pool.
-				attemptScopeIDs = append([]string(nil), docIDs...)
+			filter = requestScope.FilterAtLevel(level)
+		}
+		// Levels relax request keys only: the model's conditions ride along
+		// on every level.
+		filter = withModelConditions(filter, modelConditions)
+		if filter != nil {
+			attemptScopeIDs, err = a.resolveAttemptScope(ctx, req, filter, docIDs, datasets.kbIDs)
+			if err != nil {
+				return nil, err
 			}
+			if len(attemptScopeIDs) == 0 {
+				continue
+			}
+			attemptDocIDs = attemptScopeIDs
+		} else if requestScoped {
+			// Open floor: every declared-relaxable key dropped; only the
+			// dataset binding and any project scope still narrow the pool.
+			attemptScopeIDs = append([]string(nil), docIDs...)
 		}
 		out, err = a.retrieve(ctx, req, datasets, attemptDocIDs, attemptScopeIDs, scopeEnabled, chatModel, query, rankFeature, rerankModel, embeddingModel, fetchN, topN)
 		if err != nil {
@@ -396,6 +421,33 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 		)
 	}
 	return out, nil
+}
+
+// withModelConditions ANDs the model's explicit conditions onto a request
+// filter level, so one resolution yields their intersection. Either side may
+// be absent; nil means nothing narrows.
+func withModelConditions(filter map[string]any, conditions []map[string]any) map[string]any {
+	if len(conditions) == 0 {
+		return filter
+	}
+	var manual []any
+	if filter != nil {
+		requested, _ := filter["manual"].([]any)
+		manual = append(manual, requested...)
+	}
+	for _, condition := range conditions {
+		manual = append(manual, condition)
+	}
+	return map[string]any{"method": "manual", "logic": "and", "manual": manual}
+}
+
+// resolveAttemptScope resolves one attempt's request filter (with any model
+// conditions already ANDed in) to its documents.
+func (a *NLPRetrievalAdapter) resolveAttemptScope(ctx context.Context, req RetrievalRequest, filter map[string]any, base, kbIDs []string) ([]string, error) {
+	start := time.Now()
+	ids, err := a.resolveScope(ctx, filter, base, kbIDs, "request", req.Explicit != nil)
+	req.Explicit.TraceScope(start, len(ids))
+	return ids, err
 }
 
 // requestScopeSparseMin bounds the relaxation trigger: a scoped retrieval
@@ -431,10 +483,14 @@ func (a *NLPRetrievalAdapter) retrieve(
 ) ([]RetrievalChunk, error) {
 	var err error
 	chunkMeta := req.ChunkMeta
+	if req.Explicit != nil {
+		req.Explicit.Trace.Attempts++
+	}
 	if len(req.MetaDataFilter) > 0 {
 		if a.enhancer == nil {
 			return nil, fmt.Errorf("retrieval: metadata filter service is not configured")
 		}
+		filterStart := time.Now()
 		if scoper, ok := a.enhancer.(metadataScopeResolver); ok {
 			var filterMeta *common.ChunkMetaScope
 			docIDs, filterMeta, err = scoper.ScopeDocuments(
@@ -446,12 +502,18 @@ func (a *NLPRetrievalAdapter) retrieve(
 				ctx, req.MetaDataFilter, query, chatModel, append([]string(nil), docIDs...), datasets.kbIDs, req.Diagnostics,
 			)
 		}
+		if req.Explicit != nil {
+			req.Explicit.Trace.Scope += time.Since(filterStart)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("retrieval: filter documents: %w", err)
 		}
 	}
 	if scopeEnabled {
 		docIDs = intersectProjectScope(scopeDocIDs, docIDs)
+		if req.Explicit != nil {
+			req.Explicit.Trace.ScopeDocs = len(docIDs)
+		}
 		if len(docIDs) == 0 {
 			return []RetrievalChunk{}, nil
 		}

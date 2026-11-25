@@ -24,6 +24,7 @@ import (
 	"ragflow/internal/dao"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -67,9 +68,16 @@ type retrievalArgs struct {
 	// ScopeDrop lets the model explicitly relax declared request-scope keys
 	// (see `relax` in the request's meta_data_filter) when strict evidence
 	// looks insufficient. Undeclared keys are ignored server-side.
-	ScopeDrop     []string `json:"scope_drop,omitempty"`
-	RetrievalFrom string   `json:"retrieval_from,omitempty"`
-	EmptyResponse string   `json:"empty_response,omitempty"`
+	ScopeDrop []string `json:"scope_drop,omitempty"`
+	// Filters are the model's explicit metadata conditions. Kept raw so a
+	// malformed value cannot fail argument parsing for tools that never
+	// declared filter_args, where it is ignored.
+	Filters       json.RawMessage `json:"filters,omitempty"`
+	RetrievalFrom string          `json:"retrieval_from,omitempty"`
+	EmptyResponse string          `json:"empty_response,omitempty"`
+	// FilterArgs is the DSL's filter_args. Never read from model arguments:
+	// the allow-list is the tool author's.
+	FilterArgs *filterArgsConfig `json:"-"`
 	// FunctionName is the agent-visible tool name from the DSL. It is not
 	// exposed to the model as part of the tool arguments.
 	FunctionName string `json:"-"`
@@ -90,8 +98,10 @@ type retrievalResult struct {
 	// it may still drop via scope_drop on a follow-up call.
 	ScopeDroppedKeys []string `json:"scope_dropped_keys,omitempty"`
 	ScopeRelaxable   []string `json:"scope_relaxable,omitempty"`
-	Stub             bool     `json:"stub,omitempty"`
-	Error            string   `json:"_ERROR,omitempty"`
+	// Diagnostics is set only by explicit-filter tools (filter_args).
+	Diagnostics *retrievalDiagnostics `json:"diagnostics,omitempty"`
+	Stub        bool                  `json:"stub,omitempty"`
+	Error       string                `json:"_ERROR,omitempty"`
 }
 
 // chunkPayload is the minimal chunk shape we surface. We don't try to
@@ -145,21 +155,26 @@ func (r *RetrievalTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	if len(r.defaults.DatasetIDs) > 0 {
 		extra["dataset_ids"] = r.defaults.DatasetIDs
 	}
+	params := map[string]*schema.ParameterInfo{
+		"query": {
+			Type:     schema.String,
+			Desc:     "The keywords to search the dataset. The keywords should be the most important words/terms (including synonyms) from the original request.",
+			Required: true,
+		},
+		"scope_drop": {
+			Type: schema.Array,
+			Desc: "Drop request-scope filter keys for this call, e.g. [\"phase\"] or [\"flow\",\"phase\"]. If a previous response reported scope_relaxable keys and its documents do not answer the request, call this tool again listing those keys here to broaden the search before concluding the information is missing. Only keys returned as scope_relaxable are accepted; other keys are ignored.",
+		},
+	}
+	if cfg := r.defaults.FilterArgs; cfg != nil {
+		params["filters"] = cfg.filtersParam(r.valuesToolName(),
+			"Exact metadata conditions restricting which documents are searched; omit to search everything the request allows.")
+	}
 	return &schema.ToolInfo{
-		Name:  r.name,
-		Desc:  r.desc,
-		Extra: extra,
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"query": {
-				Type:     schema.String,
-				Desc:     "The keywords to search the dataset. The keywords should be the most important words/terms (including synonyms) from the original request.",
-				Required: true,
-			},
-			"scope_drop": {
-				Type: schema.Array,
-				Desc: "Drop request-scope filter keys for this call, e.g. [\"phase\"] or [\"flow\",\"phase\"]. If a previous response reported scope_relaxable keys and its documents do not answer the request, call this tool again listing those keys here to broaden the search before concluding the information is missing. Only keys returned as scope_relaxable are accepted; other keys are ignored.",
-			},
-		}),
+		Name:        r.name,
+		Desc:        r.desc,
+		Extra:       extra,
+		ParamsOneOf: schema.NewParamsOneOfByParams(params),
 	}, nil
 }
 
@@ -217,6 +232,16 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	if err := r.validateRequestScopeBinding(ctx, args); err != nil {
 		return "", err
 	}
+	var explicit *runtime.ExplicitFilters
+	if cfg := r.defaults.FilterArgs; cfg != nil && args.RetrievalFrom == "dataset" {
+		conditions, problems := cfg.parseModelFilters(args.Filters)
+		if len(problems) > 0 {
+			return stubJSONWithErr(retrievalResult{Error: invalidFiltersMessage(problems, cfg)})
+		}
+		explicit = &runtime.ExplicitFilters{Conditions: conditions}
+		args.MetaDataFilter = withoutLLMMetaFilter(args.MetaDataFilter)
+	}
+	started := time.Now()
 	resolvedDatasetIDs, err := resolveRetrievalDatasetIDs(ctx, args.DatasetIDs)
 	if err != nil {
 		return "", err
@@ -267,6 +292,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		TOCEnhance:               args.TOCEnhance,
 		MetaDataFilter:           cloneStringAnyMap(args.MetaDataFilter),
 		ScopeDrop:                append([]string(nil), args.ScopeDrop...),
+		Explicit:                 explicit,
 		RetrievalFrom:            args.RetrievalFrom,
 		UserID:                   args.UserID,
 		TenantID:                 retrievalTenantID(ctx),
@@ -315,6 +341,12 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		formalizedContent = args.EmptyResponse
 	}
 	out := retrievalResult{FormalizedContent: formalizedContent, Chunks: payload, FiltersRelaxed: filtersRelaxed}
+	if explicit != nil {
+		out.Diagnostics = r.explicitDiagnostics(ctx, explicit, args.DatasetIDs, diagnostics.ScopeDroppedKeys, len(chunks), time.Since(started))
+		if len(explicit.Conditions) > 0 {
+			recordExplicitFilter(diagnostics, explicit)
+		}
+	}
 	if scope := runtime.RequestScopeFromContext(ctx); scope != nil {
 		var dropped map[string]bool
 		if diagnostics != nil {
@@ -374,6 +406,19 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		return "", err
 	}
 	return result, nil
+}
+
+// recordExplicitFilter reports the model's conditions where the references
+// show the tool's metadata filter, in place of the LLM filter they replace.
+func recordExplicitFilter(diagnostics *common.MetadataFilterDiagnostic, explicit *runtime.ExplicitFilters) {
+	diagnostics.Method = "explicit"
+	diagnostics.Logic = "and"
+	diagnostics.Conditions = explicit.Conditions
+	diagnostics.MatchedDocumentCount = explicit.Trace.ScopeDocs
+	diagnostics.Status = "applied"
+	if explicit.Trace.ScopeDocs == 0 {
+		diagnostics.Status = "no_matches"
+	}
 }
 
 func (r *RetrievalTool) mergeDefaults(args retrievalArgs) retrievalArgs {

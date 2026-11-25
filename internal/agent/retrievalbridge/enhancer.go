@@ -138,6 +138,52 @@ func (e *Enhancer) ScopeDocuments(
 	return scope.DocIDs, scope.ChunkMeta, nil
 }
 
+// PushdownDocuments resolves a manual filter like FilterDocuments, but asks the
+// metadata index first and reads the flattened metadata (the size-capped scan
+// FilterDocuments always pays for) only when the push-down cannot answer. No
+// match is an empty result, never the no-match sentinel.
+func (e *Enhancer) PushdownDocuments(
+	ctx context.Context,
+	filter map[string]any,
+	baseDocIDs []string,
+	kbIDs []string,
+) ([]string, error) {
+	if e == nil || e.metadataSvc == nil {
+		return nil, fmt.Errorf("metadata service is not configured")
+	}
+	manual, _ := filter["manual"].([]any)
+	conditions := make([]map[string]any, 0, len(manual))
+	for _, item := range manual {
+		if condition, ok := item.(map[string]any); ok {
+			conditions = append(conditions, map[string]any{"key": condition["key"], "op": condition["op"], "value": condition["value"]})
+		}
+	}
+	logic, _ := filter["logic"].(string)
+	if logic == "" {
+		logic = "and"
+	}
+	if ids, ok := e.metadataSvc.FilterDocIDsByMetaPushdown(ctx, kbIDs, conditions, logic); ok {
+		return service.ConstrainDocIDs(baseDocIDs, ids), nil
+	}
+	ids, err := e.FilterDocuments(ctx, filter, "", nil, baseDocIDs, kbIDs, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 1 && ids[0] == service.NoMatchDocIDSentinel {
+		return nil, nil
+	}
+	return ids, nil
+}
+
+// MetadataValueCounts counts the documents per value of each metadata key in
+// keys (service.GetMetaValueCountsByKBs).
+func (e *Enhancer) MetadataValueCounts(ctx context.Context, kbIDs, keys, docIDs []string) (map[string]map[string]int64, error) {
+	if e == nil || e.metadataSvc == nil {
+		return nil, fmt.Errorf("metadata service is not configured")
+	}
+	return e.metadataSvc.GetMetaValueCountsByKBs(ctx, kbIDs, keys, docIDs)
+}
+
 // LabelQuestion returns tag-based rank features for NLP reranking.
 func (e *Enhancer) LabelQuestion(
 	ctx context.Context,
