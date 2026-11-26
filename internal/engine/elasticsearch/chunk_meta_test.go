@@ -190,10 +190,11 @@ func TestUpdateChunkMetadataRequest(t *testing.T) {
 		t.Fatalf("path = %s", path)
 	}
 	script := body["script"].(map[string]interface{})
-	if script["source"] != "ctx._source['meta_tags_kwd'] = params['s0'];ctx._source.remove('meta_tags_int');" {
-		t.Fatalf("script = %v", script["source"])
+	if script["source"] != chunkMetaUpdateScript {
+		t.Fatalf("the script must not vary with the fields, or ES hits its compilation limit: %v", script["source"])
 	}
-	if !reflect.DeepEqual(script["params"], map[string]interface{}{"s0": []interface{}{"a", "b"}}) {
+	want := map[string]interface{}{"set": map[string]interface{}{"meta_tags_kwd": []interface{}{"a", "b"}}, "remove": []interface{}{"meta_tags_int"}}
+	if !reflect.DeepEqual(script["params"], want) {
 		t.Fatalf("a multi-valued keyword must travel as a list: %v", script["params"])
 	}
 	assertJSON(t, body["query"], `{"bool":{"filter":[{"term":{"kb_id":"kb1"}},{"terms":{"doc_id":["d1","d2"]}}]}}`)
