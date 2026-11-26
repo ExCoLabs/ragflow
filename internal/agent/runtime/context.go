@@ -60,7 +60,10 @@ func IsDeferredStream(v any) bool {
 }
 
 type agentMessageEmitterState struct {
-	mu            sync.Mutex
+	mu sync.Mutex
+	// callMu serializes emit: with live_reasoning the model call forwards
+	// reasoning while the stream collector may still be emitting content.
+	callMu        sync.Mutex
 	emit          AgentMessageEmitter
 	finalize      func() bool
 	reset         func()
@@ -75,7 +78,9 @@ type agentDeltaSinkCtxKey struct{}
 type canvasMessageEventEmitterCtxKey struct{}
 
 type agentDeltaSinkState struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// callMu serializes sink, like agentMessageEmitterState.callMu.
+	callMu  sync.Mutex
 	sink    AgentDeltaSink
 	emitted bool
 }
@@ -163,6 +168,18 @@ func WithAgentDeltaSink(ctx context.Context, sink AgentDeltaSink) context.Contex
 	return context.WithValue(ctx, agentDeltaSinkCtxKey{}, &agentDeltaSinkState{sink: sink})
 }
 
+// WithIsolatedAgentMessages gives a nested Agent run (a sub-agent called as a
+// tool) an emission scope of its own: its deltas go nowhere, and its
+// reset/finalize calls and streamed-content bookkeeping cannot touch the
+// calling Agent's. The caller's answer is the only one the client is shown;
+// the nested run's result reaches the caller as the tool result.
+func WithIsolatedAgentMessages(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, agentMessageEmitterCtxKey{}, (*agentMessageEmitterState)(nil))
+	ctx = context.WithValue(ctx, agentDeltaSinkCtxKey{}, &agentDeltaSinkState{sink: func(string, string) {}})
+	// Deferral and suppression are decisions about the caller's graph node.
+	return WithComponentExecutionOptions(ctx, ComponentExecutionOptions{})
+}
+
 func agentDeltaSinkFromContext(ctx context.Context) *agentDeltaSinkState {
 	sink, _ := ctx.Value(agentDeltaSinkCtxKey{}).(*agentDeltaSinkState)
 	return sink
@@ -240,7 +257,9 @@ func EmitAgentMessage(ctx context.Context, contentDelta, thinkingDelta string) b
 		}
 		// A deferred Agent is being consumed by Message. Do not call the
 		// service SSE emitter here; Message owns the visible event stream.
+		sinkState.callMu.Lock()
 		sink(contentDelta, thinkingDelta)
+		sinkState.callMu.Unlock()
 		sinkState.mu.Lock()
 		if contentDelta != "" || thinkingDelta != "" {
 			sinkState.emitted = true
@@ -272,7 +291,9 @@ func EmitAgentMessage(ctx context.Context, contentDelta, thinkingDelta string) b
 	if emit == nil {
 		return false
 	}
+	state.callMu.Lock()
 	emit(contentDelta, thinkingDelta)
+	state.callMu.Unlock()
 	state.mu.Lock()
 	if contentDelta != "" || thinkingDelta != "" {
 		state.emitted = true

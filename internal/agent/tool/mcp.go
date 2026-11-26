@@ -184,10 +184,22 @@ func (m *MCPToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON strin
 		// Surface the structured tool error under a known prefix
 		// so the ReAct loop can route it as a tool-level error
 		// rather than a transport failure.
-		return "", fmt.Errorf("mcp tool %q returned isError: %s", m.mcpTool.Name, res.Text)
+		return "", &MCPToolError{Tool: m.mcpTool.Name, Text: res.Text}
 	}
 	recordMCPDocumentReferences(ctx, m.mcpTool.Name, res.Text)
 	return res.Text, nil
+}
+
+// MCPToolError is a tool-level failure the MCP server reported itself
+// (isError), as opposed to a transport or protocol failure. An Agent with
+// tool_errors_to_model hands its text to the model instead of failing the run.
+type MCPToolError struct {
+	Tool string
+	Text string
+}
+
+func (e *MCPToolError) Error() string {
+	return fmt.Sprintf("mcp tool %q returned isError: %s", e.Tool, e.Text)
 }
 
 func recordMCPDocumentReferences(ctx context.Context, toolName, text string) {

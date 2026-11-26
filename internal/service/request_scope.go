@@ -30,6 +30,9 @@ func requestScopeFingerprint(ctx context.Context) string {
 	return scope.Fingerprint()
 }
 
+// scopedSubAgentDepth mirrors the runtime's sub-agent nesting limit.
+const scopedSubAgentDepth = 8
+
 // scopedDatasetBindings collects the dataset ids statically bound to the
 // canvas: retrieval-style component params and the canvas dataset globals.
 // An empty result means the agent has no fixed dataset binding, in which case
@@ -56,6 +59,32 @@ func scopedDatasetBindings(dsl map[string]any) map[string]bool {
 			}
 		}
 	}
+	// A tool entry that is itself an Agent (a sub-agent) binds datasets
+	// through its own tools, so the walk follows it. The depth bound only
+	// guards against a malformed, self-referencing DSL.
+	var addToolBindings func(raw any, depth int)
+	addToolBindings = func(raw any, depth int) {
+		tools, ok := raw.([]any)
+		if !ok {
+			return
+		}
+		for _, rawTool := range tools {
+			toolParams, ok := rawTool.(map[string]any)
+			if !ok {
+				continue
+			}
+			nested, ok := toolParams["params"].(map[string]any)
+			if !ok {
+				nested = toolParams
+			}
+			for _, key := range []string{"dataset_ids", "kb_ids"} {
+				addValues(nested[key])
+			}
+			if depth < scopedSubAgentDepth {
+				addToolBindings(nested["tools"], depth+1)
+			}
+		}
+	}
 	if components, ok := dsl["components"].(map[string]any); ok {
 		for _, raw := range components {
 			comp, ok := raw.(map[string]any)
@@ -75,21 +104,7 @@ func scopedDatasetBindings(dsl map[string]any) map[string]bool {
 			}
 			// Agent components carry their retrieval bindings one level
 			// deeper, on each entry of params.tools.
-			if tools, ok := params["tools"].([]any); ok {
-				for _, rawTool := range tools {
-					toolParams, ok := rawTool.(map[string]any)
-					if !ok {
-						continue
-					}
-					nested, ok := toolParams["params"].(map[string]any)
-					if !ok {
-						nested = toolParams
-					}
-					for _, key := range []string{"dataset_ids", "kb_ids"} {
-						addValues(nested[key])
-					}
-				}
-			}
+			addToolBindings(params["tools"], 0)
 		}
 	}
 	if globals, ok := dsl["globals"].(map[string]any); ok {

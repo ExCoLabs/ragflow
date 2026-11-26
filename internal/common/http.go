@@ -156,6 +156,7 @@ func (t *providerLoggingTransport) RoundTrip(req *http.Request) (*http.Response,
 		url:       providerURL,
 		status:    resp.StatusCode,
 		streaming: strings.Contains(resp.Header.Get("Content-Type"), "event-stream"),
+		origin:    sessionFields(req.Context()),
 	}
 	resp.Body = &providerResponseBody{
 		ReadCloser: resp.Body,
@@ -178,6 +179,8 @@ type providerCallTiming struct {
 	url       string
 	status    int
 	streaming bool
+	// origin is the session and component the request context carries.
+	origin []zap.Field
 }
 
 // report logs the call once it is slow enough to be worth explaining. firstToken
@@ -192,13 +195,13 @@ func (p providerCallTiming) report(took, firstToken time.Duration) {
 	if took < limit {
 		return
 	}
-	Info("Provider call",
+	Info("Provider call", append(p.origin,
 		zap.String("url", p.url),
 		zap.Int("status", p.status),
 		zap.Bool("streaming", p.streaming),
 		zap.Duration("took", took),
 		zap.Duration("firstToken", firstToken),
-		zap.Duration("afterFirstToken", took-firstToken))
+		zap.Duration("afterFirstToken", took-firstToken))...)
 }
 
 // providerResponseBody captures bytes while callers consume them, preserving
