@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ragflow/internal/common"
@@ -40,11 +41,16 @@ import (
 	permissionresponse "ragflow/internal/permission/response"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // chunkMetadataDocIDsPerUpdate keeps each update_by_query (all chunks of these
 // documents, waited on) inside the ES client's 30 s response-header timeout.
 const chunkMetadataDocIDsPerUpdate = 2000
+
+// chunkMetadataBackfillWorkers overlaps the per-request overhead of the many
+// small groups; ES has write threads to spare (one update used 2 of 16).
+const chunkMetadataBackfillWorkers = 4
 
 // ChunkMetadataConfigRequest is the body of PUT /datasets/:id/chunk_metadata.
 type ChunkMetadataConfigRequest struct {
@@ -304,31 +310,38 @@ func (d *DatasetService) backfillChunkMetadata(ctx context.Context, store engine
 
 	indexName := fmt.Sprintf("ragflow_%s", kb.TenantID)
 	allFields := common.ChunkMetaFieldNames(cfg.Fields)
-	failed := 0
-	for i, g := range groups {
-		remove := make([]string, 0, len(allFields))
-		for _, f := range allFields {
-			if _, set := g.fields[f]; !set {
-				remove = append(remove, f)
+	var failed, done atomic.Int64
+	var workers errgroup.Group
+	workers.SetLimit(chunkMetadataBackfillWorkers)
+	for _, g := range groups {
+		workers.Go(func() error {
+			remove := make([]string, 0, len(allFields))
+			for _, f := range allFields {
+				if _, set := g.fields[f]; !set {
+					remove = append(remove, f)
+				}
 			}
-		}
-		for start := 0; start < len(g.docIDs); start += chunkMetadataDocIDsPerUpdate {
-			batch := g.docIDs[start:min(start+chunkMetadataDocIDsPerUpdate, len(g.docIDs))]
-			// Refresh once at the end: a per-request refresh on a large index is the slow part.
-			if err := store.UpdateChunkMetadata(ctx, indexName, kb.ID, batch, g.fields, remove, false); err != nil {
-				common.Warn("chunk metadata backfill batch failed", zap.String("dataset_id", kb.ID), zap.Error(err))
-				failed += len(batch)
+			for start := 0; start < len(g.docIDs); start += chunkMetadataDocIDsPerUpdate {
+				batch := g.docIDs[start:min(start+chunkMetadataDocIDsPerUpdate, len(g.docIDs))]
+				// Refresh once at the end: a per-request refresh on a large index is the slow part.
+				if err := store.UpdateChunkMetadata(ctx, indexName, kb.ID, batch, g.fields, remove, false); err != nil {
+					common.Warn("chunk metadata backfill batch failed", zap.String("dataset_id", kb.ID), zap.Error(err))
+					failed.Add(int64(len(batch)))
+				}
 			}
-		}
-		chunkMetadataBackfillsMu.Lock()
-		state.GroupsDone = i + 1
-		chunkMetadataBackfillsMu.Unlock()
+			n := done.Add(1)
+			chunkMetadataBackfillsMu.Lock()
+			state.GroupsDone = int(n)
+			chunkMetadataBackfillsMu.Unlock()
+			return nil
+		})
 	}
+	_ = workers.Wait()
 	if err := store.RefreshChunkIndex(ctx, indexName); err != nil {
 		common.Warn("refresh after chunk metadata backfill failed", zap.String("index", indexName), zap.Error(err))
 	}
-	if failed > 0 {
-		return fmt.Errorf("chunk metadata backfill failed for %d document(s); ready left unchanged", failed)
+	if n := failed.Load(); n > 0 {
+		return fmt.Errorf("chunk metadata backfill failed for %d document(s); ready left unchanged", n)
 	}
 
 	// Mark ready only if the configuration did not change while the backfill ran.

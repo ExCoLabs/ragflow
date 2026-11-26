@@ -261,7 +261,12 @@ func applyChunkMetaScope(boolQuery map[string]interface{}, scope *common.ChunkMe
 
 // One constant source: ES compiles each distinct script text and refuses more
 // than 150 compilations per 5 minutes, which a backfill of many groups exceeds.
-const chunkMetaUpdateScript = "for (e in params.set.entrySet()) { ctx._source[e.getKey()] = e.getValue(); } for (k in params.remove) { ctx._source.remove(k); }"
+// update_by_query reindexes every matched chunk (embeddings included) unless
+// the script says noop, so unchanged chunks are skipped.
+const chunkMetaUpdateScript = "boolean changed = false; " +
+	"for (e in params.set.entrySet()) { if (!Objects.equals(ctx._source.get(e.getKey()), e.getValue())) { ctx._source[e.getKey()] = e.getValue(); changed = true; } } " +
+	"for (k in params.remove) { if (ctx._source.containsKey(k)) { ctx._source.remove(k); changed = true; } } " +
+	"if (!changed) { ctx.op = 'noop'; }"
 
 // UpdateChunkMetadata sets and removes chunk metadata fields on every chunk of
 // the given documents with one update_by_query, so documents that share the
