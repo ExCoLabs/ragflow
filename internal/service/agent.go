@@ -2101,6 +2101,11 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 		ctx2 = runtime.WithDeferredNodeRegistry(ctx2)
 		agentMessageEmit, agentMessageFinalize, agentMessageReset := makeAgentMessageDeltaEmitterWithFinalizer(emit)
 		ctx2 = runtime.WithAgentMessageEmitterControl(ctx2, agentMessageEmit, agentMessageFinalize, agentMessageReset)
+		ctx2 = runtime.WithAgentProgressEmitter(ctx2, func(ev runtime.AgentProgressEvent) {
+			if data, err := json.Marshal(ev); err == nil {
+				emit(agentProgressEventType, string(data))
+			}
+		})
 		ctx2 = runtime.WithCanvasMessageEmitter(ctx2, func(content string) {
 			emitAgentMessageEvent(emit, canvas.MessageEvent{Content: content})
 		})
@@ -3141,3 +3146,7 @@ func (s *AgentService) CancelSessionRun(ctx context.Context, userID, sessionID s
 	// completed-run cleanup and could cancel a later run that reuses sessionID.
 	return nil
 }
+
+// agentProgressEventType is the stream event carrying a
+// runtime.AgentProgressEvent. Only Agents with progress_events emit it.
+const agentProgressEventType = "agent_progress"

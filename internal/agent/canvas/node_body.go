@@ -246,6 +246,7 @@ func realComponentBodyWithOptions(cpnID, componentClass, displayName string, com
 		// runtime.ReportComponentFraction calls are attributed to this node
 		// without the component knowing its own cpnID.
 		cctx = runtime.BindComponentFraction(cctx, cpnID)
+		cctx = common.WithLogComponent(cctx, cpnID)
 
 		var out map[string]any
 		invokeErr := runtime.TrackProgress(cpnID, runtime.ProgressCallbackFromContext(ctx), func() error {

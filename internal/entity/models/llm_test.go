@@ -255,6 +255,47 @@ func TestEinoChatModelStreamFiltersDoneSentinel(t *testing.T) {
 	}
 }
 
+// A tool-bound first turn is answered from one non-streaming call unless the
+// caller asked for it to be streamed.
+func TestEinoChatModelStreamsToolBoundFirstTurnOnRequest(t *testing.T) {
+	modelName := "chat"
+	bound := func(driver ModelDriver) *EinoChatModel {
+		withTools, err := NewEinoChatModel(NewChatModel(driver, &modelName, &APIConfig{}), &ChatConfig{}).
+			WithTools([]*schema.ToolInfo{{Name: "search", Desc: "search"}})
+		if err != nil {
+			t.Fatalf("WithTools: %v", err)
+		}
+		return withTools.(*EinoChatModel)
+	}
+	drain := func(stream *schema.StreamReader[*schema.Message]) (chunks int) {
+		for {
+			if _, err := stream.Recv(); err != nil {
+				return chunks
+			}
+			chunks++
+		}
+	}
+
+	content := "answer"
+	byDefault := &streamSentinelDriver{captureToolDriver: &captureToolDriver{resp: &ChatResponse{Answer: &content}}}
+	stream, err := bound(byDefault).Stream(t.Context(), []*schema.Message{schema.UserMessage("hello")})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if chunks := drain(stream); chunks != 1 || byDefault.generateCalls != 1 {
+		t.Fatalf("default: chunks=%d generate calls=%d, want one message from one non-streaming call", chunks, byDefault.generateCalls)
+	}
+
+	streamed := &streamSentinelDriver{captureToolDriver: &captureToolDriver{}}
+	stream, err = bound(streamed).Stream(WithStreamedToolTurns(t.Context()), []*schema.Message{schema.UserMessage("hello")})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if chunks := drain(stream); chunks != 2 || streamed.generateCalls != 0 {
+		t.Fatalf("on request: chunks=%d generate calls=%d, want the two streamed deltas and no non-streaming call", chunks, streamed.generateCalls)
+	}
+}
+
 func TestEinoChatModelGenerateSendsBoundTools(t *testing.T) {
 	apiKey := "key"
 	modelName := "chat"

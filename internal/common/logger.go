@@ -378,11 +378,55 @@ func SessionIDFromContext(ctx context.Context) string {
 	return id
 }
 
-func sessionFields(ctx context.Context) []zap.Field {
-	if id := SessionIDFromContext(ctx); id != "" {
-		return []zap.Field{zap.String("session_id", id)}
+type logComponentCtxKey struct{}
+
+// WithLogComponent tags every Ctx-variant log call with the canvas component
+// that issued it, so a run's model calls can be told apart per node. A
+// sub-agent appends its name to its caller's label ("Agent:Abc/navigo_agent").
+func WithLogComponent(ctx context.Context, component string) context.Context {
+	if strings.TrimSpace(component) == "" {
+		return ctx
 	}
-	return nil
+	return context.WithValue(ctx, logComponentCtxKey{}, strings.TrimSpace(component))
+}
+
+// LogComponentFromContext extracts the component label ("" when absent).
+func LogComponentFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	label, _ := ctx.Value(logComponentCtxKey{}).(string)
+	return label
+}
+
+func sessionFields(ctx context.Context) []zap.Field {
+	var fields []zap.Field
+	if id := SessionIDFromContext(ctx); id != "" {
+		fields = append(fields, zap.String("session_id", id))
+	}
+	if component := LogComponentFromContext(ctx); component != "" {
+		fields = append(fields, zap.String("component", component))
+	}
+	return fields
+}
+
+// agentTimingsLogLevelEnv raises the agent timing lines (agent_run_timings,
+// agent_tool_timings, agent_retrieval_timings) to Warn, so a deployment that
+// logs at warn can still collect them: set it to "warn".
+const agentTimingsLogLevelEnv = "RAGFLOW_AGENT_TIMINGS_LOG_LEVEL"
+
+var agentTimingsAtWarn = sync.OnceValue(func() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv(agentTimingsLogLevelEnv)), "warn")
+})
+
+// AgentTimingLog writes one agent timing line: at Info, or at Warn when
+// RAGFLOW_AGENT_TIMINGS_LOG_LEVEL=warn.
+func AgentTimingLog(msg string) {
+	if agentTimingsAtWarn() {
+		Warn(msg)
+		return
+	}
+	Info(msg)
 }
 
 // InfoCtx is Info plus the session_id correlation field when ctx carries one.
