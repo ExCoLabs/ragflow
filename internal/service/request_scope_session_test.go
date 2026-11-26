@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	agruntime "ragflow/internal/agent/runtime"
@@ -45,6 +46,42 @@ func TestScopedDatasetBindings(t *testing.T) {
 	}
 	if got := scopedDatasetBindings(map[string]any{}); len(got) != 0 {
 		t.Fatalf("expected no bindings, got %v", got)
+	}
+}
+
+// A dataset bound only by a Retrieval tool of a sub-agent (an Agent listed in
+// another Agent's tools), at any nesting level, is bound to the canvas.
+func TestScopedDatasetBindingsFollowSubAgents(t *testing.T) {
+	retrieval := func(id string) map[string]any {
+		return map[string]any{"component_name": "Retrieval", "params": map[string]any{"dataset_ids": []any{id}}}
+	}
+	subAgent := func(name string, tools ...any) map[string]any {
+		return map[string]any{"component_name": "Agent", "name": name, "params": map[string]any{"tools": tools}}
+	}
+	dsl := map[string]any{"components": map[string]any{
+		"Agent:Coordinator": map[string]any{"obj": map[string]any{"params": map[string]any{
+			"tools": []any{
+				retrieval("kb-root"),
+				subAgent("retrieval_agent", retrieval("kb-child")),
+				subAgent("outer", subAgent("inner", retrieval("kb-grandchild"))),
+				subAgent("navigo_agent"),
+			},
+		}}},
+	}}
+	bound := scopedDatasetBindings(dsl)
+	want := map[string]bool{"kb-root": true, "kb-child": true, "kb-grandchild": true}
+	if !reflect.DeepEqual(bound, want) {
+		t.Fatalf("bindings = %v, want %v", bound, want)
+	}
+
+	// A DSL nested past the runtime's sub-agent limit ends the walk.
+	tools := []any{retrieval("kb-too-deep")}
+	for range scopedSubAgentDepth + 1 {
+		tools = []any{subAgent("level", tools...)}
+	}
+	deep := map[string]any{"components": map[string]any{"Agent:Root": map[string]any{"obj": map[string]any{"params": map[string]any{"tools": tools}}}}}
+	if got := scopedDatasetBindings(deep); len(got) != 0 {
+		t.Fatalf("bindings past the nesting limit: %v", got)
 	}
 }
 
