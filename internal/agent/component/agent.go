@@ -1782,6 +1782,10 @@ func (t *subAgentTool) InvokableRun(ctx context.Context, argsJSON string, _ ...e
 	}
 
 	ctx = context.WithValue(ctx, subAgentDepthKey{}, depth+1)
+	// The child reports to its caller through the tool result. Sharing the
+	// caller's emitter streamed that report to the client as answer text and
+	// made the caller skip its own answer as "already streamed".
+	ctx = runtime.WithIsolatedAgentMessages(ctx)
 
 	inputs := map[string]any{}
 	if strings.TrimSpace(argsJSON) != "" {
