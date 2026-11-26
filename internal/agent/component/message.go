@@ -435,6 +435,7 @@ func (m *MessageComponent) resolveDeferredTemplate(ctx context.Context, text str
 		streamed = true
 		inThinking := false
 		visible := strings.Builder{}
+		reasoning := strings.Builder{}
 		result, err := deferred.Open(ctx, func(contentDelta, reasoningDelta string) {
 			if reasoningDelta != "" {
 				if !inThinking {
@@ -442,6 +443,7 @@ func (m *MessageComponent) resolveDeferredTemplate(ctx context.Context, text str
 					inThinking = true
 				}
 				runtime.EmitCanvasMessageEvent(ctx, reasoningDelta, false, false)
+				reasoning.WriteString(reasoningDelta)
 			}
 			if contentDelta != "" {
 				if inThinking {
@@ -475,6 +477,11 @@ func (m *MessageComponent) resolveDeferredTemplate(ctx context.Context, text str
 		if strings.Contains(ref, "@") {
 			parts := strings.SplitN(ref, "@", 2)
 			state.SetVar(parts[0], parts[1], finalText)
+			// The session stores the "thinking" it finds in the state snapshot. The
+			// streamed reasoning spans every model call; the Agent's own only the last.
+			if reasoning.Len() > 0 {
+				state.SetVar(parts[0], "thinking", reasoning.String())
+			}
 			runtime.CompleteDeferredNode(ctx, parts[0])
 		}
 		out.WriteString(finalText)
