@@ -347,8 +347,9 @@ func (e *Engine) waitForUpdateTask(ctx context.Context, taskID string) error {
 		}
 		body, _ := io.ReadAll(res.Body)
 		res.Body.Close()
-		// 408: still running after the poll timeout.
-		if res.StatusCode == http.StatusRequestTimeout {
+		// ES 8 answers a poll that outwaits its timeout with 500 timeout_exception
+		// (408 in other versions): the task is still running.
+		if res.StatusCode == http.StatusRequestTimeout || (res.IsError() && bytes.Contains(body, []byte(`"timeout_exception"`))) {
 			if err := ctx.Err(); err != nil {
 				return err
 			}

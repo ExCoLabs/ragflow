@@ -235,7 +235,12 @@ func TestUpdateChunkMetadataPollTimeoutKeepsWaiting(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasPrefix(r.URL.Path, "/_tasks/") {
 			polls++
-			if polls < 3 {
+			switch polls {
+			case 1:
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":{"root_cause":[{"type":"timeout_exception","reason":"timed out after [20s/20000ms]"}],"type":"timeout_exception"},"status":500}`))
+				return
+			case 2:
 				w.WriteHeader(http.StatusRequestTimeout)
 				_, _ = w.Write([]byte(`{"error":{"type":"timeout_exception"},"status":408}`))
 				return
