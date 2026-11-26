@@ -18,11 +18,15 @@ package component
 import (
 	"context"
 	"errors"
+	"io"
+	"sync"
 	"testing"
 
 	"ragflow/internal/agent/runtime"
 
 	einotool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -67,5 +71,49 @@ func TestTimedToolWithoutEmitter(t *testing.T) {
 	tool := wrapTimedTool(stubTool{}, &runtime.PhaseTimings{}).(einotool.InvokableTool)
 	if _, err := tool.InvokableRun(context.Background(), "{}"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Through eino's ToolsNode: the emitter and the model's tool call id must reach the tool's ctx.
+func TestTimedToolEventsThroughReActLoop(t *testing.T) {
+	var mu sync.Mutex
+	var got []runtime.ToolCallEvent
+	ctx := runtime.WithToolCallEmitter(t.Context(), func(ev runtime.ToolCallEvent) {
+		mu.Lock()
+		got = append(got, ev)
+		mu.Unlock()
+	})
+	agent, err := react.NewAgent(ctx, &react.AgentConfig{
+		ToolCallingModel: &textThenToolCallModel{},
+		ToolsConfig: compose.ToolsNodeConfig{
+			Tools: []einotool.BaseTool{wrapTimedTool(&passthroughTool{name: "execute_code"}, &runtime.PhaseTimings{})},
+		},
+		StreamToolCallChecker: scanAllStreamForToolCall,
+		MaxStep:               4,
+	})
+	if err != nil {
+		t.Fatalf("react.NewAgent: %v", err)
+	}
+	stream, err := agent.Stream(ctx, []*schema.Message{schema.UserMessage("calculate")})
+	if err != nil {
+		t.Fatalf("agent.Stream: %v", err)
+	}
+	for {
+		if _, err := stream.Recv(); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("stream.Recv: %v", err)
+		}
+	}
+	stream.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || got[0].Status != runtime.ToolCallStarted || got[1].Status != runtime.ToolCallFinished {
+		t.Fatalf("events = %+v, want started+finished", got)
+	}
+	for _, ev := range got {
+		if ev.ID != "call-1" || ev.Name != "execute_code" {
+			t.Errorf("event = %+v, want id call-1 and name execute_code", ev)
+		}
 	}
 }
