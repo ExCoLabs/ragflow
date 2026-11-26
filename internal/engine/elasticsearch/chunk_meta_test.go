@@ -177,16 +177,19 @@ func TestUpdateChunkMetadataRequest(t *testing.T) {
 	var path string
 	var body map[string]interface{}
 	e := newChunkMetaRecordingEngine(t, func(p string, b []byte) string {
+		if strings.HasPrefix(p, "GET /_tasks/") {
+			return `{"completed":true,"response":{"updated":1,"failures":[]}}`
+		}
 		path = p
 		_ = json.Unmarshal(b, &body)
-		return `{"updated":1}`
+		return `{"task":"n1:7"}`
 	})
 	err := e.UpdateChunkMetadata(t.Context(), "ragflow_t", "kb1", []string{"d1", "d2"},
 		map[string]interface{}{"meta_tags_kwd": []interface{}{"a", "b"}}, []string{"meta_tags_kwd", "meta_tags_int"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(path, "POST /ragflow_t/_update_by_query?") || !strings.Contains(path, "refresh=false") {
+	if !strings.HasPrefix(path, "POST /ragflow_t/_update_by_query?") || !strings.Contains(path, "refresh=false") || !strings.Contains(path, "wait_for_completion=false") {
 		t.Fatalf("path = %s", path)
 	}
 	script := body["script"].(map[string]interface{})
@@ -201,6 +204,58 @@ func TestUpdateChunkMetadataRequest(t *testing.T) {
 
 	if err := e.UpdateChunkMetadata(t.Context(), "ragflow_t", "kb1", []string{"d1"}, map[string]interface{}{"x'];": 1}, nil, false); err == nil {
 		t.Fatal("a field name outside meta_*_{kwd,int,flt,dt} must be refused")
+	}
+}
+
+func TestUpdateChunkMetadataPollsTask(t *testing.T) {
+	polls := 0
+	e := newChunkMetaRecordingEngine(t, func(p string, b []byte) string {
+		if strings.HasPrefix(p, "GET /_tasks/n1:7?") {
+			polls++
+			if polls == 1 {
+				return `{"completed":false}`
+			}
+			return `{"completed":true,"response":{"failures":[{"cause":{"type":"mapper_parsing_exception"}}]}}`
+		}
+		return `{"task":"n1:7"}`
+	})
+	err := e.UpdateChunkMetadata(t.Context(), "ragflow_t", "kb1", []string{"d1"}, map[string]interface{}{"meta_tags_kwd": "a"}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "mapper_parsing_exception") {
+		t.Fatalf("failures of the finished task must surface: %v", err)
+	}
+	if polls != 2 {
+		t.Fatalf("polls = %d, want 2", polls)
+	}
+}
+
+func TestUpdateChunkMetadataPollTimeoutKeepsWaiting(t *testing.T) {
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Elastic-Product", "Elasticsearch")
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/_tasks/") {
+			polls++
+			if polls < 3 {
+				w.WriteHeader(http.StatusRequestTimeout)
+				_, _ = w.Write([]byte(`{"error":{"type":"timeout_exception"},"status":408}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"completed":true,"response":{"failures":[]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"task":"n1:9"}`))
+	}))
+	t.Cleanup(server.Close)
+	client, err := elasticsearch.NewClient(elasticsearch.Config{Addresses: []string{server.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{client: client}
+	if err := e.UpdateChunkMetadata(t.Context(), "ragflow_t", "kb1", []string{"d1"}, map[string]interface{}{"meta_tags_kwd": "a"}, nil, false); err != nil {
+		t.Fatalf("a poll that times out means still running: %v", err)
+	}
+	if polls != 3 {
+		t.Fatalf("polls = %d, want 3", polls)
 	}
 }
 
