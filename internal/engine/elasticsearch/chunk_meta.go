@@ -257,6 +257,10 @@ func applyChunkMetaScope(boolQuery map[string]interface{}, scope *common.ChunkMe
 	return boolQuery, nil
 }
 
+// One constant source: ES compiles each distinct script text and refuses more
+// than 150 compilations per 5 minutes, which a backfill of many groups exceeds.
+const chunkMetaUpdateScript = "for (e in params.set.entrySet()) { ctx._source[e.getKey()] = e.getValue(); } for (k in params.remove) { ctx._source.remove(k); }"
+
 // UpdateChunkMetadata sets and removes chunk metadata fields on every chunk of
 // the given documents with one update_by_query, so documents that share the
 // same metadata are written together. Values travel as script params, so a
@@ -265,28 +269,24 @@ func (e *Engine) UpdateChunkMetadata(ctx context.Context, indexName, datasetID s
 	if len(docIDs) == 0 {
 		return nil
 	}
-	var script strings.Builder
-	params := make(map[string]interface{}, len(setFields))
-	i := 0
+	set := make(map[string]interface{}, len(setFields))
 	for k, v := range setFields {
 		if !chunkMetaFieldNameRE.MatchString(k) {
 			return fmt.Errorf("invalid chunk metadata field %q", k)
 		}
-		name := fmt.Sprintf("s%d", i)
-		i++
-		params[name] = v
-		fmt.Fprintf(&script, "ctx._source['%s'] = params['%s'];", k, name)
+		set[k] = v
 	}
+	remove := make([]string, 0, len(removeFields))
 	for _, k := range removeFields {
-		if _, set := setFields[k]; set {
+		if _, isSet := setFields[k]; isSet {
 			continue
 		}
 		if !chunkMetaFieldNameRE.MatchString(k) {
 			return fmt.Errorf("invalid chunk metadata field %q", k)
 		}
-		fmt.Fprintf(&script, "ctx._source.remove('%s');", k)
+		remove = append(remove, k)
 	}
-	if script.Len() == 0 {
+	if len(set) == 0 && len(remove) == 0 {
 		return nil
 	}
 	body := map[string]interface{}{
@@ -294,7 +294,7 @@ func (e *Engine) UpdateChunkMetadata(ctx context.Context, indexName, datasetID s
 			map[string]interface{}{"term": map[string]interface{}{"kb_id": datasetID}},
 			map[string]interface{}{"terms": map[string]interface{}{"doc_id": docIDs}},
 		}}},
-		"script": map[string]interface{}{"source": script.String(), "params": params, "lang": "painless"},
+		"script": map[string]interface{}{"source": chunkMetaUpdateScript, "params": map[string]interface{}{"set": set, "remove": remove}, "lang": "painless"},
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
