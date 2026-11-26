@@ -896,3 +896,29 @@ func TestRetrievalCompactResultKeepsDiagnostics(t *testing.T) {
 		t.Fatalf("diagnostics = %s", out)
 	}
 }
+
+func TestExplicitProjectScopeSkipsCappedMetadataRead(t *testing.T) {
+	filter := map[string]any{"method": "manual", "logic": "and", "manual": []any{map[string]any{"key": "project_id", "op": "in", "value": []string{"2018_055"}}}}
+	for _, tc := range []struct {
+		name     string
+		explicit *runtime.ExplicitFilters
+		fast     int
+	}{
+		{"explicit filters use the push-down", &runtime.ExplicitFilters{}, 1},
+		{"default tool keeps the flattened read", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &explicitEnhancer{}
+			a := &NLPRetrievalAdapter{enhancer: e}
+			if _, err := a.resolveScope(t.Context(), filter, nil, []string{"kb"}, "project", tc.explicit != nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.resolveProjectScope(t.Context(), RetrievalRequest{ProjectID: "2018_055", DatasetIDs: []string{"kb"}, Explicit: tc.explicit}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if len(e.fast) != 2*tc.fast || len(e.slow) != 2*(1-tc.fast) {
+				t.Fatalf("push-down calls=%d flattened reads=%d", len(e.fast), len(e.slow))
+			}
+		})
+	}
+}

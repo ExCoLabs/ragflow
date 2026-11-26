@@ -56,7 +56,10 @@ func (a *NLPRetrievalAdapter) resolveProjectScope(ctx context.Context, req Retri
 		return nil, fmt.Errorf("retrieval: invalid canonical project id")
 	}
 	filter := map[string]any{"method": "manual", "logic": "and", "manual": []any{map[string]any{"key": "project_id", "op": "in", "value": req.ProjectID}}}
-	return a.resolveHardScope(ctx, filter, base, req.DatasetIDs, "project")
+	// The flattened metadata read stops at 10k documents, so on a larger
+	// dataset it returns an arbitrary slice of the project; explicit filters
+	// AND onto this scope and would silently match almost nothing.
+	return a.resolveScope(ctx, filter, base, req.DatasetIDs, "project", req.Explicit != nil)
 }
 
 func (a *NLPRetrievalAdapter) resolveHardScope(ctx context.Context, filter map[string]any, base, datasetIDs []string, name string) ([]string, error) {
