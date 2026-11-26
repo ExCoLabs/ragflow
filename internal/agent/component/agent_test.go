@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1167,6 +1168,51 @@ func TestAgent_NewAcceptsCanvasToolObjects(t *testing.T) {
 	}
 	if _, err := buildAgentTools(t.Context(), agent.param); err != nil {
 		t.Fatalf("buildAgentTools: %v", err)
+	}
+}
+
+// A Retrieval tool with filter_args brings its own value lister, named after
+// it, so two such tools on one Agent do not collide.
+func TestAgent_RetrievalFilterArgsAddsValueLister(t *testing.T) {
+	retrievalTool := func(name, dataset string, filterArgs map[string]any) map[string]any {
+		params := map[string]any{"dataset_ids": []any{dataset}}
+		if filterArgs != nil {
+			params["filter_args"] = filterArgs
+		}
+		return map[string]any{"component_name": "Retrieval", "function_name": name, "params": params}
+	}
+	keys := map[string]any{"keys": []any{map[string]any{"key": "project", "ops": []any{"contains"}}, "phase"}}
+	cmp, err := New("Agent", map[string]any{
+		"model_id":    "stub",
+		"user_prompt": "x",
+		"tools": []any{
+			retrievalTool("search_archa_data", "kb-1", keys),
+			retrievalTool("search_archa_metodika", "kb-2", keys),
+			retrievalTool("search_legislation", "kb-3", nil),
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(Agent): %v", err)
+	}
+	tools, err := buildAgentTools(t.Context(), cmp.(*AgentComponent).param)
+	if err != nil {
+		t.Fatalf("buildAgentTools: %v", err)
+	}
+	var names []string
+	for _, tool := range tools {
+		info, err := tool.Info(t.Context())
+		if err != nil {
+			t.Fatalf("Info: %v", err)
+		}
+		names = append(names, info.Name)
+	}
+	want := []string{
+		"search_archa_data", "search_archa_data_filter_values",
+		"search_archa_metodika", "search_archa_metodika_filter_values",
+		"search_legislation",
+	}
+	if !slices.Equal(names, want) {
+		t.Fatalf("tools = %v, want %v", names, want)
 	}
 }
 

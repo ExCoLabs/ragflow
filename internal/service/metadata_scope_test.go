@@ -228,3 +228,25 @@ func TestRenderMetaFilterTemplateAllowSoft(t *testing.T) {
 		t.Fatal("without allow_soft no strength and no template tags may remain")
 	}
 }
+
+// A boost-only filter (what an explicit-filter tool sends for the model's
+// `boost`) ranks and never narrows, even with no base scope.
+func TestApplyMetaDataScopeBoostOnlyKeepsTheScope(t *testing.T) {
+	filter := map[string]interface{}{
+		"method": "disabled",
+		"boost": map[string]interface{}{"method": "manual", "manual": []interface{}{
+			map[string]interface{}{"key": "dept", "op": "in", "value": []interface{}{"hr"}, "weight": 0.15},
+			map[string]interface{}{"key": "tag", "op": "in", "value": []interface{}{"x"}, "weight": 0.15},
+		}},
+	}
+	for _, base := range [][]string{nil, {"d2"}} {
+		scope := ApplyMetaDataScope(t.Context(), filter, nil, "q", nil, base, nil, activeChunkMeta)
+		if !reflect.DeepEqual(scope.DocIDs, base) {
+			t.Fatalf("base %v: doc ids = %v", base, scope.DocIDs)
+		}
+		cm := scope.ChunkMeta
+		if cm == nil || cm.Filter != nil || len(cm.Boosts) != 1 || cm.Boosts[0].Key != "dept" || cm.BoostMaxTotal != common.DefaultMetaBoostMaxTotal {
+			t.Fatalf("base %v: chunk scope = %+v, want the whitelisted dept boost only", base, cm)
+		}
+	}
+}

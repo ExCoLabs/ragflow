@@ -60,10 +60,22 @@ func (a *NLPRetrievalAdapter) resolveProjectScope(ctx context.Context, req Retri
 }
 
 func (a *NLPRetrievalAdapter) resolveHardScope(ctx context.Context, filter map[string]any, base, datasetIDs []string, name string) ([]string, error) {
+	return a.resolveScope(ctx, filter, base, datasetIDs, name, false)
+}
+
+// resolveScope is resolveHardScope with an opt-in fast path: pushdownFirst
+// skips the flattened metadata read whenever the metadata index can answer.
+func (a *NLPRetrievalAdapter) resolveScope(ctx context.Context, filter map[string]any, base, datasetIDs []string, name string, pushdownFirst bool) ([]string, error) {
 	if a.enhancer == nil {
 		return nil, fmt.Errorf("retrieval: %s scope service is not configured", name)
 	}
-	ids, err := a.enhancer.FilterDocuments(ctx, filter, "", nil, append([]string(nil), base...), datasetIDs, nil)
+	var ids []string
+	var err error
+	if fast, ok := a.enhancer.(pushdownScopeResolver); pushdownFirst && ok {
+		ids, err = fast.PushdownDocuments(ctx, filter, append([]string(nil), base...), datasetIDs)
+	} else {
+		ids, err = a.enhancer.FilterDocuments(ctx, filter, "", nil, append([]string(nil), base...), datasetIDs, nil)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: resolve %s scope: %w", name, err)
 	}
