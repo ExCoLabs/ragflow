@@ -171,3 +171,27 @@ func TestPushdownDocumentsFallsBackWithoutTheSentinel(t *testing.T) {
 		t.Fatalf("got %v, want no documents", got)
 	}
 }
+
+// Project codes look like Python int literals with a digit separator; pushed
+// down as "=" they were coerced to numbers and matched nothing, which sent
+// every explicit filter to the 10k-capped flattened scan.
+func TestPushdownDocumentsKeepsValuesAsStrings(t *testing.T) {
+	docEngine := &pushdownEngine{ids: []string{"doc-1"}}
+	enhancer := NewEnhancer(docEngine, service.NewMetadataServiceForTest(nil, docEngine))
+	filter := map[string]any{"method": "manual", "logic": "and", "manual": []any{
+		map[string]any{"key": "project_id", "op": "=", "value": "2018_055"},
+		map[string]any{"key": "phase", "op": "in", "value": []string{"sp"}},
+		map[string]any{"key": "flow", "op": "in", "value": []any{"expedition"}},
+	}}
+	if _, err := enhancer.PushdownDocuments(t.Context(), filter, nil, []string{"kb-1"}); err != nil {
+		t.Fatalf("PushdownDocuments: %v", err)
+	}
+	want := []map[string]interface{}{
+		{"key": "project_id", "op": "in", "value": []any{"2018_055"}},
+		{"key": "phase", "op": "in", "value": []any{"sp"}},
+		{"key": "flow", "op": "in", "value": []any{"expedition"}},
+	}
+	if !reflect.DeepEqual(docEngine.conditions, want) {
+		t.Fatalf("pushed down %v, want %v", docEngine.conditions, want)
+	}
+}

@@ -155,7 +155,7 @@ func (e *Enhancer) PushdownDocuments(
 	conditions := make([]map[string]any, 0, len(manual))
 	for _, item := range manual {
 		if condition, ok := item.(map[string]any); ok {
-			conditions = append(conditions, map[string]any{"key": condition["key"], "op": condition["op"], "value": condition["value"]})
+			conditions = append(conditions, pushdownCondition(condition))
 		}
 	}
 	logic, _ := filter["logic"].(string)
@@ -173,6 +173,27 @@ func (e *Enhancer) PushdownDocuments(
 		return nil, nil
 	}
 	return ids, nil
+}
+
+// pushdownCondition reshapes one condition so the ES translation keeps its
+// values as strings: "=" coerces a scalar literal-eval style ("2018_055" is
+// read as the number 2018055 and matches nothing), and a []string "in" value is
+// encoded as a nested array ES rejects. A one-value "in" matches the same
+// documents through the keyword field.
+func pushdownCondition(condition map[string]any) map[string]any {
+	op, _ := condition["op"].(string)
+	value := condition["value"]
+	if text, ok := value.(string); ok && op == "=" {
+		op, value = "in", []any{text}
+	}
+	if list, ok := value.([]string); ok {
+		values := make([]any, len(list))
+		for i, item := range list {
+			values[i] = item
+		}
+		value = values
+	}
+	return map[string]any{"key": condition["key"], "op": op, "value": value}
 }
 
 // MetadataValueCounts counts the documents per value of each metadata key in
