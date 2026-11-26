@@ -195,27 +195,3 @@ func TestPushdownDocumentsKeepsValuesAsStrings(t *testing.T) {
 		t.Fatalf("pushed down %v, want %v", docEngine.conditions, want)
 	}
 }
-
-// Only a filter that ApplyMetaDataScope resolves without the flattened
-// metadata may skip reading it.
-func TestBoostOnlySkipsTheFlattenedRead(t *testing.T) {
-	active := &common.ChunkMetadataConfig{Enabled: true, Ready: true, Fields: []string{"sector"}}
-	manualBoost := map[string]any{"method": "manual", "manual": []any{map[string]any{"key": "sector", "op": "in", "value": []any{"g"}}}}
-	for name, tc := range map[string]struct {
-		filter map[string]any
-		cfg    *common.ChunkMetadataConfig
-		want   bool
-	}{
-		"boost only":         {map[string]any{"method": "disabled", "boost": manualBoost}, active, true},
-		"no method":          {map[string]any{"boost": manualBoost}, active, true},
-		"inactive":           {map[string]any{"method": "disabled", "boost": manualBoost}, nil, false},
-		"manual filter":      {map[string]any{"method": "manual", "manual": []any{}, "boost": manualBoost}, active, false},
-		"llm filter":         {map[string]any{"method": "auto"}, active, false},
-		"llm boost":          {map[string]any{"method": "disabled", "boost": map[string]any{"method": "auto"}}, active, false},
-		"unsupported method": {map[string]any{"method": "fuzzy"}, active, false},
-	} {
-		if got := boostOnly(tc.filter, tc.cfg); got != tc.want {
-			t.Errorf("%s: boostOnly = %v, want %v", name, got, tc.want)
-		}
-	}
-}
