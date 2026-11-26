@@ -21,9 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"path"
 	"ragflow/internal/dao"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -67,9 +70,20 @@ type retrievalArgs struct {
 	// ScopeDrop lets the model explicitly relax declared request-scope keys
 	// (see `relax` in the request's meta_data_filter) when strict evidence
 	// looks insufficient. Undeclared keys are ignored server-side.
-	ScopeDrop     []string `json:"scope_drop,omitempty"`
-	RetrievalFrom string   `json:"retrieval_from,omitempty"`
-	EmptyResponse string   `json:"empty_response,omitempty"`
+	ScopeDrop []string `json:"scope_drop,omitempty"`
+	// Filters are the model's explicit metadata conditions. Kept raw so a
+	// malformed value cannot fail argument parsing for tools that never
+	// declared filter_args, where it is ignored.
+	Filters json.RawMessage `json:"filters,omitempty"`
+	// Boost is the model's soft preferences, raw for the same reason.
+	Boost         json.RawMessage `json:"boost,omitempty"`
+	RetrievalFrom string          `json:"retrieval_from,omitempty"`
+	EmptyResponse string          `json:"empty_response,omitempty"`
+	// FilterArgs is the DSL's filter_args. Never read from model arguments:
+	// the allow-list is the tool author's.
+	FilterArgs *filterArgsConfig `json:"-"`
+	// CompactResult is the DSL's compact_result: see compactRetrievalResult.
+	CompactResult bool `json:"-"`
 	// FunctionName is the agent-visible tool name from the DSL. It is not
 	// exposed to the model as part of the tool arguments.
 	FunctionName string `json:"-"`
@@ -90,8 +104,10 @@ type retrievalResult struct {
 	// it may still drop via scope_drop on a follow-up call.
 	ScopeDroppedKeys []string `json:"scope_dropped_keys,omitempty"`
 	ScopeRelaxable   []string `json:"scope_relaxable,omitempty"`
-	Stub             bool     `json:"stub,omitempty"`
-	Error            string   `json:"_ERROR,omitempty"`
+	// Diagnostics is set only by explicit-filter tools (filter_args).
+	Diagnostics *retrievalDiagnostics `json:"diagnostics,omitempty"`
+	Stub        bool                  `json:"stub,omitempty"`
+	Error       string                `json:"_ERROR,omitempty"`
 }
 
 // chunkPayload is the minimal chunk shape we surface. We don't try to
@@ -145,21 +161,27 @@ func (r *RetrievalTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	if len(r.defaults.DatasetIDs) > 0 {
 		extra["dataset_ids"] = r.defaults.DatasetIDs
 	}
+	params := map[string]*schema.ParameterInfo{
+		"query": {
+			Type:     schema.String,
+			Desc:     "The keywords to search the dataset. The keywords should be the most important words/terms (including synonyms) from the original request.",
+			Required: true,
+		},
+		"scope_drop": {
+			Type: schema.Array,
+			Desc: "Drop request-scope filter keys for this call, e.g. [\"phase\"] or [\"flow\",\"phase\"]. If a previous response reported scope_relaxable keys and its documents do not answer the request, call this tool again listing those keys here to broaden the search before concluding the information is missing. Only keys returned as scope_relaxable are accepted; other keys are ignored.",
+		},
+	}
+	if cfg := r.defaults.FilterArgs; cfg != nil {
+		params["filters"] = cfg.filtersParam(r.valuesToolName(),
+			"Exact metadata conditions restricting which documents are searched; omit to search everything the request allows.")
+		params["boost"] = cfg.boostParam(r.valuesToolName())
+	}
 	return &schema.ToolInfo{
-		Name:  r.name,
-		Desc:  r.desc,
-		Extra: extra,
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"query": {
-				Type:     schema.String,
-				Desc:     "The keywords to search the dataset. The keywords should be the most important words/terms (including synonyms) from the original request.",
-				Required: true,
-			},
-			"scope_drop": {
-				Type: schema.Array,
-				Desc: "Drop request-scope filter keys for this call, e.g. [\"phase\"] or [\"flow\",\"phase\"]. If a previous response reported scope_relaxable keys and its documents do not answer the request, call this tool again listing those keys here to broaden the search before concluding the information is missing. Only keys returned as scope_relaxable are accepted; other keys are ignored.",
-			},
-		}),
+		Name:        r.name,
+		Desc:        r.desc,
+		Extra:       extra,
+		ParamsOneOf: schema.NewParamsOneOfByParams(params),
 	}, nil
 }
 
@@ -217,6 +239,20 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	if err := r.validateRequestScopeBinding(ctx, args); err != nil {
 		return "", err
 	}
+	var explicit *runtime.ExplicitFilters
+	if cfg := r.defaults.FilterArgs; cfg != nil && args.RetrievalFrom == "dataset" {
+		conditions, problems := cfg.parseModelFilters(args.Filters)
+		if len(problems) > 0 {
+			return stubJSONWithErr(retrievalResult{Error: invalidFiltersMessage(problems, cfg)})
+		}
+		boosts, problems := cfg.parseModelBoosts(args.Boost)
+		if len(problems) > 0 {
+			return stubJSONWithErr(retrievalResult{Error: invalidBoostMessage(problems, cfg)})
+		}
+		explicit = &runtime.ExplicitFilters{Conditions: conditions, Boosts: boosts}
+		args.MetaDataFilter = withoutLLMMetaFilter(args.MetaDataFilter)
+	}
+	started := time.Now()
 	resolvedDatasetIDs, err := resolveRetrievalDatasetIDs(ctx, args.DatasetIDs)
 	if err != nil {
 		return "", err
@@ -267,6 +303,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		TOCEnhance:               args.TOCEnhance,
 		MetaDataFilter:           cloneStringAnyMap(args.MetaDataFilter),
 		ScopeDrop:                append([]string(nil), args.ScopeDrop...),
+		Explicit:                 explicit,
 		RetrievalFrom:            args.RetrievalFrom,
 		UserID:                   args.UserID,
 		TenantID:                 retrievalTenantID(ctx),
@@ -288,7 +325,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	// Duplicate document variants ((N).pdf copies of the same file) can
 	// crowd top-N on large datasets; cap chunks per normalized document
 	// name so distinct documents keep their slots. Rank order is preserved.
-	chunks = capChunksPerDocument(chunks, maxChunksPerDocument)
+	chunks = capChunksPerDocument(chunks, maxChunksPerDocument, explicit != nil)
 	filtersRelaxed := diagnostics != nil &&
 		(diagnostics.RelaxationAttempted || len(diagnostics.ScopeDroppedKeys) > 0)
 	common.Debug("agent retrieval tool: search result",
@@ -315,6 +352,12 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		formalizedContent = args.EmptyResponse
 	}
 	out := retrievalResult{FormalizedContent: formalizedContent, Chunks: payload, FiltersRelaxed: filtersRelaxed}
+	if explicit != nil {
+		out.Diagnostics = r.explicitDiagnostics(ctx, explicit, args.DatasetIDs, diagnostics.ScopeDroppedKeys, len(chunks), time.Since(started))
+		if len(explicit.Conditions) > 0 {
+			recordExplicitFilter(diagnostics, explicit)
+		}
+	}
 	if scope := runtime.RequestScopeFromContext(ctx); scope != nil {
 		var dropped map[string]bool
 		if diagnostics != nil {
@@ -369,11 +412,115 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			state.AppendMetadataFilterDiagnostic(diagnostic)
 		}
 	}
+	if r.defaults.CompactResult && args.RetrievalFrom == "dataset" {
+		return compactRetrievalJSON(out, chunks, args.EmptyResponse)
+	}
 	result, err := stubJSONWithErr(out)
 	if err != nil {
 		return "", err
 	}
 	return result, nil
+}
+
+// compactRetrievalResult is the model-facing result of a tool with
+// compact_result. The default shape carries every chunk's text twice
+// (formalized_content and chunks[].content) and no document name; this one
+// carries each chunk once, with what the model needs to name and cite it.
+type compactRetrievalResult struct {
+	Chunks []compactChunk `json:"chunks"`
+	// Message is the tool's empty_response, when nothing was found.
+	Message          string                `json:"message,omitempty"`
+	FiltersRelaxed   bool                  `json:"filters_relaxed,omitempty"`
+	ScopeDroppedKeys []string              `json:"scope_dropped_keys,omitempty"`
+	ScopeRelaxable   []string              `json:"scope_relaxable,omitempty"`
+	Diagnostics      *retrievalDiagnostics `json:"diagnostics,omitempty"`
+}
+
+// compactChunk's ID is the chunk id citations use: [ID:<id>].
+type compactChunk struct {
+	ID           string  `json:"id"`
+	DocumentName string  `json:"document_name,omitempty"`
+	DocumentID   string  `json:"document_id,omitempty"`
+	DatasetID    string  `json:"dataset_id,omitempty"`
+	Page         int     `json:"page,omitempty"`
+	Score        float64 `json:"score"`
+	Content      string  `json:"content"`
+}
+
+// chunkPage is the chunk's page. PageNum is 0 whenever the engine stores
+// page_num_int as a list (PDF chunks spanning positions), so the first
+// position's page stands in.
+func chunkPage(c RetrievalChunk) int {
+	if c.PageNum > 0 {
+		return c.PageNum
+	}
+	first := func(list any) any {
+		switch typed := list.(type) {
+		case []any:
+			if len(typed) > 0 {
+				return typed[0]
+			}
+		case [][]float64:
+			if len(typed) > 0 {
+				return typed[0]
+			}
+		case []float64:
+			if len(typed) > 0 {
+				return typed[0]
+			}
+		}
+		return nil
+	}
+	position := first(c.Positions)
+	if page := first(position); page != nil {
+		position = page
+	}
+	if page, ok := position.(float64); ok && page > 0 {
+		return int(page)
+	}
+	return 0
+}
+
+func compactRetrievalJSON(out retrievalResult, chunks []RetrievalChunk, emptyResponse string) (string, error) {
+	compact := compactRetrievalResult{
+		Chunks:           make([]compactChunk, 0, len(chunks)),
+		FiltersRelaxed:   out.FiltersRelaxed,
+		ScopeDroppedKeys: out.ScopeDroppedKeys,
+		ScopeRelaxable:   out.ScopeRelaxable,
+		Diagnostics:      out.Diagnostics,
+	}
+	for _, c := range chunks {
+		compact.Chunks = append(compact.Chunks, compactChunk{
+			ID:           c.ID,
+			DocumentName: c.DocumentName,
+			DocumentID:   c.DocumentID,
+			DatasetID:    c.DatasetID,
+			Page:         chunkPage(c),
+			Score:        math.Round(c.Score*1000) / 1000,
+			Content:      c.Content,
+		})
+	}
+	if len(chunks) == 0 {
+		compact.Message = emptyResponse
+	}
+	encoded, err := json.Marshal(compact)
+	if err != nil {
+		return "", fmt.Errorf("retrieval: marshal result: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// recordExplicitFilter reports the model's conditions where the references
+// show the tool's metadata filter, in place of the LLM filter they replace.
+func recordExplicitFilter(diagnostics *common.MetadataFilterDiagnostic, explicit *runtime.ExplicitFilters) {
+	diagnostics.Method = "explicit"
+	diagnostics.Logic = "and"
+	diagnostics.Conditions = explicit.Conditions
+	diagnostics.MatchedDocumentCount = explicit.Trace.ScopeDocs
+	diagnostics.Status = "applied"
+	if explicit.Trace.ScopeDocs == 0 {
+		diagnostics.Status = "no_matches"
+	}
 }
 
 func (r *RetrievalTool) mergeDefaults(args retrievalArgs) retrievalArgs {
@@ -729,7 +876,9 @@ var dupSuffixRe = regexp.MustCompile(`\(\d+\)(\.[A-Za-z0-9]+)?$`)
 // capChunksPerDocument keeps at most max chunks per logical document,
 // identified by normalized document name (duplicate "(N)" file variants
 // count as one) with document_id as fallback when no name is present.
-func capChunksPerDocument(chunks []RetrievalChunk, max int) []RetrievalChunk {
+// byBaseName also folds the folder path, so one file synced into several
+// folders shares the cap.
+func capChunksPerDocument(chunks []RetrievalChunk, max int, byBaseName bool) []RetrievalChunk {
 	if max <= 0 {
 		return chunks
 	}
@@ -740,7 +889,11 @@ func capChunksPerDocument(chunks []RetrievalChunk, max int) []RetrievalChunk {
 		if key == "" {
 			key = c.DocumentID
 		}
-		key = dupSuffixRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(key)), "$1")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if byBaseName && c.DocumentName != "" {
+			key = path.Base(strings.ReplaceAll(key, `\`, "/"))
+		}
+		key = dupSuffixRe.ReplaceAllString(key, "$1")
 		if seen[key] >= max {
 			continue
 		}

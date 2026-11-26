@@ -1210,6 +1210,12 @@ func (s *ChatPipelineService) chatMetadataScope(ctx context.Context, chat *entit
 	return docIDs, scope.ChunkMeta
 }
 
+// ConstrainDocIDs keeps the filtered documents that are also in baseDocIDs, in
+// base order; an empty base constrains nothing.
+func ConstrainDocIDs(baseDocIDs, filteredDocIDs []string) []string {
+	return constrainDocIDs(baseDocIDs, filteredDocIDs)
+}
+
 func constrainDocIDs(baseDocIDs, filteredDocIDs []string) []string {
 	filteredDocIDs = common.Deduplicate(filteredDocIDs)
 	if len(baseDocIDs) == 0 {

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"ragflow/internal/common"
 
@@ -96,6 +97,10 @@ type RetrievalRequest struct {
 	// drop for this call (tool arg `scope_drop`). Keys outside the request's
 	// declared relax set are ignored and reported as no-ops in diagnostics.
 	ScopeDrop []string
+	// Explicit is set by a Retrieval tool configured with filter_args: the model
+	// states its metadata conditions itself instead of an LLM filter guessing
+	// them. Nil leaves retrieval unchanged.
+	Explicit *ExplicitFilters
 	// TenantID is the tenant that owns the running canvas.
 	TenantID string
 	// RankFeature is the label_question term→weight map passed through to the
@@ -127,6 +132,57 @@ type RetrievalRequest struct {
 	VectorOnly bool
 	// SelectFields limits the ES _source fields returned per hit.
 	SelectFields []string
+}
+
+// ExplicitFilters carries the conditions the model passed in the tool arg
+// `filters`, already validated against the tool's allow-list, and receives
+// what the search did with them.
+type ExplicitFilters struct {
+	// Conditions are {key, op, value} maps in the manual metadata filter shape.
+	// They AND with any request scope and are never relaxed.
+	Conditions []map[string]any
+	// Boosts are the model's soft preferences (tool arg `boost`) as manual
+	// boost rows {key, op, value, weight}. They rank, they never scope.
+	Boosts []map[string]any
+	Trace  RetrievalTrace
+}
+
+// BoostOutcome is what the search did with ExplicitFilters.Boosts: the rows
+// that reached the scorer, and why the others did not.
+type BoostOutcome struct {
+	Applied []map[string]any
+	// Inactive is set when no row could apply: the searched datasets do not
+	// all carry ready chunk metadata.
+	Inactive string
+	// IgnoredKeys are boost keys missing from the chunk metadata fields.
+	IgnoredKeys []string
+}
+
+// RetrievalTrace reports one Search call. The timings sum over every attempt
+// (request-scope relaxation levels).
+type RetrievalTrace struct {
+	// ScopeDocs is how many documents the hard scope (request scope, project
+	// scope, explicit conditions) left to search. ScopeResolved is false when
+	// no hard scope applied.
+	ScopeDocs     int
+	ScopeResolved bool
+	Boost         BoostOutcome
+	Attempts      int
+	Scope         time.Duration
+	Embed         time.Duration
+	Search        time.Duration
+	Rerank        time.Duration
+}
+
+// TraceScope records one hard-scope resolution; a nil receiver (no explicit
+// filters) records nothing.
+func (e *ExplicitFilters) TraceScope(since time.Time, docs int) {
+	if e == nil {
+		return
+	}
+	e.Trace.Scope += time.Since(since)
+	e.Trace.ScopeDocs = docs
+	e.Trace.ScopeResolved = true
 }
 
 // RetrievalService is the knowledge-base search interface. The server installs

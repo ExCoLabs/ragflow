@@ -25,11 +25,17 @@
 package retrievalbridge
 
 import (
+	"context"
+	"reflect"
 	"testing"
 
 	"ragflow/internal/common"
+	"ragflow/internal/engine"
+	"ragflow/internal/engine/types"
 	modelModule "ragflow/internal/entity/models"
 	"ragflow/internal/service"
+
+	"gorm.io/gorm"
 )
 
 func newFilterChatModel() *modelModule.ChatModel {
@@ -90,5 +96,102 @@ func TestFilterDocumentsReturnsTheSentinelForManualNoMatch(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != service.NoMatchDocIDSentinel {
 		t.Fatalf("got %v, want [%s]", got, service.NoMatchDocIDSentinel)
+	}
+}
+
+// pushdownEngine answers the metadata push-down with a fixed result and counts
+// the flattened-metadata reads the push-down path is meant to avoid.
+type pushdownEngine struct {
+	engine.DocEngine
+	ids        []string
+	conditions []map[string]interface{}
+	logic      string
+	scans      int
+}
+
+func (e *pushdownEngine) FilterDocIdsByMetaPushdown(_ context.Context, _ *gorm.DB, _ []string, conditions []map[string]interface{}, logic string) []string {
+	e.conditions, e.logic = conditions, logic
+	return e.ids
+}
+
+func (e *pushdownEngine) SearchMetadata(context.Context, *types.SearchMetadataRequest) (*types.SearchMetadataResult, error) {
+	e.scans++
+	return &types.SearchMetadataResult{}, nil
+}
+
+func pushdownFilter() map[string]any {
+	return map[string]any{"method": "manual", "logic": "and", "manual": []any{
+		map[string]any{"key": "project", "op": "contains", "value": "Nivy"},
+		map[string]any{"key": "phase", "op": "in", "value": []any{"DSP"}},
+	}}
+}
+
+// When the metadata index answers, the flattened metadata is never read and
+// the result is constrained to the caller's base scope.
+func TestPushdownDocumentsSkipsTheFlattenedScan(t *testing.T) {
+	docEngine := &pushdownEngine{ids: []string{"doc-2", "doc-3", "doc-2"}}
+	enhancer := NewEnhancer(docEngine, service.NewMetadataServiceForTest(nil, docEngine))
+
+	got, err := enhancer.PushdownDocuments(t.Context(), pushdownFilter(), []string{"doc-1", "doc-2"}, []string{"kb-1"})
+	if err != nil {
+		t.Fatalf("PushdownDocuments: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"doc-2"}) {
+		t.Fatalf("got %v, want the base scope's match [doc-2]", got)
+	}
+	want := []map[string]interface{}{
+		{"key": "project", "op": "contains", "value": "Nivy"},
+		{"key": "phase", "op": "in", "value": []any{"DSP"}},
+	}
+	if !reflect.DeepEqual(docEngine.conditions, want) || docEngine.logic != "and" {
+		t.Fatalf("pushed down %v (%s), want %v (and)", docEngine.conditions, docEngine.logic, want)
+	}
+	if docEngine.scans != 0 {
+		t.Fatalf("flattened metadata was read %d times", docEngine.scans)
+	}
+
+	docEngine.ids = []string{}
+	got, err = enhancer.PushdownDocuments(t.Context(), pushdownFilter(), nil, []string{"kb-1"})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("definitive no-match: got %v err=%v, want nothing", got, err)
+	}
+}
+
+// When the push-down cannot answer, FilterDocuments decides, and its no-match
+// sentinel is not handed on as a document id.
+func TestPushdownDocumentsFallsBackWithoutTheSentinel(t *testing.T) {
+	docEngine := &pushdownEngine{}
+	enhancer := NewEnhancer(docEngine, service.NewMetadataServiceForTest(nil, docEngine))
+
+	got, err := enhancer.PushdownDocuments(t.Context(), pushdownFilter(), []string{"doc-1"}, nil)
+	if err != nil {
+		t.Fatalf("PushdownDocuments: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %v, want no documents", got)
+	}
+}
+
+// Project codes look like Python int literals with a digit separator; pushed
+// down as "=" they were coerced to numbers and matched nothing, which sent
+// every explicit filter to the 10k-capped flattened scan.
+func TestPushdownDocumentsKeepsValuesAsStrings(t *testing.T) {
+	docEngine := &pushdownEngine{ids: []string{"doc-1"}}
+	enhancer := NewEnhancer(docEngine, service.NewMetadataServiceForTest(nil, docEngine))
+	filter := map[string]any{"method": "manual", "logic": "and", "manual": []any{
+		map[string]any{"key": "project_id", "op": "=", "value": "2018_055"},
+		map[string]any{"key": "phase", "op": "in", "value": []string{"sp"}},
+		map[string]any{"key": "flow", "op": "in", "value": []any{"expedition"}},
+	}}
+	if _, err := enhancer.PushdownDocuments(t.Context(), filter, nil, []string{"kb-1"}); err != nil {
+		t.Fatalf("PushdownDocuments: %v", err)
+	}
+	want := []map[string]interface{}{
+		{"key": "project_id", "op": "in", "value": []any{"2018_055"}},
+		{"key": "phase", "op": "in", "value": []any{"sp"}},
+		{"key": "flow", "op": "in", "value": []any{"expedition"}},
+	}
+	if !reflect.DeepEqual(docEngine.conditions, want) {
+		t.Fatalf("pushed down %v, want %v", docEngine.conditions, want)
 	}
 }
