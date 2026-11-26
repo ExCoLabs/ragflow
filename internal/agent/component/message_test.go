@@ -385,6 +385,28 @@ func TestMessage_DeferredStreamThinkingEvents(t *testing.T) {
 	}
 }
 
+func TestMessage_DeferredStreamStoresReasoning(t *testing.T) {
+	c, _ := NewMessageComponent(nil)
+	state := canvas.NewCanvasState("run-deferred-reasoning", "task-deferred-reasoning")
+	state.SetVar("agent_0", "content", &runtime.DeferredStream{
+		Open: func(_ context.Context, sink runtime.AgentDeltaSink) (map[string]any, error) {
+			sink("", "first round")
+			sink("", "\n\nsecond round")
+			sink("answer", "")
+			return map[string]any{"content": "answer", "thinking": "second round"}, nil
+		},
+	})
+	ctx := withStateForTest(t.Context(), state)
+	ctx = runtime.WithCanvasMessageEventEmitter(ctx, func(string, bool, bool) {})
+
+	if _, err := c.Invoke(ctx, nil, map[string]any{"text": "{{agent_0@content}}"}); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got, _ := state.GetVar("agent_0@thinking"); got != "first round\n\nsecond round" {
+		t.Fatalf("agent_0 thinking=%q, want the whole streamed reasoning", got)
+	}
+}
+
 func TestMessage_DeferredStreamUsesCompletedContent(t *testing.T) {
 	c, _ := NewMessageComponent(nil)
 	state := canvas.NewCanvasState("run-deferred-final", "task-deferred-final")

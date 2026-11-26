@@ -377,6 +377,74 @@ func (m *slowThinkingModel) Stream(_ context.Context, _ []*schema.Message, _ ...
 // return until the model finishes. The collector (emitAgentModelStreams)
 // must therefore be started before agent.Stream and deliver the first
 // thinking delta while the model is still streaming.
+// twoRoundReasoningModel reasons, calls a tool, then reasons again and answers.
+type twoRoundReasoningModel struct{ turn int }
+
+func (m *twoRoundReasoningModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func (m *twoRoundReasoningModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return &schema.Message{Role: schema.Assistant, Content: "2"}, nil
+}
+
+func (m *twoRoundReasoningModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	m.turn++
+	if m.turn == 1 {
+		return schema.StreamReaderFromArray([]*schema.Message{
+			{Role: schema.Assistant, ReasoningContent: "search "},
+			{Role: schema.Assistant, ReasoningContent: "first"},
+			{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{
+				ID:       "call-1",
+				Type:     "function",
+				Function: schema.FunctionCall{Name: "execute_code", Arguments: `{"lang":"python","script":"def main(): return 2"}`},
+			}}},
+		}), nil
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{
+		{Role: schema.Assistant, ReasoningContent: "now answer"},
+		{Role: schema.Assistant, Content: "2"},
+	}), nil
+}
+
+func TestEmitAgentModelStreamsWithCiteSeparatesReasoningRounds(t *testing.T) {
+	agent, err := react.NewAgent(t.Context(), &react.AgentConfig{
+		ToolCallingModel:      &twoRoundReasoningModel{},
+		ToolsConfig:           compose.ToolsNodeConfig{Tools: []einotool.BaseTool{&passthroughTool{name: "execute_code"}}},
+		StreamToolCallChecker: scanAllStreamForToolCall,
+		MaxStep:               4,
+	})
+	if err != nil {
+		t.Fatalf("react.NewAgent: %v", err)
+	}
+	var reasoning, content strings.Builder
+	ctx := runtime.WithAgentDeltaSink(t.Context(), func(contentDelta, thinkingDelta string) {
+		content.WriteString(contentDelta)
+		reasoning.WriteString(thinkingDelta)
+	})
+
+	opt, future := react.WithMessageFuture()
+	emitDone := emitAgentModelStreams(ctx, future, true, false)
+	stream, err := agent.Stream(ctx, []*schema.Message{schema.UserMessage("calculate")}, opt)
+	if err != nil {
+		t.Fatalf("agent.Stream: %v", err)
+	}
+	for {
+		if _, recvErr := stream.Recv(); recvErr == io.EOF {
+			break
+		}
+	}
+	stream.Close()
+	<-emitDone
+
+	if got, want := reasoning.String(), "search first\n\nnow answer"; got != want {
+		t.Errorf("reasoning=%q, want %q", got, want)
+	}
+	if content.Len() != 0 {
+		t.Errorf("content=%q streamed before grounding, want none", content.String())
+	}
+}
+
 func TestReactCheckerStreamsThinkingBeforeAgentReturns(t *testing.T) {
 	mdl := &slowThinkingModel{}
 	tool := &passthroughTool{name: "execute_code"}

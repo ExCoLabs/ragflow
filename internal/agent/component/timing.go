@@ -40,9 +40,10 @@ const (
 )
 
 // toolObserver is what every tool call of an Agent run passes through: it
-// times the call into the run's PhaseTimings, writes the per-call timing
-// line, and — only when the Agent opted in — reports progress to the client
-// and hands MCP tool errors to the model.
+// times the call into the run's PhaseTimings, reports it as a started/finished
+// tool_call event pair, writes the per-call timing line, and — only when the
+// Agent opted in — reports progress to the client and hands MCP tool errors
+// to the model.
 type toolObserver struct {
 	name string
 	kind string
@@ -58,6 +59,7 @@ type observedCall struct {
 
 func (o *toolObserver) begin(ctx context.Context, argumentsInJSON string) observedCall {
 	call := observedCall{start: time.Now(), id: compose.GetToolCallID(ctx)}
+	runtime.EmitToolCall(ctx, runtime.ToolCallEvent{ID: call.id, Name: o.name, Status: runtime.ToolCallStarted})
 	runtime.EmitAgentProgress(ctx, runtime.AgentProgressEvent{
 		Kind:   o.kind,
 		Phase:  "start",
@@ -70,10 +72,15 @@ func (o *toolObserver) begin(ctx context.Context, argumentsInJSON string) observ
 }
 
 // end closes a call. resultBytes is -1 for a streamed result, whose size and
-// full duration are not known when the stream is handed over.
+// full duration are not known when the stream is handed over; a streamable
+// tool counts as finished once its stream opens.
 func (o *toolObserver) end(ctx context.Context, call observedCall, out string, resultBytes int, err error) (string, error) {
 	took := time.Since(call.start)
 	o.acc.AddTool(took)
+	runtime.EmitToolCall(ctx, runtime.ToolCallEvent{
+		ID: call.id, Name: o.name, Status: runtime.ToolCallFinished,
+		ElapsedTime: took.Seconds(), Error: err != nil,
+	})
 
 	errText := ""
 	if err != nil {

@@ -2116,6 +2116,11 @@ func (s *AgentService) buildRunFunc(canvasID string, versionRow *entity.UserCanv
 				EndToThink:   endToThink,
 			})
 		})
+		ctx2 = runtime.WithToolCallEmitter(ctx2, func(ev runtime.ToolCallEvent) {
+			if data, err := json.Marshal(ev); err == nil {
+				emit("tool_call", string(data))
+			}
+		})
 
 		// Seed initial env/sys values from the Canvas DSL globals.
 		// Python's self.globals dict stores "sys.*" and "env.*" under
