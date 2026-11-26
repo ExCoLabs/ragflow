@@ -116,9 +116,13 @@ func (e *Enhancer) ScopeDocuments(
 	for _, kb := range kbs {
 		kbIDs = append(kbIDs, kb.ID)
 	}
-	metadata, err := e.metadataSvc.GetFlattedMetaByKBs(ctx, kbIDs)
-	if err != nil {
-		return nil, nil, err
+	chunkMeta := service.ChunkMetadataConfigForKBs(kbs)
+	var metadata common.MetaData
+	if !boostOnly(filter, chunkMeta) {
+		var err error
+		if metadata, err = e.metadataSvc.GetFlattedMetaByKBs(ctx, kbIDs); err != nil {
+			return nil, nil, err
+		}
 	}
 	scope := service.ApplyMetaDataScopeWithDiagnostics(
 		ctx,
@@ -128,7 +132,7 @@ func (e *Enhancer) ScopeDocuments(
 		chatModel,
 		baseDocIDs,
 		kbIDs,
-		service.ChunkMetadataConfigForKBs(kbs),
+		chunkMeta,
 		diagnostics,
 	)
 	// nil: no metadata narrowing, keep the caller's scope (see FilterDocuments).
@@ -136,6 +140,25 @@ func (e *Enhancer) ScopeDocuments(
 		return baseDocIDs, scope.ChunkMeta, nil
 	}
 	return scope.DocIDs, scope.ChunkMeta, nil
+}
+
+// boostOnly reports a filter that only carries fixed boosts on active chunk
+// metadata: ApplyMetaDataScope never reads the flattened metadata for it, and
+// that read is a 10k-capped scan per search.
+func boostOnly(filter map[string]any, chunkMeta *common.ChunkMetadataConfig) bool {
+	if !chunkMeta.Active() {
+		return false
+	}
+	if method, _ := filter["method"].(string); method != "" && method != "disabled" {
+		return false
+	}
+	return !common.ParseMetaBoost(filter["boost"], chunkMeta.Fields).UsesLLM()
+}
+
+// ChunkMetadataConfig is the chunk metadata configuration ScopeDocuments
+// applies the filter and boosts with for kbs; nil means the doc-id path.
+func (e *Enhancer) ChunkMetadataConfig(kbs []*entity.Knowledgebase) *common.ChunkMetadataConfig {
+	return service.ChunkMetadataConfigForKBs(kbs)
 }
 
 // PushdownDocuments resolves a manual filter like FilterDocuments, but asks the

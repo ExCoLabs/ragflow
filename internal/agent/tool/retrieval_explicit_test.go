@@ -67,6 +67,19 @@ func TestRetrievalWithoutFilterArgsIsUnchanged(t *testing.T) {
 	if string(schemaJSON) != wantSchema {
 		t.Fatalf("schema changed:\n%s", schemaJSON)
 	}
+	for _, args := range []string{
+		`{"query":"alpha","boost":[{"key":"sector","value":["g"],"weight":0.5}]}`,
+		`{"query":"alpha","boost":"not a boost list","filters":7}`,
+	} {
+		out, err := tool.InvokableRun(t.Context(), args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const wantOut = `{"formalized_content":"[ID:ck-1] answer\n","chunks":[{"id":"ck-1","content":"answer"}]}`
+		if out != wantOut {
+			t.Fatalf("%s: result changed:\n%s", args, out)
+		}
+	}
 	out, err := tool.InvokableRun(t.Context(), `{"query":"alpha","filters":[{"key":"project","op":"=","value":["x"]}]}`)
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +344,14 @@ type explicitEnhancer struct {
 	countCalls int
 	countDocs  [][]string
 	countErr   error
+	// chunkMeta is what ChunkMetadataConfig reports; scoped records the
+	// filters ScopeDocuments was given.
+	chunkMeta *common.ChunkMetadataConfig
+	scoped    []map[string]any
+}
+
+func (e *explicitEnhancer) ChunkMetadataConfig([]*entity.Knowledgebase) *common.ChunkMetadataConfig {
+	return e.chunkMeta
 }
 
 func explicitFilterKeys(filter map[string]any) []string {
@@ -381,9 +402,19 @@ func (e *explicitEnhancer) PushdownDocuments(_ context.Context, filter map[strin
 	return matchExplicitDocs(filter), nil
 }
 
-func (e *explicitEnhancer) ScopeDocuments(_ context.Context, _ map[string]any, _ string, _ *modelModule.ChatModel, base []string, _ []*entity.Knowledgebase, _ *common.MetadataFilterDiagnostic) ([]string, *common.ChunkMetaScope, error) {
+// ScopeDocuments hands fixed boosts on to the scorer the way
+// service.ApplyMetaDataScope does on active chunk metadata, and never narrows.
+func (e *explicitEnhancer) ScopeDocuments(_ context.Context, filter map[string]any, _ string, _ *modelModule.ChatModel, base []string, _ []*entity.Knowledgebase, _ *common.MetadataFilterDiagnostic) ([]string, *common.ChunkMetaScope, error) {
 	e.scopeCalls++
-	return base, nil, nil
+	e.scoped = append(e.scoped, filter)
+	if !e.chunkMeta.Active() {
+		return base, nil, nil
+	}
+	boost := common.ParseMetaBoost(filter["boost"], e.chunkMeta.Fields)
+	if len(boost.Manual) == 0 {
+		return base, nil, nil
+	}
+	return base, &common.ChunkMetaScope{Boosts: boost.Manual, BoostMaxTotal: boost.MaxTotal}, nil
 }
 
 func (e *explicitEnhancer) MetadataValueCounts(_ context.Context, _, keys, docIDs []string) (map[string]map[string]int64, error) {
@@ -491,12 +522,15 @@ type explicitToolResult struct {
 	Chunks           []chunkPayload `json:"chunks"`
 	ScopeDroppedKeys []string       `json:"scope_dropped_keys"`
 	Diagnostics      *struct {
-		Filters      []map[string]any `json:"filters"`
-		RequestScope []map[string]any `json:"request_scope"`
-		DocsInScope  *int             `json:"docs_in_scope"`
-		Chunks       int              `json:"chunks"`
-		Ms           map[string]int64 `json:"ms"`
-		Hint         string           `json:"hint"`
+		Filters          []map[string]any `json:"filters"`
+		RequestScope     []map[string]any `json:"request_scope"`
+		DocsInScope      *int             `json:"docs_in_scope"`
+		Boosts           []map[string]any `json:"boosts"`
+		BoostInactive    string           `json:"boost_inactive"`
+		BoostIgnoredKeys []string         `json:"boost_ignored_keys"`
+		Chunks           int              `json:"chunks"`
+		Ms               map[string]int64 `json:"ms"`
+		Hint             string           `json:"hint"`
 	} `json:"diagnostics"`
 	Error string `json:"_ERROR"`
 }

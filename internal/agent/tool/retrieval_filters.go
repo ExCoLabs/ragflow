@@ -208,6 +208,33 @@ func (c *filterArgsConfig) filtersParam(valuesTool, purpose string) *schema.Para
 	}
 }
 
+func (c *filterArgsConfig) boostParam() *schema.ParameterInfo {
+	return &schema.ParameterInfo{
+		Type: schema.Array,
+		Desc: fmt.Sprintf("Soft preferences: rank documents matching a value higher, without dropping the others. "+
+			"Use filters for what the user fixed and boost for what should only be preferred, e.g. metadata that only part of the documents carry. "+
+			"Keys: %s. At most %d entries. Boosts apply only to keys the dataset copies onto its chunks (chunk metadata); "+
+			"the response's diagnostics say when a boost could not apply. The boosts of one chunk add up to at most %g.",
+			strings.Join(c.keyNames(), ", "), c.MaxConditions, common.DefaultMetaBoostMaxTotal),
+		ElemInfo: &schema.ParameterInfo{
+			Type: schema.Object,
+			SubParams: map[string]*schema.ParameterInfo{
+				"key": {Type: schema.String, Enum: c.keyNames(), Required: true},
+				"value": {
+					Type:     schema.Array,
+					ElemInfo: &schema.ParameterInfo{Type: schema.String},
+					Desc:     "One or more values; a document matching any of them is preferred.",
+					Required: true,
+				},
+				"weight": {
+					Type: schema.Number,
+					Desc: fmt.Sprintf("Strength from 0 to 1; default %g.", common.DefaultMetaBoostWeight),
+				},
+			},
+		},
+	}
+}
+
 // parseModelFilters validates the model's `filters` argument against the
 // allow-list and returns manual-filter conditions. Any problem rejects the
 // whole argument: searching wider than the model asked for would hand it
@@ -239,20 +266,24 @@ func (c *filterArgsConfig) parseModelFilters(raw json.RawMessage) ([]map[string]
 // decodeModelFilterList accepts the declared array, a single condition object,
 // and either of them double-encoded as a JSON string (a common model slip).
 func decodeModelFilterList(raw json.RawMessage) ([]map[string]any, error) {
+	return decodeModelArgList(raw, "filters", "{key, op, value}")
+}
+
+func decodeModelArgList(raw json.RawMessage, arg, shape string) ([]map[string]any, error) {
 	text := strings.TrimSpace(string(raw))
 	if text == "" || text == "null" {
 		return nil, nil
 	}
 	var decoded any
 	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
-		return nil, fmt.Errorf("filters: not valid JSON")
+		return nil, fmt.Errorf("%s: not valid JSON", arg)
 	}
 	if encoded, ok := decoded.(string); ok {
 		if strings.TrimSpace(encoded) == "" {
 			return nil, nil
 		}
 		if err := json.Unmarshal([]byte(encoded), &decoded); err != nil {
-			return nil, fmt.Errorf("filters: must be a list of {key, op, value} objects")
+			return nil, fmt.Errorf("%s: must be a list of %s objects", arg, shape)
 		}
 	}
 	if single, ok := decoded.(map[string]any); ok {
@@ -260,13 +291,13 @@ func decodeModelFilterList(raw json.RawMessage) ([]map[string]any, error) {
 	}
 	list, ok := decoded.([]any)
 	if !ok {
-		return nil, fmt.Errorf("filters: must be a list of {key, op, value} objects")
+		return nil, fmt.Errorf("%s: must be a list of %s objects", arg, shape)
 	}
 	items := make([]map[string]any, 0, len(list))
 	for index, entry := range list {
 		item, ok := entry.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("filters[%d]: must be a {key, op, value} object", index)
+			return nil, fmt.Errorf("%s[%d]: must be a %s object", arg, index, shape)
 		}
 		items = append(items, item)
 	}
@@ -343,6 +374,68 @@ func modelFilterValues(raw any) ([]string, string) {
 	return values, ""
 }
 
+// parseModelBoosts validates the model's `boost` argument like
+// parseModelFilters and returns manual boost rows; any problem rejects the
+// call so the model never reads an unboosted ranking as a boosted one.
+func (c *filterArgsConfig) parseModelBoosts(raw json.RawMessage) ([]map[string]any, []string) {
+	items, err := decodeModelArgList(raw, "boost", "{key, value, weight}")
+	if err != nil {
+		return nil, []string{err.Error()}
+	}
+	if len(items) > c.MaxConditions {
+		return nil, []string{fmt.Sprintf("boost: %d entries given, at most %d are allowed", len(items), c.MaxConditions)}
+	}
+	rows := make([]map[string]any, 0, len(items))
+	var problems []string
+	for index, item := range items {
+		row, problem := c.parseModelBoost(item)
+		if problem != "" {
+			problems = append(problems, fmt.Sprintf("boost[%d]: %s", index, problem))
+			continue
+		}
+		rows = append(rows, row)
+	}
+	if len(problems) > 0 {
+		return nil, problems
+	}
+	return rows, nil
+}
+
+func (c *filterArgsConfig) parseModelBoost(item map[string]any) (map[string]any, string) {
+	name, _ := item["key"].(string)
+	name = strings.TrimSpace(name)
+	if _, known := c.key(name); !known {
+		return nil, fmt.Sprintf("key %q cannot be boosted; boostable keys: %s", name, strings.Join(c.keyNames(), ", "))
+	}
+	if rawOp, given := item["op"]; given {
+		text, _ := rawOp.(string)
+		if op, _ := canonicalFilterOp(text); op != "=" && op != "in" {
+			return nil, fmt.Sprintf("boost matches exact values only; omit op (got %q)", text)
+		}
+	}
+	rawValue, exists := item["value"]
+	if !exists {
+		rawValue = item["values"]
+	}
+	values, problem := modelFilterValues(rawValue)
+	if problem != "" {
+		return nil, problem
+	}
+	weight := common.DefaultMetaBoostWeight
+	if rawWeight, given := item["weight"]; given && rawWeight != nil {
+		number, ok := rawWeight.(float64)
+		if !ok || number < 0 || number > 1 {
+			return nil, "weight must be a number from 0 to 1"
+		}
+		weight = number
+	}
+	list := make([]any, len(values))
+	for i, value := range values {
+		list[i] = value
+	}
+	return map[string]any{"key": name, "op": "in", "value": list, "weight": weight}, ""
+}
+
 func invalidFiltersMessage(problems []string, cfg *filterArgsConfig) string {
 	return fmt.Sprintf("Invalid filters, nothing was searched: %s. Filterable keys and operators: %s. Fix the filters and call the tool again.",
 		strings.Join(problems, "; "), cfg.describeKeys())
@@ -386,15 +479,50 @@ func withoutLLMMetaFilter(filter map[string]any) map[string]any {
 	return out
 }
 
+func invalidBoostMessage(problems []string, cfg *filterArgsConfig) string {
+	return fmt.Sprintf("Invalid boost, nothing was searched: %s. Boostable keys: %s. Fix the boost and call the tool again.",
+		strings.Join(problems, "; "), strings.Join(cfg.keyNames(), ", "))
+}
+
+// withModelBoosts appends the model's boost rows to the filter's manual boost.
+// Fresh maps and slices: filter may share them with the tool's DSL defaults.
+func withModelBoosts(filter map[string]any, rows []map[string]any) map[string]any {
+	if len(rows) == 0 {
+		return filter
+	}
+	out := cloneStringAnyMap(filter)
+	if out == nil {
+		out = map[string]any{"method": "disabled"}
+	}
+	boost := map[string]any{}
+	if existing, ok := out["boost"].(map[string]any); ok {
+		boost = cloneStringAnyMap(existing)
+	}
+	fixed, _ := boost["manual"].([]any)
+	manual := append([]any(nil), fixed...)
+	for _, row := range rows {
+		manual = append(manual, row)
+	}
+	boost["method"] = "manual"
+	boost["manual"] = manual
+	out["boost"] = boost
+	return out
+}
+
 // retrievalDiagnostics is the per-call report an explicit-filter tool returns
 // to the model next to the chunks.
 type retrievalDiagnostics struct {
 	Filters      []map[string]any `json:"filters"`
 	RequestScope []any            `json:"request_scope,omitempty"`
 	DocsInScope  *int             `json:"docs_in_scope,omitempty"`
-	Chunks       int              `json:"chunks"`
-	Ms           retrievalMs      `json:"ms"`
-	Hint         string           `json:"hint,omitempty"`
+	// Boosts are the rows that reached the scorer; BoostInactive and
+	// BoostIgnoredKeys say why a requested boost did not.
+	Boosts           []map[string]any `json:"boosts,omitempty"`
+	BoostInactive    string           `json:"boost_inactive,omitempty"`
+	BoostIgnoredKeys []string         `json:"boost_ignored_keys,omitempty"`
+	Chunks           int              `json:"chunks"`
+	Ms               retrievalMs      `json:"ms"`
+	Hint             string           `json:"hint,omitempty"`
 }
 
 type retrievalMs struct {
@@ -408,9 +536,12 @@ type retrievalMs struct {
 func (r *RetrievalTool) explicitDiagnostics(ctx context.Context, explicit *runtime.ExplicitFilters, datasetIDs, droppedKeys []string, chunks int, total time.Duration) *retrievalDiagnostics {
 	trace := explicit.Trace
 	out := &retrievalDiagnostics{
-		Filters:      explicit.Conditions,
-		RequestScope: activeRequestScope(ctx, datasetIDs, droppedKeys),
-		Chunks:       chunks,
+		Filters:          explicit.Conditions,
+		RequestScope:     activeRequestScope(ctx, datasetIDs, droppedKeys),
+		Boosts:           trace.Boost.Applied,
+		BoostInactive:    trace.Boost.Inactive,
+		BoostIgnoredKeys: trace.Boost.IgnoredKeys,
+		Chunks:           chunks,
 		Ms: retrievalMs{
 			Total:     total.Milliseconds(),
 			Scope:     trace.Scope.Milliseconds(),
@@ -435,6 +566,18 @@ func (r *RetrievalTool) explicitDiagnostics(ctx context.Context, explicit *runti
 		}
 	}
 	filters, _ := json.Marshal(out.Filters)
+	boosts := []byte("[]")
+	if len(out.Boosts) > 0 {
+		boosts, _ = json.Marshal(out.Boosts)
+	}
+	skipped := ""
+	if out.BoostInactive != "" {
+		skipped = " boost_inactive=true"
+	}
+	if len(out.BoostIgnoredKeys) > 0 {
+		ignored, _ := json.Marshal(out.BoostIgnoredKeys)
+		skipped += " boost_ignored_keys=" + string(ignored)
+	}
 	sessionID, tenantID := "", ""
 	if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
 		sessionID, _ = state.Sys["session_id"].(string)
@@ -442,9 +585,9 @@ func (r *RetrievalTool) explicitDiagnostics(ctx context.Context, explicit *runti
 	}
 	common.AgentTimingLog(fmt.Sprintf(
 		"agent_retrieval_timings tool=%s total_ms=%d scope_ms=%d embedding_ms=%d search_ms=%d rerank_ms=%d "+
-			"attempts=%d docs_in_scope=%d chunks=%d filters=%s session=%s tenant=%s",
+			"attempts=%d docs_in_scope=%d chunks=%d filters=%s boosts=%s%s session=%s tenant=%s",
 		r.name, out.Ms.Total, out.Ms.Scope, out.Ms.Embedding, out.Ms.Search, out.Ms.Rerank,
-		trace.Attempts, docs, chunks, filters, sessionID, tenantID))
+		trace.Attempts, docs, chunks, filters, boosts, skipped, sessionID, tenantID))
 	return out
 }
 

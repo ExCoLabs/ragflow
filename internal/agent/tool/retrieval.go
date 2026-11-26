@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path"
 	"ragflow/internal/dao"
 	"regexp"
 	"strings"
@@ -73,7 +74,9 @@ type retrievalArgs struct {
 	// Filters are the model's explicit metadata conditions. Kept raw so a
 	// malformed value cannot fail argument parsing for tools that never
 	// declared filter_args, where it is ignored.
-	Filters       json.RawMessage `json:"filters,omitempty"`
+	Filters json.RawMessage `json:"filters,omitempty"`
+	// Boost is the model's soft preferences, raw for the same reason.
+	Boost         json.RawMessage `json:"boost,omitempty"`
 	RetrievalFrom string          `json:"retrieval_from,omitempty"`
 	EmptyResponse string          `json:"empty_response,omitempty"`
 	// FilterArgs is the DSL's filter_args. Never read from model arguments:
@@ -172,6 +175,7 @@ func (r *RetrievalTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	if cfg := r.defaults.FilterArgs; cfg != nil {
 		params["filters"] = cfg.filtersParam(r.valuesToolName(),
 			"Exact metadata conditions restricting which documents are searched; omit to search everything the request allows.")
+		params["boost"] = cfg.boostParam()
 	}
 	return &schema.ToolInfo{
 		Name:        r.name,
@@ -241,7 +245,11 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 		if len(problems) > 0 {
 			return stubJSONWithErr(retrievalResult{Error: invalidFiltersMessage(problems, cfg)})
 		}
-		explicit = &runtime.ExplicitFilters{Conditions: conditions}
+		boosts, problems := cfg.parseModelBoosts(args.Boost)
+		if len(problems) > 0 {
+			return stubJSONWithErr(retrievalResult{Error: invalidBoostMessage(problems, cfg)})
+		}
+		explicit = &runtime.ExplicitFilters{Conditions: conditions, Boosts: boosts}
 		args.MetaDataFilter = withoutLLMMetaFilter(args.MetaDataFilter)
 	}
 	started := time.Now()
@@ -317,7 +325,7 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 	// Duplicate document variants ((N).pdf copies of the same file) can
 	// crowd top-N on large datasets; cap chunks per normalized document
 	// name so distinct documents keep their slots. Rank order is preserved.
-	chunks = capChunksPerDocument(chunks, maxChunksPerDocument)
+	chunks = capChunksPerDocument(chunks, maxChunksPerDocument, explicit != nil)
 	filtersRelaxed := diagnostics != nil &&
 		(diagnostics.RelaxationAttempted || len(diagnostics.ScopeDroppedKeys) > 0)
 	common.Debug("agent retrieval tool: search result",
@@ -868,7 +876,9 @@ var dupSuffixRe = regexp.MustCompile(`\(\d+\)(\.[A-Za-z0-9]+)?$`)
 // capChunksPerDocument keeps at most max chunks per logical document,
 // identified by normalized document name (duplicate "(N)" file variants
 // count as one) with document_id as fallback when no name is present.
-func capChunksPerDocument(chunks []RetrievalChunk, max int) []RetrievalChunk {
+// byBaseName also folds the folder path, so one file synced into several
+// folders shares the cap.
+func capChunksPerDocument(chunks []RetrievalChunk, max int, byBaseName bool) []RetrievalChunk {
 	if max <= 0 {
 		return chunks
 	}
@@ -879,7 +889,11 @@ func capChunksPerDocument(chunks []RetrievalChunk, max int) []RetrievalChunk {
 		if key == "" {
 			key = c.DocumentID
 		}
-		key = dupSuffixRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(key)), "$1")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if byBaseName && c.DocumentName != "" {
+			key = path.Base(strings.ReplaceAll(key, `\`, "/"))
+		}
+		key = dupSuffixRe.ReplaceAllString(key, "$1")
 		if seen[key] >= max {
 			continue
 		}

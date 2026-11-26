@@ -11,7 +11,7 @@ func TestCapChunksPerDocument(t *testing.T) {
 		{ID: "a3", DocumentID: "d1", DocumentName: "SPEC.pdf"},
 		{ID: "b2", DocumentID: "d2", DocumentName: "SPEC(3).pdf"},
 	}
-	got := capChunksPerDocument(chunks, maxChunksPerDocument)
+	got := capChunksPerDocument(chunks, maxChunksPerDocument, false)
 	ids := []string{}
 	for _, c := range got {
 		ids = append(ids, c.ID)

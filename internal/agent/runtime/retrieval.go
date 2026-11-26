@@ -141,7 +141,21 @@ type ExplicitFilters struct {
 	// Conditions are {key, op, value} maps in the manual metadata filter shape.
 	// They AND with any request scope and are never relaxed.
 	Conditions []map[string]any
-	Trace      RetrievalTrace
+	// Boosts are the model's soft preferences (tool arg `boost`) as manual
+	// boost rows {key, op, value, weight}. They rank, they never scope.
+	Boosts []map[string]any
+	Trace  RetrievalTrace
+}
+
+// BoostOutcome is what the search did with ExplicitFilters.Boosts: the rows
+// that reached the scorer, and why the others did not.
+type BoostOutcome struct {
+	Applied []map[string]any
+	// Inactive is set when no row could apply: the searched datasets do not
+	// all carry ready chunk metadata.
+	Inactive string
+	// IgnoredKeys are boost keys missing from the chunk metadata fields.
+	IgnoredKeys []string
 }
 
 // RetrievalTrace reports one Search call. The timings sum over every attempt
@@ -152,6 +166,7 @@ type RetrievalTrace struct {
 	// no hard scope applied.
 	ScopeDocs     int
 	ScopeResolved bool
+	Boost         BoostOutcome
 	Attempts      int
 	Scope         time.Duration
 	Embed         time.Duration

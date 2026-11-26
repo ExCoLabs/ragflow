@@ -69,6 +69,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -108,6 +109,43 @@ type metadataScopeResolver interface {
 // FilterDocuments. Only explicit-filter tools use it.
 type pushdownScopeResolver interface {
 	PushdownDocuments(ctx context.Context, filter map[string]any, baseDocIDs, kbIDs []string) ([]string, error)
+}
+
+// chunkMetadataResolver is the optional enhancer surface that reports the
+// chunk metadata configuration ScopeDocuments applies boosts with.
+type chunkMetadataResolver interface {
+	ChunkMetadataConfig(kbs []*entity.Knowledgebase) *common.ChunkMetadataConfig
+}
+
+const boostInactiveReason = "boosts were not applied: chunk metadata is not enabled and ready on every searched dataset"
+
+// applyModelBoosts adds the model's boost rows the searched datasets can score
+// to req.MetaDataFilter and records the outcome. Rows that cannot apply stay
+// off the filter: ScopeDocuments would drop them anyway, after a metadata read.
+func (a *NLPRetrievalAdapter) applyModelBoosts(req *RetrievalRequest, kbs []*entity.Knowledgebase) {
+	if req.Explicit == nil || len(req.Explicit.Boosts) == 0 {
+		return
+	}
+	outcome := &req.Explicit.Trace.Boost
+	resolver, canResolve := a.enhancer.(chunkMetadataResolver)
+	_, canScope := a.enhancer.(metadataScopeResolver)
+	var cfg *common.ChunkMetadataConfig
+	if canResolve && canScope {
+		cfg = resolver.ChunkMetadataConfig(kbs)
+	}
+	if !cfg.Active() {
+		outcome.Inactive = boostInactiveReason
+		return
+	}
+	for _, row := range req.Explicit.Boosts {
+		key, _ := row["key"].(string)
+		if slices.Contains(cfg.Fields, key) {
+			outcome.Applied = append(outcome.Applied, row)
+		} else if !slices.Contains(outcome.IgnoredKeys, key) {
+			outcome.IgnoredKeys = append(outcome.IgnoredKeys, key)
+		}
+	}
+	req.MetaDataFilter = withModelBoosts(req.MetaDataFilter, outcome.Applied)
 }
 
 // NLPRetrievalAdapter wraps *nlp.RetrievalService behind the
@@ -327,6 +365,8 @@ func (a *NLPRetrievalAdapter) Search(ctx context.Context, db *gorm.DB, req Retri
 	if err != nil {
 		return nil, err
 	}
+
+	a.applyModelBoosts(&req, datasets.kbs)
 
 	// Model-driven scope drop: when the model names declared-relaxable keys
 	// (scope_drop), run exactly that filter — the model judges evidence
