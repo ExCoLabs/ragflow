@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"ragflow/internal/dao"
 	"regexp"
 	"strings"
@@ -78,6 +79,8 @@ type retrievalArgs struct {
 	// FilterArgs is the DSL's filter_args. Never read from model arguments:
 	// the allow-list is the tool author's.
 	FilterArgs *filterArgsConfig `json:"-"`
+	// CompactResult is the DSL's compact_result: see compactRetrievalResult.
+	CompactResult bool `json:"-"`
 	// FunctionName is the agent-visible tool name from the DSL. It is not
 	// exposed to the model as part of the tool arguments.
 	FunctionName string `json:"-"`
@@ -401,11 +404,68 @@ func (r *RetrievalTool) InvokableRun(ctx context.Context, argumentsInJSON string
 			state.AppendMetadataFilterDiagnostic(diagnostic)
 		}
 	}
+	if r.defaults.CompactResult && args.RetrievalFrom == "dataset" {
+		return compactRetrievalJSON(out, chunks, args.EmptyResponse)
+	}
 	result, err := stubJSONWithErr(out)
 	if err != nil {
 		return "", err
 	}
 	return result, nil
+}
+
+// compactRetrievalResult is the model-facing result of a tool with
+// compact_result. The default shape carries every chunk's text twice
+// (formalized_content and chunks[].content) and no document name; this one
+// carries each chunk once, with what the model needs to name and cite it.
+type compactRetrievalResult struct {
+	Chunks []compactChunk `json:"chunks"`
+	// Message is the tool's empty_response, when nothing was found.
+	Message          string                `json:"message,omitempty"`
+	FiltersRelaxed   bool                  `json:"filters_relaxed,omitempty"`
+	ScopeDroppedKeys []string              `json:"scope_dropped_keys,omitempty"`
+	ScopeRelaxable   []string              `json:"scope_relaxable,omitempty"`
+	Diagnostics      *retrievalDiagnostics `json:"diagnostics,omitempty"`
+}
+
+// compactChunk's ID is the chunk id citations use: [ID:<id>].
+type compactChunk struct {
+	ID           string  `json:"id"`
+	DocumentName string  `json:"document_name,omitempty"`
+	DocumentID   string  `json:"document_id,omitempty"`
+	DatasetID    string  `json:"dataset_id,omitempty"`
+	Page         int     `json:"page,omitempty"`
+	Score        float64 `json:"score"`
+	Content      string  `json:"content"`
+}
+
+func compactRetrievalJSON(out retrievalResult, chunks []RetrievalChunk, emptyResponse string) (string, error) {
+	compact := compactRetrievalResult{
+		Chunks:           make([]compactChunk, 0, len(chunks)),
+		FiltersRelaxed:   out.FiltersRelaxed,
+		ScopeDroppedKeys: out.ScopeDroppedKeys,
+		ScopeRelaxable:   out.ScopeRelaxable,
+		Diagnostics:      out.Diagnostics,
+	}
+	for _, c := range chunks {
+		compact.Chunks = append(compact.Chunks, compactChunk{
+			ID:           c.ID,
+			DocumentName: c.DocumentName,
+			DocumentID:   c.DocumentID,
+			DatasetID:    c.DatasetID,
+			Page:         c.PageNum,
+			Score:        math.Round(c.Score*1000) / 1000,
+			Content:      c.Content,
+		})
+	}
+	if len(chunks) == 0 {
+		compact.Message = emptyResponse
+	}
+	encoded, err := json.Marshal(compact)
+	if err != nil {
+		return "", fmt.Errorf("retrieval: marshal result: %w", err)
+	}
+	return string(encoded), nil
 }
 
 // recordExplicitFilter reports the model's conditions where the references
