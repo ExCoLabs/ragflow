@@ -839,3 +839,94 @@ func TestMetadataValuesCache(t *testing.T) {
 		t.Fatal("the cache key ignores the scope")
 	}
 }
+
+// compact_result returns each chunk once, with its document name, ids, page
+// and score, and keeps the scope and diagnostics fields; the references the
+// answer cites from are recorded as before.
+func TestRetrievalCompactResult(t *testing.T) {
+	chunks := []RetrievalChunk{
+		{ID: "c1", Content: "alpha text", DocumentID: "d1", DocumentName: "TS-a.pdf", DatasetID: "kb-1", PageNum: 3, Score: 0.87654},
+		{ID: "c2", Content: "beta text", DocumentID: "d2", DocumentName: "TS-b.pdf", DatasetID: "kb-1", Score: 0.5},
+	}
+	useRetrievalService(t, staticRetrievalService{chunks: chunks})
+	params := semiAutoToolParams()
+	delete(params, "meta_data_filter")
+	params["compact_result"] = true
+	params["empty_response"] = "Nothing found."
+	tool := buildExplicitTool(t, params)
+
+	state := runtime.NewCanvasState("run", "task")
+	out, err := tool.InvokableRun(runtime.WithState(t.Context(), state), `{"query":"alpha"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"chunks":[` +
+		`{"id":"c1","document_name":"TS-a.pdf","document_id":"d1","dataset_id":"kb-1","page":3,"score":0.877,"content":"alpha text"},` +
+		`{"id":"c2","document_name":"TS-b.pdf","document_id":"d2","dataset_id":"kb-1","score":0.5,"content":"beta text"}]}`
+	if out != want {
+		t.Fatalf("compact result:\n got %s\nwant %s", out, want)
+	}
+	if strings.Count(out, "alpha text") != 1 {
+		t.Fatal("chunk text is repeated")
+	}
+	if got := state.GetRetrievalChunks(); len(got) != 2 || got[0]["chunk_id"] != "c1" {
+		t.Fatalf("references = %v", got)
+	}
+
+	useRetrievalService(t, staticRetrievalService{})
+	out, err = tool.InvokableRun(t.Context(), `{"query":"alpha"}`)
+	if err != nil || out != `{"chunks":[],"message":"Nothing found."}` {
+		t.Fatalf("empty compact result = %s, err=%v", out, err)
+	}
+
+	params["compact_result"] = "yes"
+	if _, err := BuildByName("retrieval", params); err == nil {
+		t.Fatal("a non-boolean compact_result was accepted")
+	}
+
+	// A PDF chunk's page comes from its first position when the engine
+	// stored page_num_int as a list.
+	for name, tc := range map[string]struct {
+		chunk RetrievalChunk
+		want  int
+	}{
+		"scalar page":            {RetrievalChunk{PageNum: 4, Positions: [][]float64{{9, 1, 2, 3, 4}}}, 4},
+		"positions as floats":    {RetrievalChunk{Positions: [][]float64{{7, 1, 2, 3, 4}, {8, 1, 2, 3, 4}}}, 7},
+		"positions decoded JSON": {RetrievalChunk{Positions: []any{[]any{float64(12), float64(1)}}}, 12},
+		"no positions":           {RetrievalChunk{}, 0},
+		"malformed positions":    {RetrievalChunk{Positions: []any{"x"}}, 0},
+	} {
+		if got := chunkPage(tc.chunk); got != tc.want {
+			t.Errorf("%s: page = %d, want %d", name, got, tc.want)
+		}
+	}
+}
+
+// compact_result composes with filter_args: the diagnostics ride along.
+func TestRetrievalCompactResultKeepsDiagnostics(t *testing.T) {
+	_, _, ctx := newExplicitPipeline(t, "")
+	params := explicitToolParams()
+	params["keywords_similarity_weight"] = 1.0
+	params["similarity_threshold"] = 0.0
+	params["compact_result"] = true
+	out, err := buildExplicitTool(t, params).InvokableRun(ctx, `{"query":"acoustic","filters":[{"key":"phase","op":"in","value":["DRS"]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		FormalizedContent *string        `json:"formalized_content"`
+		Chunks            []compactChunk `json:"chunks"`
+		Diagnostics       *struct {
+			DocsInScope int `json:"docs_in_scope"`
+		} `json:"diagnostics"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.FormalizedContent != nil || len(result.Chunks) != 1 || result.Chunks[0].DocumentName != "doc-b.pdf" || result.Chunks[0].DatasetID != "kb-project" {
+		t.Fatalf("compact result = %s", out)
+	}
+	if result.Diagnostics == nil || result.Diagnostics.DocsInScope != 1 {
+		t.Fatalf("diagnostics = %s", out)
+	}
+}
