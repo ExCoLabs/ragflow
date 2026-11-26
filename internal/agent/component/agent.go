@@ -28,6 +28,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -151,6 +152,11 @@ type AgentParam struct {
 	TopPDisabled        bool
 	TemperatureDisabled bool
 
+	// ToolErrorsToModel (DSL tool_errors_to_model) returns an MCP tool's
+	// own error (isError) and a call to a tool that does not exist to the
+	// model as the tool result, so it can recover. Off, both fail the run.
+	ToolErrorsToModel bool
+
 	// contextLength is the resolved model context window used to bound the
 	// tool-result share of each ReAct round's prompt. 0 disables fitting.
 	contextLength int
@@ -203,26 +209,48 @@ type AgentOutput struct {
 // that returns canned *schema.Message values.
 var agentRunner = runEinoReActAgent
 
+// agentChatModelBuilder and agentToolsBuilder are what runEinoReActAgent
+// builds its model and tools with; tests script them to drive the real loop.
+var (
+	agentChatModelBuilder = func(ctx context.Context, p AgentParam) (model.ToolCallingChatModel, error) {
+		return buildAgentChatModel(ctx, p)
+	}
+	agentToolsBuilder = buildAgentTools
+)
+
 // runEinoReActAgent creates an eino react agent and runs it against the
 // model built from p.
 func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, error) {
 	timings := runtime.PhaseTimingsFromContext(ctx)
-	chatModel, err := buildAgentChatModel(ctx, p)
+	chatModel, err := agentChatModelBuilder(ctx, p)
 	if err != nil {
 		return nil, fmt.Errorf("build model: %w", err)
 	}
-	tools, err := buildAgentTools(ctx, p)
+	tools, err := agentToolsBuilder(ctx, p)
 	if err != nil {
 		return nil, fmt.Errorf("build tools: %w", err)
 	}
-	if timings != nil {
-		for i, t := range tools {
-			tools[i] = wrapTimedTool(t, timings)
+	toolNames := make([]string, 0, len(tools))
+	for i, t := range tools {
+		info, err := t.Info(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("build tools: %w", err)
+		}
+		toolNames = append(toolNames, info.Name)
+		if timings != nil {
+			tools[i] = wrapTimedTool(t, &toolObserver{name: info.Name, acc: timings, errorsToModel: p.ToolErrorsToModel})
 		}
 	}
 	toolAliases, err := indexedToolNameAliases(ctx, tools)
 	if err != nil {
 		return nil, fmt.Errorf("build tools: %w", err)
+	}
+	toolsConfig := compose.ToolsNodeConfig{
+		Tools:       tools,
+		ToolAliases: toolAliases,
+	}
+	if p.ToolErrorsToModel {
+		toolsConfig.UnknownToolsHandler = unknownToolForModel(toolNames)
 	}
 	input := buildAgentInputMessages(ctx, p)
 	// Eino's MaxStep counts graph nodes, not model calls. One ReAct round
@@ -239,10 +267,7 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: &roundLimitedChatModel{ToolCallingChatModel: chatModel, remaining: maxSteps / 2},
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools:       tools,
-			ToolAliases: toolAliases,
-		},
+		ToolsConfig:      toolsConfig,
 		// Python's streaming tool loop consumes the complete provider
 		// response before deciding whether the round contains a tool call.
 		// Eino's default checker only inspects the first non-empty chunk,
@@ -1790,6 +1815,18 @@ func (t *subAgentTool) InvokableRun(ctx context.Context, argsJSON string, _ ...e
 	}
 
 	ctx = context.WithValue(ctx, subAgentDepthKey{}, depth+1)
+	// The child reports to its caller through the tool result. Sharing the
+	// caller's emitter streamed that report to the client as answer text and
+	// made the caller skip its own answer as "already streamed".
+	ctx = runtime.WithIsolatedAgentMessages(ctx)
+	// Eino hands a graph's run callbacks down through the context, and the
+	// caller's message future is one: without this reset it also receives
+	// every model and tool message of the child's loop, and the caller's
+	// stream collector emits them. Global handlers are kept.
+	ctx = callbacks.InitCallbacks(ctx, nil)
+	// Likewise the artifact collector: the child would re-point the caller's
+	// holder at its own future.
+	ctx = context.WithValue(ctx, artifactCollectorKey{}, &artifactCollector{})
 
 	inputs := map[string]any{}
 	if strings.TrimSpace(argsJSON) != "" {
@@ -2870,9 +2907,13 @@ func nestedMapFrom(inputs map[string]any, name string) (map[string]map[string]an
 }
 
 func agentParamFromMap(params map[string]any) AgentParam {
-	return mergeAgentParam(AgentParam{
+	p := mergeAgentParam(AgentParam{
 		MessageHistoryWindowSize: defaultAgentMessageHistoryWindowSize,
 	}, params)
+	// Read from the DSL only, never in mergeAgentParam: that also merges a
+	// run's inputs, which for a sub-agent are the calling model's arguments.
+	p.ToolErrorsToModel, _ = boolFrom(params, "tool_errors_to_model")
+	return p
 }
 
 // init registers AgentComponent with the orchestrator-owned registry.
