@@ -584,8 +584,7 @@ func (r *RetrievalTool) explicitDiagnostics(ctx context.Context, explicit *runti
 		sessionID, _ = state.Sys["session_id"].(string)
 		tenantID, _ = state.Sys["tenant_id"].(string)
 	}
-	// Info, like agent_run_timings, so the two lines appear together.
-	common.Info(fmt.Sprintf(
+	common.AgentTimingLog(fmt.Sprintf(
 		"agent_retrieval_timings tool=%s total_ms=%d scope_ms=%d embedding_ms=%d search_ms=%d rerank_ms=%d "+
 			"attempts=%d docs_in_scope=%d chunks=%d filters=%s boosts=%s%s session=%s tenant=%s",
 		r.name, out.Ms.Total, out.Ms.Scope, out.Ms.Embedding, out.Ms.Search, out.Ms.Rerank,
