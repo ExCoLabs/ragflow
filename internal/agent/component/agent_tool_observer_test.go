@@ -370,3 +370,59 @@ func TestAgent_SubAgentModelOutputStaysOutOfTheRealLoopStream(t *testing.T) {
 		t.Fatalf("citation validation = %v, removed = %v", final["citation_validation_status"], final["removed_citation_count"])
 	}
 }
+
+// With live_reasoning a round's reasoning is forwarded while the round is
+// still being read — before its tool call runs — and exactly once.
+func TestAgent_LiveReasoning(t *testing.T) {
+	run := func(live bool) (sequence []string, thinking string) {
+		var mu sync.Mutex
+		record := func(event string) {
+			mu.Lock()
+			sequence = append(sequence, event)
+			mu.Unlock()
+		}
+		mdl := &scriptedLoopModel{root: []*schema.Message{
+			{Role: schema.Assistant, ReasoningContent: "plan", ToolCalls: []schema.ToolCall{toolCall("c1", "lookup", `{}`)}},
+			{Role: schema.Assistant, ReasoningContent: "conclude", Content: "answer"},
+		}}
+		useScriptedLoop(t, mdl, &scriptedTool{name: "lookup", run: func(context.Context, string) (string, error) {
+			record("tool")
+			return "ok", nil
+		}})
+		ctx := runtime.WithComponentExecutionOptions(t.Context(), runtime.ComponentExecutionOptions{DeferAgentToMessage: true})
+		ctx = runtime.WithAgentMessageEmitter(ctx, func(string, string) {})
+		out, err := NewAgentComponent(AgentParam{ModelID: "stub", MaxRounds: 2, LiveReasoning: live}).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
+		if err != nil {
+			t.Fatalf("Invoke: %v", err)
+		}
+		var streamedThinking, content strings.Builder
+		final, err := out["content"].(*runtime.DeferredStream).Open(ctx, func(contentDelta, thinkingDelta string) {
+			if thinkingDelta != "" {
+				record("think:" + thinkingDelta)
+				streamedThinking.WriteString(thinkingDelta)
+			}
+			content.WriteString(contentDelta)
+		})
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if content.String() != "answer" || final["content"] != "answer" || final["thinking"] != "conclude" {
+			t.Fatalf("live=%v: streamed %q, final %v, thinking %v", live, content.String(), final["content"], final["thinking"])
+		}
+		return sequence, streamedThinking.String()
+	}
+
+	sequence, thinking := run(true)
+	if want := []string{"think:plan", "tool", "think:conclude"}; !reflect.DeepEqual(sequence, want) {
+		t.Fatalf("live sequence = %v, want %v", sequence, want)
+	}
+	if thinking != "planconclude" {
+		t.Fatalf("live thinking = %q, want each round's reasoning once", thinking)
+	}
+	if _, thinking = run(false); thinking != "planconclude" {
+		t.Fatalf("default thinking = %q", thinking)
+	}
+	if p := agentParamFromMap(map[string]any{"live_reasoning": true}); !p.LiveReasoning {
+		t.Fatal("live_reasoning not read from the DSL")
+	}
+}

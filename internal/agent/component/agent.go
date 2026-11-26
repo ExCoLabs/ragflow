@@ -156,6 +156,10 @@ type AgentParam struct {
 	// own error (isError) and a call to a tool that does not exist to the
 	// model as the tool result, so it can recover. Off, both fail the run.
 	ToolErrorsToModel bool
+	// LiveReasoning (DSL live_reasoning) forwards the model's reasoning to
+	// the client while a round is still being generated, the first round
+	// included. Off, a round's reasoning arrives when the round has ended.
+	LiveReasoning bool
 	// ProgressEvents (DSL progress_events) streams an agent_progress event
 	// at the start and end of every tool call and sub-agent run of this
 	// Agent and of the sub-agents below it.
@@ -274,7 +278,7 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 	}
 
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: &roundLimitedChatModel{ToolCallingChatModel: chatModel, remaining: maxSteps / 2},
+		ToolCallingModel: &roundLimitedChatModel{ToolCallingChatModel: chatModel, remaining: maxSteps / 2, liveReasoning: p.LiveReasoning},
 		ToolsConfig:      toolsConfig,
 		// Python's streaming tool loop consumes the complete provider
 		// response before deciding whether the round contains a tool call.
@@ -305,7 +309,7 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 	// started signal (closed by the graph onStart callback), so starting
 	// the collector first lets non-citation deltas stream out in real time
 	// while the checker runs, instead of buffering the entire round.
-	emitDone := emitAgentModelStreams(ctx, future, p.Cite)
+	emitDone := emitAgentModelStreams(ctx, future, p.Cite, p.LiveReasoning)
 	stream, err := agent.Stream(ctx, input, opt)
 	if err != nil {
 		// Drain the collector so its goroutine exits before we return.
@@ -352,6 +356,8 @@ func runEinoReActAgent(ctx context.Context, p AgentParam) (*schema.Message, erro
 type roundLimitedChatModel struct {
 	model.ToolCallingChatModel
 	remaining int
+	// liveReasoning is the Agent's live_reasoning: see Stream.
+	liveReasoning bool
 }
 
 func (m *roundLimitedChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -359,7 +365,7 @@ func (m *roundLimitedChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolC
 	if err != nil {
 		return nil, err
 	}
-	return &roundLimitedChatModel{ToolCallingChatModel: bound, remaining: m.remaining}, nil
+	return &roundLimitedChatModel{ToolCallingChatModel: bound, remaining: m.remaining, liveReasoning: m.liveReasoning}, nil
 }
 
 func (m *roundLimitedChatModel) roundOptions(opts []model.Option) []model.Option {
@@ -396,6 +402,13 @@ func (m *roundLimitedChatModel) Stream(ctx context.Context, input []*schema.Mess
 		}
 	})
 
+	// The round is buffered so an empty one can be replayed before anything
+	// of it reached the caller. Reasoning is safe to forward as it arrives —
+	// a replay only repeats thinking — and live_reasoning does that, and has
+	// the provider stream the tool-bound first turn as well.
+	if m.liveReasoning {
+		ctx = models.WithStreamedToolTurns(ctx)
+	}
 	var buffered []*schema.Message
 	var streamErr error
 	hasOutput := false
@@ -420,6 +433,9 @@ func (m *roundLimitedChatModel) Stream(ctx context.Context, input []*schema.Mess
 					continue
 				}
 				buffered = append(buffered, message)
+				if m.liveReasoning && message.ReasoningContent != "" {
+					runtime.EmitAgentMessage(ctx, "", message.ReasoningContent)
+				}
 				if message.Content != "" || len(message.ToolCalls) > 0 {
 					hasOutput = true
 				}
@@ -554,7 +570,9 @@ func buildAgentInputMessages(ctx context.Context, p AgentParam) []*schema.Messag
 	return input
 }
 
-func emitAgentModelStreams(ctx context.Context, future react.MessageFuture, cite bool) <-chan error {
+// liveReasoning means the round-limited model already forwarded each round's
+// reasoning as it arrived, so only content is emitted here.
+func emitAgentModelStreams(ctx context.Context, future react.MessageFuture, cite, liveReasoning bool) <-chan error {
 	done := make(chan error, 1)
 	go func() {
 		var firstErr error
@@ -591,6 +609,14 @@ func emitAgentModelStreams(ctx context.Context, future react.MessageFuture, cite
 				}
 				if msg.Role != "" && msg.Role != schema.Assistant {
 					continue
+				}
+				if liveReasoning {
+					if msg.Content == "" {
+						continue
+					}
+					reasoningless := *msg
+					reasoningless.ReasoningContent = ""
+					msg = &reasoningless
 				}
 				if msg.Content == "" && msg.ReasoningContent == "" {
 					continue
@@ -2925,6 +2951,7 @@ func agentParamFromMap(params map[string]any) AgentParam {
 	// run's inputs, which for a sub-agent are the calling model's arguments.
 	p.ToolErrorsToModel, _ = boolFrom(params, "tool_errors_to_model")
 	p.ProgressEvents, _ = boolFrom(params, "progress_events")
+	p.LiveReasoning, _ = boolFrom(params, "live_reasoning")
 	return p
 }
 
