@@ -849,6 +849,23 @@ func TestRetrievalCompactResult(t *testing.T) {
 	if _, err := BuildByName("retrieval", params); err == nil {
 		t.Fatal("a non-boolean compact_result was accepted")
 	}
+
+	// A PDF chunk's page comes from its first position when the engine
+	// stored page_num_int as a list.
+	for name, tc := range map[string]struct {
+		chunk RetrievalChunk
+		want  int
+	}{
+		"scalar page":            {RetrievalChunk{PageNum: 4, Positions: [][]float64{{9, 1, 2, 3, 4}}}, 4},
+		"positions as floats":    {RetrievalChunk{Positions: [][]float64{{7, 1, 2, 3, 4}, {8, 1, 2, 3, 4}}}, 7},
+		"positions decoded JSON": {RetrievalChunk{Positions: []any{[]any{float64(12), float64(1)}}}, 12},
+		"no positions":           {RetrievalChunk{}, 0},
+		"malformed positions":    {RetrievalChunk{Positions: []any{"x"}}, 0},
+	} {
+		if got := chunkPage(tc.chunk); got != tc.want {
+			t.Errorf("%s: page = %d, want %d", name, got, tc.want)
+		}
+	}
 }
 
 // compact_result composes with filter_args: the diagnostics ride along.

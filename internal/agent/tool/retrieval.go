@@ -439,6 +439,40 @@ type compactChunk struct {
 	Content      string  `json:"content"`
 }
 
+// chunkPage is the chunk's page. PageNum is 0 whenever the engine stores
+// page_num_int as a list (PDF chunks spanning positions), so the first
+// position's page stands in.
+func chunkPage(c RetrievalChunk) int {
+	if c.PageNum > 0 {
+		return c.PageNum
+	}
+	first := func(list any) any {
+		switch typed := list.(type) {
+		case []any:
+			if len(typed) > 0 {
+				return typed[0]
+			}
+		case [][]float64:
+			if len(typed) > 0 {
+				return typed[0]
+			}
+		case []float64:
+			if len(typed) > 0 {
+				return typed[0]
+			}
+		}
+		return nil
+	}
+	position := first(c.Positions)
+	if page := first(position); page != nil {
+		position = page
+	}
+	if page, ok := position.(float64); ok && page > 0 {
+		return int(page)
+	}
+	return 0
+}
+
 func compactRetrievalJSON(out retrievalResult, chunks []RetrievalChunk, emptyResponse string) (string, error) {
 	compact := compactRetrievalResult{
 		Chunks:           make([]compactChunk, 0, len(chunks)),
@@ -453,7 +487,7 @@ func compactRetrievalJSON(out retrievalResult, chunks []RetrievalChunk, emptyRes
 			DocumentName: c.DocumentName,
 			DocumentID:   c.DocumentID,
 			DatasetID:    c.DatasetID,
-			Page:         c.PageNum,
+			Page:         chunkPage(c),
 			Score:        math.Round(c.Score*1000) / 1000,
 			Content:      c.Content,
 		})

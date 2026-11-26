@@ -30,6 +30,7 @@ import (
 
 	"ragflow/internal/agent/runtime"
 	agenttool "ragflow/internal/agent/tool"
+	"ragflow/internal/common"
 )
 
 // scriptedLoopModel answers each round of a run from a script: the canvas
@@ -101,6 +102,8 @@ func useScriptedLoop(t *testing.T, mdl *scriptedLoopModel, tools ...einotool.Bas
 		built := []einotool.BaseTool{}
 		if subAgentDepth(ctx) == 0 {
 			built = append(built, tools...)
+		} else {
+			built = append(built, &scriptedTool{name: "search_archa_data", run: func(context.Context, string) (string, error) { return "chunks", nil }})
 		}
 		for _, sub := range p.SubAgents {
 			built = append(built, &subAgentTool{name: sub.Name, spec: sub})
@@ -166,7 +169,10 @@ func coordinatorScript() *scriptedLoopModel {
 			{Role: schema.Assistant, Content: "coordinator answer"},
 		},
 		child: []*schema.Message{
-			toolCallRound(toolCall("k1", "ghost_search", `{"query":"acoustic"}`)),
+			toolCallRound(
+				toolCall("k1", "ghost_search", `{"query":"acoustic"}`),
+				toolCall("k2", "search_archa_data", `{"query":"acoustic","filters":[{"key":"phase","op":"=","value":["DSP"]}]}`),
+			),
 			{Role: schema.Assistant, Content: "child report"},
 		},
 	}
@@ -273,11 +279,11 @@ func TestAgent_ProgressEvents(t *testing.T) {
 	if got := stream.content.String(); got != "coordinator answer" {
 		t.Fatalf("streamed content = %q", got)
 	}
-	wantStart := []string{"sub_agent retrieval_agent@", "tool is_query@"}
+	wantStart := []string{"sub_agent retrieval_agent@", "tool is_query@", "tool search_archa_data@retrieval_agent"}
 	if got := stream.events("start"); !reflect.DeepEqual(got, wantStart) {
 		t.Fatalf("start events = %v, want %v", got, wantStart)
 	}
-	wantFinish := []string{"sub_agent retrieval_agent@", "tool is_query@ failed"}
+	wantFinish := []string{"sub_agent retrieval_agent@", "tool is_query@ failed", "tool search_archa_data@retrieval_agent"}
 	if got := stream.events("finish"); !reflect.DeepEqual(got, wantFinish) {
 		t.Fatalf("finish events = %v, want %v", got, wantFinish)
 	}
@@ -286,6 +292,10 @@ func TestAgent_ProgressEvents(t *testing.T) {
 		case ev.Phase == "start" && ev.Name == "retrieval_agent":
 			if ev.Args != "find the acoustic report" || ev.CallID != "c3" {
 				t.Errorf("sub-agent start = %+v, want its task and call id", ev)
+			}
+		case ev.Phase == "start" && ev.Name == "search_archa_data":
+			if ev.Args != `acoustic | filters: [{"key":"phase","op":"=","value":["DSP"]}]` || ev.CallID != "k2" {
+				t.Errorf("sub-agent tool start = %+v", ev)
 			}
 		case ev.Phase == "start" && ev.Name == "is_query":
 			if ev.Args != `{"sql":"SELECT nope FROM projects"}` {
@@ -424,5 +434,36 @@ func TestAgent_LiveReasoning(t *testing.T) {
 	}
 	if p := agentParamFromMap(map[string]any{"live_reasoning": true}); !p.LiveReasoning {
 		t.Fatal("live_reasoning not read from the DSL")
+	}
+}
+
+// A deferred Agent runs when its Message node opens the stream, on that
+// node's context; its log lines must still name the Agent node, and a
+// sub-agent below it "<agent node>/<sub-agent>".
+func TestAgent_DeferredRunKeepsItsLogComponent(t *testing.T) {
+	var labels []string
+	var mu sync.Mutex
+	withAgentRunner(t, func(ctx context.Context, p AgentParam) (*schema.Message, error) {
+		mu.Lock()
+		labels = append(labels, common.LogComponentFromContext(ctx))
+		mu.Unlock()
+		if subAgentDepth(ctx) == 0 {
+			child := &subAgentTool{spec: SubAgentTool{Name: "navigo_agent", Param: AgentParam{ModelID: "stub", MaxRounds: 1}}}
+			if _, err := child.InvokableRun(ctx, `{"user_prompt":"task"}`); err != nil {
+				t.Errorf("child: %v", err)
+			}
+		}
+		return &schema.Message{Role: schema.Assistant, Content: "answer"}, nil
+	})
+	ctx := runtime.WithComponentExecutionOptions(t.Context(), runtime.ComponentExecutionOptions{DeferAgentToMessage: true})
+	out, err := NewAgentComponent(AgentParam{ModelID: "stub", MaxRounds: 1}).Invoke(common.WithLogComponent(ctx, "Agent:Coordinator"), nil, map[string]any{"user_prompt": "hello"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if _, err := out["content"].(*runtime.DeferredStream).Open(common.WithLogComponent(ctx, "Message:Reply"), func(string, string) {}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if want := []string{"Agent:Coordinator", "Agent:Coordinator/navigo_agent"}; !reflect.DeepEqual(labels, want) {
+		t.Fatalf("log components = %v, want %v", labels, want)
 	}
 }

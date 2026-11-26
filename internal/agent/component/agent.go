@@ -1960,10 +1960,14 @@ func (c *AgentComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[str
 				timeout = remaining
 			}
 		}
+		component := common.LogComponentFromContext(ctx)
 		deferred := &runtime.DeferredStream{
 			Open: func(openCtx context.Context, sink runtime.AgentDeltaSink) (map[string]any, error) {
 				agentCtx, cancel := context.WithTimeout(openCtx, timeout)
 				defer cancel()
+				// Open runs on the consuming Message node's context; the log
+				// lines of this run belong to the Agent node.
+				agentCtx = common.WithLogComponent(agentCtx, component)
 				return c.invokeNow(runtime.WithAgentDeltaSink(agentCtx, sink), db, inputs)
 			},
 		}
