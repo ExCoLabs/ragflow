@@ -42,9 +42,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// chunkMetadataDocIDsPerUpdate keeps each update_by_query's terms clause well
-// under Elasticsearch's index.max_terms_count (65 536).
-const chunkMetadataDocIDsPerUpdate = 20000
+// chunkMetadataDocIDsPerUpdate keeps each update_by_query (all chunks of these
+// documents, waited on) inside the ES client's 30 s response-header timeout.
+const chunkMetadataDocIDsPerUpdate = 2000
 
 // ChunkMetadataConfigRequest is the body of PUT /datasets/:id/chunk_metadata.
 type ChunkMetadataConfigRequest struct {
