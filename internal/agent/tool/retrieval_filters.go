@@ -208,14 +208,15 @@ func (c *filterArgsConfig) filtersParam(valuesTool, purpose string) *schema.Para
 	}
 }
 
-func (c *filterArgsConfig) boostParam() *schema.ParameterInfo {
+func (c *filterArgsConfig) boostParam(valuesTool string) *schema.ParameterInfo {
 	return &schema.ParameterInfo{
 		Type: schema.Array,
 		Desc: fmt.Sprintf("Soft preferences: rank documents matching a value higher, without dropping the others. "+
 			"Use filters for what the user fixed and boost for what should only be preferred, e.g. metadata that only part of the documents carry. "+
 			"Keys: %s. At most %d entries. Boosts apply only to keys the dataset copies onto its chunks (chunk metadata); "+
-			"the response's diagnostics say when a boost could not apply. The boosts of one chunk add up to at most %g.",
-			strings.Join(c.keyNames(), ", "), c.MaxConditions, common.DefaultMetaBoostMaxTotal),
+			"the response's diagnostics say when a boost could not apply. Values must exist in the data: look them up with %s; "+
+			"a value nothing carries boosts nothing. The boosts of one chunk add up to at most %g by default.",
+			strings.Join(c.keyNames(), ", "), c.MaxConditions, valuesTool, common.DefaultMetaBoostMaxTotal),
 		ElemInfo: &schema.ParameterInfo{
 			Type: schema.Object,
 			SubParams: map[string]*schema.ParameterInfo{

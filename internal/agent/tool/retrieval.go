@@ -175,7 +175,7 @@ func (r *RetrievalTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	if cfg := r.defaults.FilterArgs; cfg != nil {
 		params["filters"] = cfg.filtersParam(r.valuesToolName(),
 			"Exact metadata conditions restricting which documents are searched; omit to search everything the request allows.")
-		params["boost"] = cfg.boostParam()
+		params["boost"] = cfg.boostParam(r.valuesToolName())
 	}
 	return &schema.ToolInfo{
 		Name:        r.name,

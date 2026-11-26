@@ -116,7 +116,7 @@ func TestExplicitBoostSchema(t *testing.T) {
 		boost.Items.Properties["weight"].Type != "number" || boost.Items.Properties["value"].Type != "array" {
 		t.Fatalf("boost schema = %s", raw)
 	}
-	for _, want := range []string{"without dropping the others", "Use filters for what the user fixed", "chunk metadata", "At most 3"} {
+	for _, want := range []string{"without dropping the others", "Use filters for what the user fixed", "chunk metadata", "At most 3", "search_archa_data_filter_values"} {
 		if !strings.Contains(boost.Description, want) {
 			t.Errorf("boost description lacks %q: %s", want, boost.Description)
 		}
