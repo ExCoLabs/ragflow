@@ -184,6 +184,7 @@ func InitDB(ctx context.Context, migrateDB bool) error {
 		&entity.LLMFactories{},
 		&entity.LLM{},
 		&entity.TenantLangfuse{},
+		&entity.AgentRunAudit{},
 		&entity.SystemSettings{},
 		&entity.Connector{},
 		&entity.Connector2Kb{},
