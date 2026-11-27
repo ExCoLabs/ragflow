@@ -163,6 +163,18 @@ func WithAgentDeltaSink(ctx context.Context, sink AgentDeltaSink) context.Contex
 	return context.WithValue(ctx, agentDeltaSinkCtxKey{}, &agentDeltaSinkState{sink: sink})
 }
 
+// WithIsolatedAgentMessages gives a nested Agent run (a sub-agent called as a
+// tool) an emission scope of its own: its deltas go nowhere, and its
+// reset/finalize calls and streamed-content bookkeeping cannot touch the
+// calling Agent's. The caller's answer is the only one the client is shown;
+// the nested run's result reaches the caller as the tool result.
+func WithIsolatedAgentMessages(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, agentMessageEmitterCtxKey{}, (*agentMessageEmitterState)(nil))
+	ctx = context.WithValue(ctx, agentDeltaSinkCtxKey{}, &agentDeltaSinkState{sink: func(string, string) {}})
+	// Deferral and suppression are decisions about the caller's graph node.
+	return WithComponentExecutionOptions(ctx, ComponentExecutionOptions{})
+}
+
 func agentDeltaSinkFromContext(ctx context.Context) *agentDeltaSinkState {
 	sink, _ := ctx.Value(agentDeltaSinkCtxKey{}).(*agentDeltaSinkState)
 	return sink

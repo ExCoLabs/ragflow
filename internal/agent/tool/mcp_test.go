@@ -18,6 +18,7 @@ package tool
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -304,6 +305,13 @@ func TestMCPToolAdapterDocumentReferences(t *testing.T) {
 		if isError {
 			if err == nil || len(state.GetRetrievalChunks()) != 0 {
 				t.Fatal("MCP error must not register references")
+			}
+			// The server's own error stays recognisable (tool_errors_to_model)
+			// and keeps the message runs have always failed with.
+			var toolErr *MCPToolError
+			if !errors.As(err, &toolErr) || toolErr.Tool != "document_read" || toolErr.Text != payload ||
+				err.Error() != `mcp tool "document_read" returned isError: `+payload {
+				t.Fatalf("isError = %#v (%v)", err, err)
 			}
 		} else if err != nil || out != payload || len(state.GetRetrievalChunks()) != 1 {
 			t.Fatalf("successful MCP response not recorded: out=%s err=%v refs=%v", out, err, state.GetRetrievalChunks())
