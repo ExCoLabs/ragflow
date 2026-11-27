@@ -411,6 +411,84 @@ func (s *MetadataService) GetMetaValueSpaceByKBs(ctx context.Context, kbIDs []st
 	return result, nil
 }
 
+// metaValueCountProvider is implemented by doc engines that can count the
+// documents per metadata value with an aggregation. Only the Elasticsearch
+// backend has one.
+type metaValueCountProvider interface {
+	MetaValueCounts(ctx context.Context, tenantID string, kbIDs, docIDs []string) ([]types.MetaValueCount, error)
+}
+
+// GetMetaValueCountsByKBs counts, for each metadata key in keys, how many
+// documents of kbIDs hold each value: {key: {value: documents}}. A non-nil
+// docIDs restricts the count to those documents (empty counts nothing).
+//
+// Like GetMetaValueSpaceByKBs it aggregates, so it is not bound by the result
+// window, refuses a partial answer with types.ErrMetaValueSpaceIncomplete, and
+// renders values through flattedMetaValue. Backends without the aggregation
+// count over GetFlattedMetaByKBs, window-limited as that scan is.
+func (s *MetadataService) GetMetaValueCountsByKBs(ctx context.Context, kbIDs, keys, docIDs []string) (map[string]map[string]int64, error) {
+	counts := make(map[string]map[string]int64, len(keys))
+	for _, key := range keys {
+		counts[key] = map[string]int64{}
+	}
+	if len(kbIDs) == 0 || len(keys) == 0 || (docIDs != nil && len(docIDs) == 0) {
+		return counts, nil
+	}
+
+	provider, ok := s.docEngine.(metaValueCountProvider)
+	if !ok {
+		metas, err := s.GetFlattedMetaByKBs(ctx, kbIDs)
+		if err != nil {
+			return nil, err
+		}
+		var scope map[string]struct{}
+		if docIDs != nil {
+			scope = make(map[string]struct{}, len(docIDs))
+			for _, id := range docIDs {
+				scope[id] = struct{}{}
+			}
+		}
+		for key, values := range counts {
+			for value, docs := range metas[key] {
+				n := int64(len(docs))
+				if scope != nil {
+					n = 0
+					for _, id := range docs {
+						if _, in := scope[id]; in {
+							n++
+						}
+					}
+				}
+				if n > 0 {
+					values[value] = n
+				}
+			}
+		}
+		return counts, nil
+	}
+
+	groups, err := dao.GroupKBIDsByTenant(ctx, dao.DB, kbIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, group := range groups {
+		rows, err := provider.MetaValueCounts(ctx, group.TenantID, group.KBIDs, docIDs)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			values, wanted := counts[row.Key]
+			if !wanted {
+				continue
+			}
+			if value, ok := flattedMetaValue(row.Value); ok {
+				values[value] += row.Docs
+			}
+		}
+	}
+	return counts, nil
+}
+
 // FilterDocIDsByMetaPushdown runs ONLY the metadata-index push-down, which is the first
 // half of the agentic metadata_search pipeline (the caller falls back to
 // GetFlattedMetaByKBs + ApplyMetaFilter when the push-down is not viable).

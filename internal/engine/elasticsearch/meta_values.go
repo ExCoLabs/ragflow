@@ -271,3 +271,62 @@ func (e *Engine) MetaValueSpace(ctx context.Context, tenantID string, kbIDs []st
 	}
 	return space, nil
 }
+
+// MetaValueCounts is MetaValueSpace that keeps how many doc-meta rows hold each
+// value, optionally among docIDs only (in batches, like MetaFacets; a row is
+// in one batch, so the counts add up).
+//
+// Without docIDs the rows are scoped by kb_id alone, so a row whose document is
+// gone still counts.
+func (e *Engine) MetaValueCounts(ctx context.Context, tenantID string, kbIDs, docIDs []string) ([]types.MetaValueCount, error) {
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenantID cannot be empty")
+	}
+	if len(kbIDs) == 0 {
+		return nil, nil
+	}
+	indexName := buildMetadataIndexName(tenantID)
+	exists, err := e.indexExists(ctx, indexName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check metadata index existence: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	type valueKey struct {
+		key   string
+		value interface{}
+	}
+	counts := map[valueKey]int64{}
+	var order []valueKey
+	walk := func(filters []interface{}) error {
+		query := map[string]interface{}{"bool": map[string]interface{}{"filter": filters}}
+		_, err := e.walkMetaValues(ctx, indexName, query, metaFacetSkipKeys, func(key string, value interface{}, docs int64) {
+			k := valueKey{key: key, value: value}
+			if _, seen := counts[k]; !seen {
+				order = append(order, k)
+			}
+			counts[k] += docs
+		})
+		return err
+	}
+	kbFilter := map[string]interface{}{"terms": map[string]interface{}{"kb_id": kbIDs}}
+	if docIDs == nil {
+		if err := walk([]interface{}{kbFilter}); err != nil {
+			return nil, err
+		}
+	}
+	for start := 0; start < len(docIDs); start += metaFacetIDBatch {
+		batch := docIDs[start:min(start+metaFacetIDBatch, len(docIDs))]
+		if err := walk([]interface{}{kbFilter, map[string]interface{}{"ids": map[string]interface{}{"values": batch}}}); err != nil {
+			return nil, err
+		}
+	}
+
+	out := make([]types.MetaValueCount, 0, len(order))
+	for _, k := range order {
+		out = append(out, types.MetaValueCount{Key: k.key, Value: k.value, Docs: counts[k]})
+	}
+	return out, nil
+}
