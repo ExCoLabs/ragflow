@@ -1,6 +1,8 @@
 package nlp
 
 import (
+	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -191,6 +193,116 @@ func TestRetrievalCollapseDuplicatesOptOut(t *testing.T) {
 	for _, chunk := range result.Chunks {
 		if _, ok := chunk["duplicates"]; ok {
 			t.Fatalf("chunk %v carries duplicates with collapsing disabled", chunk["chunk_id"])
+		}
+	}
+}
+
+// knnRecordingEngine records how many candidates reached the scorer.
+type knnRecordingEngine struct {
+	retrievalCountEngine
+	scoredCounts []int
+}
+
+func (e *knnRecordingEngine) KNNScores(ctx context.Context, chunks []map[string]interface{}, vec []float64, n int) (map[string]interface{}, error) {
+	e.scoredCounts = append(e.scoredCounts, len(chunks))
+	return e.retrievalCountEngine.KNNScores(ctx, chunks, vec, n)
+}
+
+// crowdedRetrievalRows: three texts with four identical copies each rank
+// ahead of six distinct texts, as uploaded copies X.pdf, X(2).pdf ... do.
+func crowdedRetrievalRows() []map[string]interface{} {
+	rows := make([]map[string]interface{}, 0, 18)
+	score := 0.99
+	for _, text := range []string{"A", "B", "C"} {
+		for copyNo := 1; copyNo <= 4; copyNo++ {
+			rows = append(rows, map[string]interface{}{
+				"id": fmt.Sprintf("%s%d", text, copyNo), "content_ltks": "alpha",
+				"content_with_weight": "alpha " + text, "docnm_kwd": fmt.Sprintf("%s(%d).pdf", text, copyNo), "_score": score,
+			})
+			score -= 0.01
+		}
+	}
+	for i := 0; i < 6; i++ {
+		rows = append(rows, map[string]interface{}{
+			"id": fmt.Sprintf("d%d", i), "content_ltks": "alpha",
+			"content_with_weight": fmt.Sprintf("alpha distinct %d", i), "docnm_kwd": fmt.Sprintf("d%d.pdf", i), "_score": score,
+		})
+		score -= 0.01
+	}
+	return rows
+}
+
+func runCrowdedRetrieval(t *testing.T, collapse *bool) (*RetrievalResult, *knnRecordingEngine) {
+	t.Helper()
+	oldQueryBuilder := globalQueryBuilder
+	globalQueryBuilder = NewQueryBuilder()
+	defer func() { globalQueryBuilder = oldQueryBuilder }()
+
+	eng := &knnRecordingEngine{retrievalCountEngine: retrievalCountEngine{rows: crowdedRetrievalRows()}}
+	service := NewRetrievalService(eng, &dao.DocumentDAO{})
+	threshold, vectorWeight, window := 0.5, 1.0, 6
+	result, err := service.Retrieval(t.Context(), &RetrievalRequest{
+		Question:               "alpha",
+		TenantIDs:              []string{"tenant-1"},
+		Page:                   1,
+		PageSize:               6,
+		RerankCandidatesCount:  &window,
+		SimilarityThreshold:    &threshold,
+		VectorSimilarityWeight: &vectorWeight,
+		CollapseDuplicates:     collapse,
+	})
+	if err != nil {
+		t.Fatalf("Retrieval failed: %v", err)
+	}
+	return result, eng
+}
+
+func TestRetrievalCollapsesCopiesBeforeTheRerankWindow(t *testing.T) {
+	result, eng := runCrowdedRetrieval(t, nil)
+
+	if want := []int{collapseOverfetchCount(6)}; !reflect.DeepEqual(eng.searchLimits, want) {
+		t.Fatalf("search limits = %v, want %v", eng.searchLimits, want)
+	}
+	if want := []int{6}; !reflect.DeepEqual(eng.scoredCounts, want) {
+		t.Fatalf("scored candidates = %v, want one distinct text per rerank slot %v", eng.scoredCounts, want)
+	}
+	if want := []string{"A1", "B1", "C1", "d0", "d1", "d2"}; !reflect.DeepEqual(chunkIDs(result.Chunks), want) {
+		t.Fatalf("chunk ids = %v, want %v", chunkIDs(result.Chunks), want)
+	}
+	if result.Total != 6 {
+		t.Fatalf("total = %d, want the 6 distinct texts of the window", result.Total)
+	}
+	dups, _ := result.Chunks[0]["duplicates"].([]map[string]interface{})
+	if len(dups) != 3 || dups[0]["chunk_id"] != "A2" || dups[0]["document_name"] != "A(2).pdf" {
+		t.Fatalf("duplicates of A1 = %v, want A2..A4", result.Chunks[0]["duplicates"])
+	}
+	if sim, _ := dups[0]["similarity"].(float64); sim != result.Chunks[0]["similarity"] {
+		t.Fatalf("copy similarity = %v, want its representative's %v", sim, result.Chunks[0]["similarity"])
+	}
+	counts := map[string]interface{}{}
+	for _, agg := range result.DocAggs {
+		counts[agg["doc_name"].(string)] = agg["count"]
+	}
+	if len(counts) != 6 || counts["A(1).pdf"] != 1 || counts["A(2).pdf"] != nil {
+		t.Fatalf("doc_aggs = %v, want one entry per kept chunk", counts)
+	}
+}
+
+func TestRetrievalWithoutCollapseKeepsTheRerankWindow(t *testing.T) {
+	result, eng := runCrowdedRetrieval(t, new(false))
+
+	if want := []int{6}; !reflect.DeepEqual(eng.searchLimits, want) || !reflect.DeepEqual(eng.scoredCounts, want) {
+		t.Fatalf("search limits = %v, scored = %v, want exactly the rerank window", eng.searchLimits, eng.scoredCounts)
+	}
+	if want := []string{"A1", "A2", "A3", "A4", "B1", "B2"}; !reflect.DeepEqual(chunkIDs(result.Chunks), want) {
+		t.Fatalf("chunk ids = %v, want %v", chunkIDs(result.Chunks), want)
+	}
+}
+
+func TestCollapseOverfetchCount(t *testing.T) {
+	for window, want := range map[int]int{1: 3, 64: 192, 128: 384, 400: 1024, 2000: 2000} {
+		if got := collapseOverfetchCount(window); got != want {
+			t.Errorf("collapseOverfetchCount(%d) = %d, want %d", window, got, want)
 		}
 	}
 }

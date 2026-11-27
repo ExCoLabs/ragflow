@@ -89,8 +89,8 @@ func TestRetrievalUsesRerankCandidatesCountAsCandidateSet(t *testing.T) {
 	if result.Total != 70 {
 		t.Fatalf("total = %d, want 70", result.Total)
 	}
-	if len(engine.searchLimits) != 1 || engine.searchLimits[0] != rerankCandidatesCount {
-		t.Fatalf("search limits = %v, want [%d]", engine.searchLimits, rerankCandidatesCount)
+	if want := collapseOverfetchCount(rerankCandidatesCount); len(engine.searchLimits) != 1 || engine.searchLimits[0] != want {
+		t.Fatalf("search limits = %v, want [%d]", engine.searchLimits, want)
 	}
 	for _, filters := range engine.searchFilters {
 		mustNot, ok := filters["must_not"].(map[string]interface{})
