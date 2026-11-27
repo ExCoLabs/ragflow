@@ -50,7 +50,7 @@ func TestTimedToolEmitsToolCallPair(t *testing.T) {
 			var got []runtime.ToolCallEvent
 			ctx := runtime.WithToolCallEmitter(context.Background(), func(ev runtime.ToolCallEvent) { got = append(got, ev) })
 			acc := &runtime.PhaseTimings{}
-			tool := wrapTimedTool(stubTool{err: tc.err}, &toolObserver{name: "navigo_find_firm", acc: acc}).(einotool.InvokableTool)
+			tool := wrapTimedTool(stubTool{err: tc.err}, &toolObserver{name: "navigo_find_firm", kind: "tool", acc: acc}).(einotool.InvokableTool)
 			if _, err := tool.InvokableRun(ctx, "{}"); (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v", err)
 			}
@@ -68,7 +68,7 @@ func TestTimedToolEmitsToolCallPair(t *testing.T) {
 }
 
 func TestTimedToolWithoutEmitter(t *testing.T) {
-	tool := wrapTimedTool(stubTool{}, &toolObserver{name: "navigo_find_firm", acc: &runtime.PhaseTimings{}}).(einotool.InvokableTool)
+	tool := wrapTimedTool(stubTool{}, &toolObserver{name: "navigo_find_firm", kind: "tool", acc: &runtime.PhaseTimings{}}).(einotool.InvokableTool)
 	if _, err := tool.InvokableRun(context.Background(), "{}"); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestTimedToolEventsThroughReActLoop(t *testing.T) {
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: &textThenToolCallModel{},
 		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: []einotool.BaseTool{wrapTimedTool(&passthroughTool{name: "execute_code"}, &toolObserver{name: "execute_code", acc: &runtime.PhaseTimings{}})},
+			Tools: []einotool.BaseTool{wrapTimedTool(&passthroughTool{name: "execute_code"}, &toolObserver{name: "execute_code", kind: "tool", acc: &runtime.PhaseTimings{}})},
 		},
 		StreamToolCallChecker: scanAllStreamForToolCall,
 		MaxStep:               4,

@@ -19,6 +19,7 @@ package component
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ import (
 
 	"ragflow/internal/agent/runtime"
 	agenttool "ragflow/internal/agent/tool"
+	"ragflow/internal/common"
 )
 
 // scriptedLoopModel answers each round of a run from a script: the canvas
@@ -112,16 +114,48 @@ func useScriptedLoop(t *testing.T, mdl *scriptedLoopModel, tools ...einotool.Bas
 }
 
 type recordedStream struct {
-	mu      sync.Mutex
-	content strings.Builder
+	mu       sync.Mutex
+	content  strings.Builder
+	progress []runtime.AgentProgressEvent
 }
 
 func (r *recordedStream) context(ctx context.Context) context.Context {
-	return runtime.WithAgentMessageEmitter(ctx, func(contentDelta, _ string) {
+	ctx = runtime.WithAgentMessageEmitter(ctx, func(contentDelta, _ string) {
 		r.mu.Lock()
 		r.content.WriteString(contentDelta)
 		r.mu.Unlock()
 	})
+	return runtime.WithAgentProgressEmitter(ctx, func(ev runtime.AgentProgressEvent) {
+		r.mu.Lock()
+		r.progress = append(r.progress, ev)
+		r.mu.Unlock()
+	})
+}
+
+// events renders the progress events as "phase kind name@agent ok", sorted
+// within each phase because parallel calls interleave.
+func (r *recordedStream) events(phase string) []string {
+	var out []string
+	for _, ev := range r.progress {
+		if ev.Phase != phase {
+			continue
+		}
+		line := ev.Kind + " " + ev.Name + "@" + ev.Agent
+		if ev.OK != nil && !*ev.OK {
+			line += " failed"
+		}
+		out = append(out, line)
+	}
+	sortStrings(out)
+	return out
+}
+
+func sortStrings(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
 }
 
 func coordinatorScript() *scriptedLoopModel {
@@ -150,10 +184,11 @@ func failingMCPTool() einotool.BaseTool {
 	}}
 }
 
-func coordinatorParam(toolErrorsToModel bool) AgentParam {
+func coordinatorParam(toolErrorsToModel, progressEvents bool) AgentParam {
 	child := AgentParam{ModelID: "stub", MaxRounds: 2, ToolErrorsToModel: toolErrorsToModel}
 	return AgentParam{
-		ModelID: "stub", MaxRounds: 2, ToolErrorsToModel: toolErrorsToModel,
+		ModelID: "stub", MaxRounds: 2,
+		ToolErrorsToModel: toolErrorsToModel, ProgressEvents: progressEvents,
 		SubAgents: []SubAgentTool{{Name: "retrieval_agent", Param: child}},
 	}
 }
@@ -175,7 +210,7 @@ func TestAgent_ToolErrorsToModel(t *testing.T) {
 	mdl := coordinatorScript()
 	useScriptedLoop(t, mdl, failingMCPTool())
 	stream := &recordedStream{}
-	out, err := NewAgentComponent(coordinatorParam(true)).Invoke(stream.context(t.Context()), nil, map[string]any{"user_prompt": "question"})
+	out, err := NewAgentComponent(coordinatorParam(true, false)).Invoke(stream.context(t.Context()), nil, map[string]any{"user_prompt": "question"})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -195,6 +230,9 @@ func TestAgent_ToolErrorsToModel(t *testing.T) {
 	if got := results["c3"]; got != "child report" {
 		t.Errorf("sub-agent result = %q, want its report (it recovered from its own unknown tool)", got)
 	}
+	if len(stream.progress) != 0 {
+		t.Errorf("progress events without progress_events: %+v", stream.progress)
+	}
 }
 
 // Without the opt-in both failures abort the run, as before.
@@ -202,7 +240,7 @@ func TestAgent_ToolErrorsStayFatalByDefault(t *testing.T) {
 	mdl := coordinatorScript()
 	mdl.root[0] = toolCallRound(toolCall("c1", "is_query", `{}`))
 	useScriptedLoop(t, mdl, failingMCPTool())
-	_, err := NewAgentComponent(coordinatorParam(false)).Invoke(t.Context(), nil, map[string]any{"user_prompt": "question"})
+	_, err := NewAgentComponent(coordinatorParam(false, false)).Invoke(t.Context(), nil, map[string]any{"user_prompt": "question"})
 	var toolErr *agenttool.MCPToolError
 	if !errors.As(err, &toolErr) || !strings.Contains(err.Error(), `mcp tool "is_query" returned isError: no such column: nope`) {
 		t.Fatalf("err = %v, want the MCP isError failure", err)
@@ -211,7 +249,7 @@ func TestAgent_ToolErrorsStayFatalByDefault(t *testing.T) {
 	mdl = coordinatorScript()
 	mdl.root[0] = toolCallRound(toolCall("c2", "files_agent", `{}`))
 	useScriptedLoop(t, mdl, failingMCPTool())
-	if _, err = NewAgentComponent(coordinatorParam(false)).Invoke(t.Context(), nil, map[string]any{"user_prompt": "question"}); err == nil || !strings.Contains(err.Error(), "files_agent") {
+	if _, err = NewAgentComponent(coordinatorParam(false, false)).Invoke(t.Context(), nil, map[string]any{"user_prompt": "question"}); err == nil || !strings.Contains(err.Error(), "files_agent") {
 		t.Fatalf("err = %v, want the unknown-tool failure", err)
 	}
 }
@@ -223,7 +261,7 @@ func TestAgent_ToolErrorsToModelCoversTransportFailures(t *testing.T) {
 	mdl.root[0] = toolCallRound(toolCall("c1", "is_query", `{}`))
 	boom := errors.New("GetVector failed: unexpected EOF")
 	useScriptedLoop(t, mdl, &scriptedTool{name: "is_query", run: func(context.Context, string) (string, error) { return "", boom }})
-	out, err := NewAgentComponent(coordinatorParam(true)).Invoke(t.Context(), nil, map[string]any{"user_prompt": "question"})
+	out, err := NewAgentComponent(coordinatorParam(true, false)).Invoke(t.Context(), nil, map[string]any{"user_prompt": "question"})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -241,24 +279,86 @@ func TestAgent_ToolErrorsToModelCoversTransportFailures(t *testing.T) {
 		cancel()
 		return "", context.Canceled
 	}})
-	if _, err := NewAgentComponent(coordinatorParam(true)).Invoke(ctx, nil, map[string]any{"user_prompt": "question"}); !errors.Is(err, context.Canceled) {
+	if _, err := NewAgentComponent(coordinatorParam(true, false)).Invoke(ctx, nil, map[string]any{"user_prompt": "question"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want the cancellation", err)
 	}
 }
 
-// The new switch is a DSL parameter. A run's inputs — for a sub-agent, the
-// calling model's arguments — cannot turn it on.
+// With progress_events on the canvas Agent, every tool call and sub-agent run
+// of the whole tree is announced at start and finish, as progress events and
+// never as answer content.
+func TestAgent_ProgressEvents(t *testing.T) {
+	mdl := coordinatorScript()
+	useScriptedLoop(t, mdl, failingMCPTool())
+	stream := &recordedStream{}
+	if _, err := NewAgentComponent(coordinatorParam(true, true)).Invoke(stream.context(t.Context()), nil, map[string]any{"user_prompt": "question"}); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got := stream.content.String(); got != "coordinator answer" {
+		t.Fatalf("streamed content = %q", got)
+	}
+	wantStart := []string{"sub_agent retrieval_agent@", "tool is_query@", "tool search_archa_data@retrieval_agent"}
+	if got := stream.events("start"); !reflect.DeepEqual(got, wantStart) {
+		t.Fatalf("start events = %v, want %v", got, wantStart)
+	}
+	wantFinish := []string{"sub_agent retrieval_agent@", "tool is_query@ failed", "tool search_archa_data@retrieval_agent"}
+	if got := stream.events("finish"); !reflect.DeepEqual(got, wantFinish) {
+		t.Fatalf("finish events = %v, want %v", got, wantFinish)
+	}
+	for _, ev := range stream.progress {
+		switch {
+		case ev.Phase == "start" && ev.Name == "retrieval_agent":
+			if ev.Args != "find the acoustic report" || ev.CallID != "c3" {
+				t.Errorf("sub-agent start = %+v, want its task and call id", ev)
+			}
+		case ev.Phase == "start" && ev.Name == "search_archa_data":
+			if ev.Args != `acoustic | filters: [{"key":"phase","op":"=","value":["DSP"]}]` || ev.CallID != "k2" {
+				t.Errorf("sub-agent tool start = %+v", ev)
+			}
+		case ev.Phase == "start" && ev.Name == "is_query":
+			if ev.Args != `{"sql":"SELECT nope FROM projects"}` {
+				t.Errorf("tool start args = %q", ev.Args)
+			}
+		case ev.Phase == "finish" && ev.Name == "is_query":
+			if ev.Error == "" || ev.CallID != "c1" {
+				t.Errorf("failed tool finish = %+v", ev)
+			}
+		case ev.Phase == "finish" && ev.Name == "retrieval_agent":
+			if ev.ResultChars != len("child report") {
+				t.Errorf("sub-agent finish = %+v", ev)
+			}
+		}
+	}
+}
+
+func TestSummarizeToolArgs(t *testing.T) {
+	long := strings.Repeat("ž", toolProgressArgsLimit+50)
+	for name, tc := range map[string]struct{ kind, args, want string }{
+		"sub-agent task": {"sub_agent", `{"user_prompt":"find\n  X","context":"long background"}`, "find X"},
+		"search":         {"tool", `{"query":"acoustic","filters":[{"key":"phase","op":"in","value":["DSP"]}]}`, `acoustic | filters: [{"key":"phase","op":"in","value":["DSP"]}]`},
+		"other tool":     {"tool", `{"b":1,"a":"x"}`, `{"a":"x","b":1}`},
+		"not json":       {"tool", ` raw text `, "raw text"},
+		"cut to a line":  {"tool", `{"query":"` + long + `"}`, strings.Repeat("ž", toolProgressArgsLimit) + "…"},
+	} {
+		if got := summarizeToolArgs(tc.kind, tc.args); got != tc.want {
+			t.Errorf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// The new switches are DSL parameters. A run's inputs — for a sub-agent, the
+// calling model's arguments — cannot turn them on.
 func TestAgent_RuntimeSwitchesComeFromTheDSLOnly(t *testing.T) {
-	p := agentParamFromMap(map[string]any{"tool_errors_to_model": true})
-	if !p.ToolErrorsToModel {
-		t.Fatalf("DSL switch not read: %+v", p)
+	p := agentParamFromMap(map[string]any{"tool_errors_to_model": true, "progress_events": true})
+	if !p.ToolErrorsToModel || !p.ProgressEvents {
+		t.Fatalf("DSL switches not read: %+v", p)
 	}
-	merged := mergeAgentParam(AgentParam{}, map[string]any{"tool_errors_to_model": true})
-	if merged.ToolErrorsToModel {
-		t.Fatalf("run inputs switched it on: %+v", merged)
+	merged := mergeAgentParam(AgentParam{}, map[string]any{"tool_errors_to_model": true, "progress_events": true})
+	if merged.ToolErrorsToModel || merged.ProgressEvents {
+		t.Fatalf("run inputs switched them on: %+v", merged)
 	}
-	if kept := mergeAgentParam(p, map[string]any{"user_prompt": "x"}); !kept.ToolErrorsToModel {
-		t.Fatalf("DSL switch lost on merge: %+v", kept)
+	if kept := mergeAgentParam(p, map[string]any{"user_prompt": "x"}); !kept.ToolErrorsToModel || !kept.ProgressEvents {
+		t.Fatalf("DSL switches lost on merge: %+v", kept)
 	}
 }
 
@@ -274,7 +374,7 @@ func TestAgent_SubAgentModelOutputStaysOutOfTheRealLoopStream(t *testing.T) {
 
 	ctx := runtime.WithComponentExecutionOptions(t.Context(), runtime.ComponentExecutionOptions{DeferAgentToMessage: true})
 	ctx = runtime.WithAgentMessageEmitter(ctx, func(string, string) {})
-	param := coordinatorParam(false)
+	param := coordinatorParam(false, false)
 	param.Cite = true
 	out, err := NewAgentComponent(param).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
 	if err != nil {
@@ -296,5 +396,92 @@ func TestAgent_SubAgentModelOutputStaysOutOfTheRealLoopStream(t *testing.T) {
 	}
 	if final["citation_validation_status"] == "skipped_streamed" || final["removed_citation_count"] != 1 {
 		t.Fatalf("citation validation = %v, removed = %v", final["citation_validation_status"], final["removed_citation_count"])
+	}
+}
+
+// With live_reasoning a round's reasoning is forwarded while the round is
+// still being read — before its tool call runs — and exactly once.
+func TestAgent_LiveReasoning(t *testing.T) {
+	run := func(live bool) (sequence []string, thinking string) {
+		var mu sync.Mutex
+		record := func(event string) {
+			mu.Lock()
+			sequence = append(sequence, event)
+			mu.Unlock()
+		}
+		mdl := &scriptedLoopModel{root: []*schema.Message{
+			{Role: schema.Assistant, ReasoningContent: "plan", ToolCalls: []schema.ToolCall{toolCall("c1", "lookup", `{}`)}},
+			{Role: schema.Assistant, ReasoningContent: "conclude", Content: "answer"},
+		}}
+		useScriptedLoop(t, mdl, &scriptedTool{name: "lookup", run: func(context.Context, string) (string, error) {
+			record("tool")
+			return "ok", nil
+		}})
+		ctx := runtime.WithComponentExecutionOptions(t.Context(), runtime.ComponentExecutionOptions{DeferAgentToMessage: true})
+		ctx = runtime.WithAgentMessageEmitter(ctx, func(string, string) {})
+		out, err := NewAgentComponent(AgentParam{ModelID: "stub", MaxRounds: 2, LiveReasoning: live}).Invoke(ctx, nil, map[string]any{"user_prompt": "question"})
+		if err != nil {
+			t.Fatalf("Invoke: %v", err)
+		}
+		var streamedThinking, content strings.Builder
+		final, err := out["content"].(*runtime.DeferredStream).Open(ctx, func(contentDelta, thinkingDelta string) {
+			if thinkingDelta != "" {
+				record("think:" + thinkingDelta)
+				streamedThinking.WriteString(thinkingDelta)
+			}
+			content.WriteString(contentDelta)
+		})
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if content.String() != "answer" || final["content"] != "answer" || final["thinking"] != "conclude" {
+			t.Fatalf("live=%v: streamed %q, final %v, thinking %v", live, content.String(), final["content"], final["thinking"])
+		}
+		return sequence, streamedThinking.String()
+	}
+
+	sequence, thinking := run(true)
+	if want := []string{"think:plan", "tool", "think:conclude"}; !reflect.DeepEqual(sequence, want) {
+		t.Fatalf("live sequence = %v, want %v", sequence, want)
+	}
+	if thinking != "planconclude" {
+		t.Fatalf("live thinking = %q, want each round's reasoning once", thinking)
+	}
+	if _, thinking = run(false); thinking != "planconclude" {
+		t.Fatalf("default thinking = %q", thinking)
+	}
+	if p := agentParamFromMap(map[string]any{"live_reasoning": true}); !p.LiveReasoning {
+		t.Fatal("live_reasoning not read from the DSL")
+	}
+}
+
+// A deferred Agent runs when its Message node opens the stream, on that
+// node's context; its log lines must still name the Agent node, and a
+// sub-agent below it "<agent node>/<sub-agent>".
+func TestAgent_DeferredRunKeepsItsLogComponent(t *testing.T) {
+	var labels []string
+	var mu sync.Mutex
+	withAgentRunner(t, func(ctx context.Context, p AgentParam) (*schema.Message, error) {
+		mu.Lock()
+		labels = append(labels, common.LogComponentFromContext(ctx))
+		mu.Unlock()
+		if subAgentDepth(ctx) == 0 {
+			child := &subAgentTool{spec: SubAgentTool{Name: "navigo_agent", Param: AgentParam{ModelID: "stub", MaxRounds: 1}}}
+			if _, err := child.InvokableRun(ctx, `{"user_prompt":"task"}`); err != nil {
+				t.Errorf("child: %v", err)
+			}
+		}
+		return &schema.Message{Role: schema.Assistant, Content: "answer"}, nil
+	})
+	ctx := runtime.WithComponentExecutionOptions(t.Context(), runtime.ComponentExecutionOptions{DeferAgentToMessage: true})
+	out, err := NewAgentComponent(AgentParam{ModelID: "stub", MaxRounds: 1}).Invoke(common.WithLogComponent(ctx, "Agent:Coordinator"), nil, map[string]any{"user_prompt": "hello"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if _, err := out["content"].(*runtime.DeferredStream).Open(common.WithLogComponent(ctx, "Message:Reply"), func(string, string) {}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if want := []string{"Agent:Coordinator", "Agent:Coordinator/navigo_agent"}; !reflect.DeepEqual(labels, want) {
+		t.Fatalf("log components = %v, want %v", labels, want)
 	}
 }

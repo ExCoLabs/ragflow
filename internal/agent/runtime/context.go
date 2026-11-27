@@ -60,7 +60,10 @@ func IsDeferredStream(v any) bool {
 }
 
 type agentMessageEmitterState struct {
-	mu            sync.Mutex
+	mu sync.Mutex
+	// callMu serializes emit: with live_reasoning the model call forwards
+	// reasoning while the stream collector may still be emitting content.
+	callMu        sync.Mutex
 	emit          AgentMessageEmitter
 	finalize      func() bool
 	reset         func()
@@ -75,7 +78,9 @@ type agentDeltaSinkCtxKey struct{}
 type canvasMessageEventEmitterCtxKey struct{}
 
 type agentDeltaSinkState struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// callMu serializes sink, like agentMessageEmitterState.callMu.
+	callMu  sync.Mutex
 	sink    AgentDeltaSink
 	emitted bool
 }
@@ -252,7 +257,9 @@ func EmitAgentMessage(ctx context.Context, contentDelta, thinkingDelta string) b
 		}
 		// A deferred Agent is being consumed by Message. Do not call the
 		// service SSE emitter here; Message owns the visible event stream.
+		sinkState.callMu.Lock()
 		sink(contentDelta, thinkingDelta)
+		sinkState.callMu.Unlock()
 		sinkState.mu.Lock()
 		if contentDelta != "" || thinkingDelta != "" {
 			sinkState.emitted = true
@@ -284,7 +291,9 @@ func EmitAgentMessage(ctx context.Context, contentDelta, thinkingDelta string) b
 	if emit == nil {
 		return false
 	}
+	state.callMu.Lock()
 	emit(contentDelta, thinkingDelta)
+	state.callMu.Unlock()
 	state.mu.Lock()
 	if contentDelta != "" || thinkingDelta != "" {
 		state.emitted = true

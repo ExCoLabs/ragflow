@@ -820,6 +820,21 @@ func containsToolResult(messages []Message) bool {
 // With a failover chain, a stream that fails BEFORE any delta was emitted
 // moves to the next model; once deltas have reached the client the call
 // cannot be replayed, so the error is surfaced as-is.
+type streamedToolTurnsCtxKey struct{}
+
+// WithStreamedToolTurns makes Stream stream a tool-bound first turn too,
+// instead of answering it from one non-streaming call. Only for callers that
+// know their provider streams tool calls as structured deltas — the default
+// exists for those that stream them as prose.
+func WithStreamedToolTurns(ctx context.Context) context.Context {
+	return context.WithValue(ctx, streamedToolTurnsCtxKey{}, true)
+}
+
+func streamedToolTurns(ctx context.Context) bool {
+	on, _ := ctx.Value(streamedToolTurnsCtxKey{}).(bool)
+	return on
+}
+
 func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	if m == nil || len(m.chain) == 0 {
 		return nil, fmt.Errorf("models: EinoChatModel: empty model chain")
@@ -832,7 +847,7 @@ func (m *EinoChatModel) Stream(ctx context.Context, msgs []*schema.Message, opts
 	// endpoint) stream tool intent as ordinary prose. Use the provider's
 	// non-streaming parser for tool-bound turns so structured tool_calls are
 	// preserved; ReAct still streams the final answer turn normally.
-	if len(m.tools) > 0 && !containsToolResult(internalMessage) {
+	if len(m.tools) > 0 && !containsToolResult(internalMessage) && !streamedToolTurns(ctx) {
 		msg, err := m.Generate(ctx, msgs, opts...)
 		if err != nil {
 			return nil, err

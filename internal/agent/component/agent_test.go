@@ -424,7 +424,7 @@ func TestEmitAgentModelStreamsWithCiteSeparatesReasoningRounds(t *testing.T) {
 	})
 
 	opt, future := react.WithMessageFuture()
-	emitDone := emitAgentModelStreams(ctx, future, true)
+	emitDone := emitAgentModelStreams(ctx, future, true, false)
 	stream, err := agent.Stream(ctx, []*schema.Message{schema.UserMessage("calculate")}, opt)
 	if err != nil {
 		t.Fatalf("agent.Stream: %v", err)
@@ -471,7 +471,7 @@ func TestReactCheckerStreamsThinkingBeforeAgentReturns(t *testing.T) {
 	})
 
 	opt, future := react.WithMessageFuture()
-	emitDone := emitAgentModelStreams(ctx, future, false)
+	emitDone := emitAgentModelStreams(ctx, future, false, false)
 
 	streamCh := make(chan *schema.StreamReader[*schema.Message], 1)
 	errCh := make(chan error, 1)
