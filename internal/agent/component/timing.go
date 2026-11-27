@@ -33,7 +33,7 @@ import (
 
 // toolObserver is what every tool call of an Agent run passes through: it
 // times the call into the run's PhaseTimings, reports it as a started/finished
-// tool_call event pair, and — only when the Agent opted in — hands MCP tool
+// tool_call event pair, and — only when the Agent opted in — hands tool
 // errors to the model.
 type toolObserver struct {
 	name string
@@ -63,9 +63,11 @@ func (o *toolObserver) end(ctx context.Context, call observedCall, out string, e
 		ElapsedTime: took.Seconds(), Error: err != nil,
 	})
 
-	var toolErr *agenttool.MCPToolError
-	if o.errorsToModel && errors.As(err, &toolErr) {
-		return toolErrorForModel(o.name, toolErr.Text), nil
+	// A cancelled or timed-out run must still stop; any other failure, also a
+	// transient one such as an embedding endpoint dropping the connection, is
+	// something the model can retry or answer around.
+	if o.errorsToModel && err != nil && ctx.Err() == nil {
+		return toolErrorForModel(o.name, errorText(err)), nil
 	}
 	return out, err
 }

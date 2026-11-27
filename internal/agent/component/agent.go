@@ -152,9 +152,11 @@ type AgentParam struct {
 	TopPDisabled        bool
 	TemperatureDisabled bool
 
-	// ToolErrorsToModel (DSL tool_errors_to_model) returns an MCP tool's
-	// own error (isError) and a call to a tool that does not exist to the
-	// model as the tool result, so it can recover. Off, both fail the run.
+	// ToolErrorsToModel (DSL tool_errors_to_model) returns a failed tool
+	// call — an MCP isError, a search or transport error, a failed sub-agent —
+	// and a call to a tool that does not exist to the model as the tool
+	// result, so it can recover. Off, or once the run's context is done, they
+	// fail the run.
 	ToolErrorsToModel bool
 
 	// contextLength is the resolved model context window used to bound the
