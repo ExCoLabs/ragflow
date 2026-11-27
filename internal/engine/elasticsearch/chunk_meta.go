@@ -27,8 +27,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"go.uber.org/zap"
@@ -259,7 +261,12 @@ func applyChunkMetaScope(boolQuery map[string]interface{}, scope *common.ChunkMe
 
 // One constant source: ES compiles each distinct script text and refuses more
 // than 150 compilations per 5 minutes, which a backfill of many groups exceeds.
-const chunkMetaUpdateScript = "for (e in params.set.entrySet()) { ctx._source[e.getKey()] = e.getValue(); } for (k in params.remove) { ctx._source.remove(k); }"
+// update_by_query reindexes every matched chunk (embeddings included) unless
+// the script says noop, so unchanged chunks are skipped.
+const chunkMetaUpdateScript = "boolean changed = false; " +
+	"for (e in params.set.entrySet()) { if (!Objects.equals(ctx._source.get(e.getKey()), e.getValue())) { ctx._source[e.getKey()] = e.getValue(); changed = true; } } " +
+	"for (k in params.remove) { if (ctx._source.containsKey(k)) { ctx._source.remove(k); changed = true; } } " +
+	"if (!changed) { ctx.op = 'noop'; }"
 
 // UpdateChunkMetadata sets and removes chunk metadata fields on every chunk of
 // the given documents with one update_by_query, so documents that share the
@@ -300,7 +307,9 @@ func (e *Engine) UpdateChunkMetadata(ctx context.Context, indexName, datasetID s
 	if err != nil {
 		return fmt.Errorf("failed to marshal chunk metadata update: %w", err)
 	}
-	waitForCompletion := true
+	// Run as a task and poll it: one request over documents with thousands of
+	// chunks each outlives the client's 30 s response-header timeout.
+	waitForCompletion := false
 	req := esapi.UpdateByQueryRequest{
 		Index:             []string{indexName},
 		Body:              bytes.NewReader(bodyBytes),
@@ -314,15 +323,70 @@ func (e *Engine) UpdateChunkMetadata(ctx context.Context, indexName, datasetID s
 		return fmt.Errorf("chunk metadata update failed: %w", err)
 	}
 	defer res.Body.Close()
+	respBody, _ := io.ReadAll(res.Body)
 	if res.IsError() {
 		if res.StatusCode == 404 {
 			// No chunk index yet: nothing to update.
 			return nil
 		}
-		respBody, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("chunk metadata update error: %s, body: %s", res.Status(), string(respBody))
 	}
-	return nil
+	var started struct {
+		Task string `json:"task"`
+	}
+	if err := json.Unmarshal(respBody, &started); err != nil || started.Task == "" {
+		return fmt.Errorf("chunk metadata update returned no task: %s", string(respBody))
+	}
+	return e.waitForUpdateTask(ctx, started.Task)
+}
+
+// chunkMetaTaskPoll stays under the client's 30 s response-header timeout.
+var chunkMetaTaskPoll = 20 * time.Second
+
+func (e *Engine) waitForUpdateTask(ctx context.Context, taskID string) error {
+	wait := true
+	for {
+		res, err := esapi.TasksGetRequest{TaskID: taskID, WaitForCompletion: &wait, Timeout: chunkMetaTaskPoll}.Do(ctx, e.client)
+		if err != nil {
+			return fmt.Errorf("chunk metadata update task %s: %w", taskID, err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		// ES 8 answers a poll that outwaits its timeout with 500 timeout_exception
+		// (408 in other versions): the task is still running.
+		if res.StatusCode == http.StatusRequestTimeout || (res.IsError() && bytes.Contains(body, []byte(`"timeout_exception"`))) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			continue
+		}
+		if res.IsError() {
+			return fmt.Errorf("chunk metadata update task %s: %s, body: %s", taskID, res.Status(), string(body))
+		}
+		var task struct {
+			Completed bool            `json:"completed"`
+			Error     json.RawMessage `json:"error"`
+			Response  struct {
+				Failures []json.RawMessage `json:"failures"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal(body, &task); err != nil {
+			return fmt.Errorf("chunk metadata update task %s: %w", taskID, err)
+		}
+		if !task.Completed {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			continue
+		}
+		if len(task.Error) > 0 && string(task.Error) != "null" {
+			return fmt.Errorf("chunk metadata update task %s failed: %s", taskID, string(task.Error))
+		}
+		if len(task.Response.Failures) > 0 {
+			return fmt.Errorf("chunk metadata update task %s: %d failure(s), first: %s", taskID, len(task.Response.Failures), string(task.Response.Failures[0]))
+		}
+		return nil
+	}
 }
 
 // RefreshChunkIndex makes preceding no-refresh writes searchable.
