@@ -137,7 +137,7 @@ func TestParseResultText_EmptyJSONWithoutFallbackReturnsEmpty(t *testing.T) {
 }
 
 func TestParseAgentUploadContent_JSONUsesParsedItemText(t *testing.T) {
-	content, err := parseAgentUploadContent(t.Context(), "data.csv", []byte("a,b\n1,2\n"), "")
+	content, err := parseAgentUploadContent(t.Context(), "data.csv", []byte("a,b\n1,2\n"), "", "")
 	if err != nil {
 		t.Fatalf("parseAgentUploadContent: %v", err)
 	}

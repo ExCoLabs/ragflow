@@ -250,7 +250,7 @@ func TestFileService_ParseAgentUploads_TextAndImageInRequestOrder(t *testing.T) 
 	contents, err := testFileService().ParseAgentUploads(ctx, "user-1", []map[string]interface{}{
 		{"id": "text-id", "name": "notes.txt", "mime_type": "text/plain", "created_by": "user-1"},
 		{"id": "image-id", "name": "photo.bin", "mime_type": "image/png", "created_by": "user-1"},
-	}, "Plain Text")
+	}, "Plain Text", "")
 	if err != nil {
 		t.Fatalf("ParseAgentUploads: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestFileService_ParseAgentUploads_RejectsForeignOwner(t *testing.T) {
 
 	_, err := testFileService().ParseAgentUploads(ctx, "user-1", []map[string]interface{}{
 		{"id": "file-id", "name": "secret.txt", "mime_type": "text/plain", "created_by": "user-2"},
-	}, "")
+	}, "", "")
 	if err == nil || !strings.Contains(err.Error(), "created_by does not match") {
 		t.Fatalf("error = %v, want created_by mismatch", err)
 	}
@@ -291,7 +291,7 @@ func TestFileService_ParseAgentUploads_MissingObjectFails(t *testing.T) {
 
 	_, err := testFileService().ParseAgentUploads(ctx, "user-1", []map[string]interface{}{
 		{"id": "missing", "name": "missing.txt", "mime_type": "text/plain", "created_by": "user-1"},
-	}, "")
+	}, "", "")
 	if err == nil || !strings.Contains(err.Error(), "read upload") {
 		t.Fatalf("error = %v, want storage read failure", err)
 	}
