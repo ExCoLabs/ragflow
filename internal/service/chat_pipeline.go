@@ -573,6 +573,9 @@ func (s *ChatPipelineService) AsyncChat(
 		// - Missing non-optional param => return error immediately.
 		// - Missing optional param => replace "{key}" placeholder with space.
 		kwargs["date"] = time.Now().UTC().Format(time.RFC3339)
+		// Filled once the filter has run (Phase 8); seeded so the optional
+		// {meta_filter} placeholder survives this check. Never caller-supplied.
+		kwargs["meta_filter"] = ""
 		systemPrompt, _ := promptConfig["system"].(string)
 		for _, p := range parameters {
 			pMap, ok := p.(map[string]interface{})
@@ -654,7 +657,9 @@ func (s *ChatPipelineService) AsyncChat(
 		// chunks, the filter and the metadata boost apply on those fields
 		// instead (chunkMetaScope).
 		var chunkMetaScope *common.ChunkMetaScope
-		docIDs, chunkMetaScope = s.chatMetadataScope(ctx, chat, questions[len(questions)-1], chatModel, docIDs, kbIDStrings(kbs), ChunkMetadataConfigForKBs(kbs))
+		var metaFilterApplied common.MetadataFilterDiagnostic
+		docIDs, chunkMetaScope = s.chatMetadataScope(ctx, chat, questions[len(questions)-1], chatModel, docIDs, kbIDStrings(kbs), ChunkMetadataConfigForKBs(kbs), &metaFilterApplied)
+		kwargs["meta_filter"] = describeAppliedMetaFilter(metaFilterApplied)
 
 		// keyword — extract top-N keywords from the question via LLM and
 		// append them to the question text to boost lexical retrieval recall.
