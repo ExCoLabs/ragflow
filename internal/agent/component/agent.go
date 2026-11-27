@@ -387,14 +387,20 @@ func (m *roundLimitedChatModel) Generate(ctx context.Context, input []*schema.Me
 	return m.ToolCallingChatModel.Generate(ctx, input, m.roundOptions(opts)...)
 }
 
-// emptyRoundMaxRetries bounds replays of a model round that ends with no
-// answer content and no tool calls (reasoning-only or empty finish). Only
-// the model call is replayed — nothing reached the caller, so the tool
-// loop is not re-run and no duplicate output is emitted.
+// emptyRoundMaxRetries bounds replays of a round with neither content nor tool
+// calls; nothing of it reached the caller, so replaying emits no duplicates.
 const emptyRoundMaxRetries = 2
+
+const (
+	toolBudgetExhaustedMessage = "The configured tool-call budget is exhausted. Do not call any more tools. Produce your final answer using the evidence already collected. State any missing evidence or uncertainty; do not claim that unperformed searches were completed."
+	emptyRoundNudge            = "Your previous attempt ended without an answer or a tool call. Stop deliberating. Immediately either call the tools you need or give your final answer."
+	finalEmptyRoundNudge       = "Your previous attempt ended without an answer. Stop deliberating and write your final answer now."
+)
 
 func (m *roundLimitedChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	start := time.Now()
+	finalRound := m.remaining <= 0
+	original := input
 	input = m.roundInput(input)
 	opts = m.roundOptions(opts)
 	timings := runtime.PhaseTimingsFromContext(ctx)
@@ -447,6 +453,10 @@ func (m *roundLimitedChatModel) Stream(ctx context.Context, input []*schema.Mess
 		if streamErr == nil && hasOutput {
 			break
 		}
+		if streamErr == nil {
+			logEmptyRound(ctx, attempt, buffered)
+			input = emptyRoundReplayInput(original, finalRound)
+		}
 		if attempt >= emptyRoundMaxRetries {
 			break
 		}
@@ -476,11 +486,50 @@ func (m *roundLimitedChatModel) roundInput(input []*schema.Message) []*schema.Me
 	if m.remaining > 0 {
 		return input
 	}
-	final := make([]*schema.Message, 0, len(input)+1)
-	final = append(final, input...)
+	return withTrailingUserMessage(input, toolBudgetExhaustedMessage)
+}
+
+// An identical replay tends to repeat the runaway deliberation. Built from the
+// original input so nudges never accumulate; the final round folds it into one message.
+func emptyRoundReplayInput(original []*schema.Message, finalRound bool) []*schema.Message {
+	if finalRound {
+		return withTrailingUserMessage(original, toolBudgetExhaustedMessage+" "+finalEmptyRoundNudge)
+	}
+	return withTrailingUserMessage(original, emptyRoundNudge)
+}
+
+func withTrailingUserMessage(input []*schema.Message, text string) []*schema.Message {
+	out := make([]*schema.Message, 0, len(input)+1)
+	out = append(out, input...)
 	// User role: providers reject a system message outside position 0, and
 	// this instruction always lands at the end of the conversation.
-	return append(final, schema.UserMessage("The configured tool-call budget is exhausted. Do not call any more tools. Produce your final answer using the evidence already collected. State any missing evidence or uncertainty; do not claim that unperformed searches were completed."))
+	return append(out, schema.UserMessage(text))
+}
+
+// The OpenAI-compatible adapter does not set finish_reason today, so reasoning
+// size is the reliable sign of a max_tokens runaway.
+func logEmptyRound(ctx context.Context, attempt int, round []*schema.Message) {
+	finishReason := ""
+	completionTokens := 0
+	reasoningBytes := 0
+	for _, message := range round {
+		reasoningBytes += len(message.ReasoningContent)
+		if message.ResponseMeta == nil {
+			continue
+		}
+		if message.ResponseMeta.FinishReason != "" {
+			finishReason = message.ResponseMeta.FinishReason
+		}
+		if message.ResponseMeta.Usage != nil && message.ResponseMeta.Usage.CompletionTokens > 0 {
+			completionTokens = message.ResponseMeta.Usage.CompletionTokens
+		}
+	}
+	common.WarnCtx(ctx, "agent: model round ended without answer or tool call",
+		zap.Int("attempt", attempt),
+		zap.Bool("willRetry", attempt < emptyRoundMaxRetries),
+		zap.Int("reasoningBytes", reasoningBytes),
+		zap.String("finishReason", finishReason),
+		zap.Int("completionTokens", completionTokens))
 }
 
 // scanAllStreamForToolCall consumes the whole model response, then branches

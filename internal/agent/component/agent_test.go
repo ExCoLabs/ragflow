@@ -1747,6 +1747,145 @@ func TestRoundLimitedModelRetriesEmptyRound(t *testing.T) {
 	}
 }
 
+// scriptedRoundModel streams one scripted round per call (an error entry
+// fails the call) and records a copy of every call's input.
+type scriptedRoundModel struct {
+	rounds []any
+	inputs [][]*schema.Message
+}
+
+func (m *scriptedRoundModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func (m *scriptedRoundModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("answer", nil), nil
+}
+
+func (m *scriptedRoundModel) Stream(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	m.inputs = append(m.inputs, slices.Clone(input))
+	round := m.rounds[min(len(m.inputs), len(m.rounds))-1]
+	if err, ok := round.(error); ok {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{round.(*schema.Message)}), nil
+}
+
+func reasoningOnlyRound() *schema.Message {
+	return &schema.Message{Role: schema.Assistant, ReasoningContent: "thinking only"}
+}
+
+func lastUserText(input []*schema.Message) string {
+	if len(input) == 0 || input[len(input)-1].Role != schema.User {
+		return ""
+	}
+	return input[len(input)-1].Content
+}
+
+func readAllRounds(t *testing.T, stream *schema.StreamReader[*schema.Message]) []*schema.Message {
+	t.Helper()
+	defer stream.Close()
+	var out []*schema.Message
+	for {
+		message, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return out
+		}
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		out = append(out, message)
+	}
+}
+
+func TestRoundLimitedModelNudgesReplayAfterReasoningOnlyRound(t *testing.T) {
+	toolCall := schema.AssistantMessage("", []schema.ToolCall{{ID: "c1", Function: schema.FunctionCall{Name: "search", Arguments: "{}"}}})
+	inner := &scriptedRoundModel{rounds: []any{reasoningOnlyRound(), toolCall}}
+	mdl := &roundLimitedChatModel{ToolCallingChatModel: inner, remaining: 3}
+	// Spare capacity: appending the nudge in place would write into the caller's array.
+	input := make([]*schema.Message, 1, 4)
+	input[0] = schema.UserMessage("question")
+
+	stream, err := mdl.Stream(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := readAllRounds(t, stream)
+
+	if len(inner.inputs) != 2 {
+		t.Fatalf("stream calls = %d, want 2", len(inner.inputs))
+	}
+	if len(inner.inputs[0]) != 1 || lastUserText(inner.inputs[0]) != "question" {
+		t.Fatalf("first call input = %v, want the original input without a nudge", inner.inputs[0])
+	}
+	if len(inner.inputs[1]) != 2 || lastUserText(inner.inputs[1]) != emptyRoundNudge {
+		t.Fatalf("replay input = %v, want the original input plus the nudge", inner.inputs[1])
+	}
+	if extra := input[:cap(input)][1]; extra != nil {
+		t.Fatalf("caller's input array was written: %v", extra)
+	}
+	if len(got) != 1 || len(got[0].ToolCalls) != 1 || got[0].ReasoningContent != "" {
+		t.Fatalf("stream = %v, want only the recovered tool-call round", got)
+	}
+}
+
+func TestRoundLimitedModelNudgesDoNotAccumulateAndStayBounded(t *testing.T) {
+	inner := &scriptedRoundModel{rounds: []any{reasoningOnlyRound()}}
+	mdl := &roundLimitedChatModel{ToolCallingChatModel: inner, remaining: 3}
+
+	stream, err := mdl.Stream(t.Context(), []*schema.Message{schema.UserMessage("question")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := readAllRounds(t, stream)
+
+	if len(inner.inputs) != emptyRoundMaxRetries+1 {
+		t.Fatalf("stream calls = %d, want %d", len(inner.inputs), emptyRoundMaxRetries+1)
+	}
+	for i, in := range inner.inputs[1:] {
+		if len(in) != 2 || lastUserText(in) != emptyRoundNudge {
+			t.Fatalf("replay %d input = %v, want exactly one nudge", i+1, in)
+		}
+	}
+	if len(got) != 1 || got[0].ReasoningContent != "thinking only" {
+		t.Fatalf("stream = %v, want only the last empty round", got)
+	}
+}
+
+func TestRoundLimitedModelFinalRoundNudgeFoldsIntoBudgetMessage(t *testing.T) {
+	inner := &scriptedRoundModel{rounds: []any{reasoningOnlyRound(), schema.AssistantMessage("answer", nil)}}
+	mdl := &roundLimitedChatModel{ToolCallingChatModel: inner, remaining: 0}
+
+	stream, err := mdl.Stream(t.Context(), []*schema.Message{schema.UserMessage("question")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllRounds(t, stream)
+
+	if len(inner.inputs) != 2 || lastUserText(inner.inputs[0]) != toolBudgetExhaustedMessage {
+		t.Fatalf("first call input = %v, want the budget message", inner.inputs)
+	}
+	replay := inner.inputs[1]
+	if len(replay) != 2 || lastUserText(replay) != toolBudgetExhaustedMessage+" "+finalEmptyRoundNudge {
+		t.Fatalf("final-round replay = %v, want one combined closing instruction", replay)
+	}
+}
+
+func TestRoundLimitedModelErrorRetryCarriesNoNudge(t *testing.T) {
+	inner := &scriptedRoundModel{rounds: []any{errors.New("provider unavailable"), schema.AssistantMessage("answer", nil)}}
+	mdl := &roundLimitedChatModel{ToolCallingChatModel: inner, remaining: 3}
+
+	stream, err := mdl.Stream(t.Context(), []*schema.Message{schema.UserMessage("question")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllRounds(t, stream)
+
+	if len(inner.inputs) != 2 || len(inner.inputs[1]) != 1 || lastUserText(inner.inputs[1]) != "question" {
+		t.Fatalf("error replay input = %v, want the original input unchanged", inner.inputs)
+	}
+}
+
 // TestAgent_CanvasRetrievalToolsKeepTheirOwnDatasets covers the canvas DSL
 // shape, where every retrieval instance shares component_name "Retrieval".
 func TestAgent_CanvasRetrievalToolsKeepTheirOwnDatasets(t *testing.T) {
