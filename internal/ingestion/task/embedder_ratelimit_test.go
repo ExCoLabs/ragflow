@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/url"
 	"strings"
 	"syscall"
 	"testing"
@@ -323,6 +325,10 @@ func TestIsRetryableErr(t *testing.T) {
 		{"timeout", &net.DNSError{Err: "i/o timeout", Name: "provider.example", IsTimeout: true}, true},
 		{"connection refused", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, false},
 		{"connection reset after accept", &net.OpError{Op: "read", Err: syscall.ECONNRESET}, true},
+		// The provider closing the connection without a response, as the drivers
+		// report it: `failed to send request: Post "...": EOF`.
+		{"closed without response", fmt.Errorf("failed to send request: %w", &url.Error{Op: "Post", URL: "https://provider.example/v1/embeddings", Err: io.EOF}), true},
+		{"closed mid-response", fmt.Errorf("failed to send request: %w", &url.Error{Op: "Post", URL: "https://provider.example/v1/embeddings", Err: io.ErrUnexpectedEOF}), true},
 		{"wrapped dns NXDOMAIN", fmt.Errorf("embed: %w", &net.DNSError{Err: "no such host", IsNotFound: true}), false},
 	}
 	for _, tc := range netCases {
