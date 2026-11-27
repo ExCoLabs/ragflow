@@ -180,6 +180,12 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		zap.String("engine", engineType),
 		zap.Bool("vectorOnly", req.VectorOnly))
 
+	collapseDuplicates := req.CollapseDuplicates == nil || *req.CollapseDuplicates
+	fetchCount := rerankCandidatesCount
+	if collapseDuplicates {
+		fetchCount = collapseOverfetchCount(rerankCandidatesCount)
+	}
+
 	// Execute search via Search()
 	searchReq := &RetrievalSearchRequest{
 		TenantIDs:              req.TenantIDs,
@@ -187,7 +193,7 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		KbIDs:                  req.KbIDs,
 		DocIDs:                 req.DocIDs,
 		Page:                   1,
-		PageSize:               rerankCandidatesCount,
+		PageSize:               fetchCount,
 		KNNTopK:                *req.KNNTopK,
 		KNNNumCandidates:       *req.KNNNumCandidates,
 		RankFeature:            *req.RankFeature,
@@ -220,6 +226,17 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 		return &RetrievalResult{Chunks: []map[string]interface{}{}, DocAggs: []map[string]interface{}{}, Total: 0}, nil
 	}
 
+	scored := searchResult
+	var scoredOf []int
+	if collapseDuplicates {
+		fetched := len(searchResult.IDs)
+		window := uniqueRerankWindow(searchResult, rerankCandidatesCount)
+		searchResult, scored, scoredOf = window.pool, window.scored, window.scoredOf
+		// Same level knob as agent_retrieval_timings, so warn-level deployments see it.
+		common.AgentTimingLog(fmt.Sprintf("retrieval_candidates fetched=%d unique=%d rerank_window=%d scored=%d pool=%d session=%s",
+			fetched, window.unique, rerankCandidatesCount, len(scored.IDs), len(searchResult.IDs), common.SessionIDFromContext(ctx)))
+	}
+
 	if captured, captureErr := captureRetrievalCandidates(ctx, req, searchResult); captureErr != nil {
 		common.WarnCtx(ctx, "Retrieval candidate capture failed")
 	} else if captured {
@@ -227,13 +244,18 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 	}
 
 	rerankStart := time.Now()
-	sim, termSimilarity, vectorSimilarity, err := s.scoreSearchResult(ctx, req, searchResult)
+	sim, termSimilarity, vectorSimilarity, err := s.scoreSearchResult(ctx, req, scored)
 	timings.add(rerankPhase, rerankStart)
 	if err != nil {
 		return nil, err
 	}
 	if len(sim) == 0 {
 		return &RetrievalResult{Chunks: []map[string]interface{}{}, DocAggs: []map[string]interface{}{}, Total: 0}, nil
+	}
+	if scoredOf != nil {
+		sim = expandScores(sim, scoredOf)
+		termSimilarity = expandScores(termSimilarity, scoredOf)
+		vectorSimilarity = expandScores(vectorSimilarity, scoredOf)
 	}
 	// Metadata preferences are added after text/vector similarity, and after
 	// the rerank model when there is one, so they survive every ranking stage.
@@ -287,7 +309,6 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 	// texts the copy kept is the best ranked one with its document's boost
 	// included, so a preferred document's copy represents the text and the
 	// others are listed under it.
-	collapseDuplicates := req.CollapseDuplicates == nil || *req.CollapseDuplicates
 	var duplicatesOf map[int][]int
 	if collapseDuplicates {
 		validIdx, duplicatesOf = collapseDuplicateChunks(searchResult, validIdx)
@@ -578,20 +599,10 @@ func preferNewestDocVersions(result *RetrievalSearchResult) *RetrievalSearchResu
 func collapseDuplicateChunks(searchResult *RetrievalSearchResult, idx []int) ([]int, map[int][]int) {
 	kept := make([]int, 0, len(idx))
 	duplicatesOf := make(map[int][]int)
-	type chunkIdentity struct {
-		text, compilationKind string
-	}
 	firstByIdentity := make(map[chunkIdentity]int)
 	for _, i := range idx {
-		identity := chunkIdentity{}
-		if i >= 0 && i < len(searchResult.IDs) {
-			chunk := searchResult.Field[searchResult.IDs[i]]
-			if v := chunk["content_with_weight"]; v != nil {
-				identity.text = strings.Join(strings.Fields(fmt.Sprint(v)), " ")
-			}
-			identity.compilationKind = firstStringValue(chunk["compile_kwd"])
-		}
-		if identity.text == "" {
+		identity, ok := duplicateIdentity(searchResult, i)
+		if !ok {
 			kept = append(kept, i)
 			continue
 		}
@@ -603,6 +614,139 @@ func collapseDuplicateChunks(searchResult *RetrievalSearchResult, idx []int) ([]
 		kept = append(kept, i)
 	}
 	return kept, duplicatesOf
+}
+
+type chunkIdentity struct {
+	text, compilationKind string
+}
+
+// duplicateIdentity is what makes two chunks copies of each other; ok is
+// false for chunks without text, which are never merged.
+func duplicateIdentity(searchResult *RetrievalSearchResult, i int) (chunkIdentity, bool) {
+	if i < 0 || i >= len(searchResult.IDs) {
+		return chunkIdentity{}, false
+	}
+	chunk := searchResult.Field[searchResult.IDs[i]]
+	identity := chunkIdentity{compilationKind: firstStringValue(chunk["compile_kwd"])}
+	if v := chunk["content_with_weight"]; v != nil {
+		identity.text = strings.Join(strings.Fields(fmt.Sprint(v)), " ")
+	}
+	return identity, identity.text != ""
+}
+
+// Identical copies of a file (X.pdf, X(2).pdf, ...) can fill the whole rerank
+// window, so collapsing requests over-fetch and rerank distinct texts only.
+const (
+	collapseOverfetchFactor = 3
+	collapseOverfetchMax    = 1024
+)
+
+func collapseOverfetchCount(window int) int {
+	return max(window, min(window*collapseOverfetchFactor, collapseOverfetchMax))
+}
+
+// pool keeps the copies so the post-ranking collapse can still pick the best
+// boosted one; only scored (one chunk per text) reaches the reranker.
+type rerankWindow struct {
+	pool     *RetrievalSearchResult
+	scored   *RetrievalSearchResult
+	scoredOf []int // pool position -> scored position
+	unique   int
+}
+
+func uniqueRerankWindow(result *RetrievalSearchResult, window int) rerankWindow {
+	n := len(result.IDs)
+	if len(result.Chunks) != n {
+		// Scorers index Chunks by the IDs position; without that alignment
+		// copies cannot be mapped, so keep the pre-collapse window as-is.
+		cut := min(window, n)
+		return rerankWindow{pool: subsetSearchResult(result, identityPositions(cut)), scored: subsetSearchResult(result, identityPositions(cut)), unique: cut}
+	}
+	repOf := make([]int, n)
+	firstByIdentity := make(map[chunkIdentity]int)
+	reps := make([]int, 0, min(window, n))
+	unique := 0
+	for i := 0; i < n; i++ {
+		identity, hasText := duplicateIdentity(result, i)
+		if hasText {
+			if first, seen := firstByIdentity[identity]; seen {
+				repOf[i] = repOf[first]
+				continue
+			}
+			firstByIdentity[identity] = i
+		}
+		unique++
+		if len(reps) < window {
+			repOf[i] = len(reps)
+			reps = append(reps, i)
+		} else {
+			repOf[i] = -1
+		}
+	}
+	if len(reps) == n {
+		return rerankWindow{pool: result, scored: result, unique: unique}
+	}
+	poolPositions := make([]int, 0, n)
+	scoredOf := make([]int, 0, n)
+	for i, r := range repOf {
+		if r >= 0 {
+			poolPositions = append(poolPositions, i)
+			scoredOf = append(scoredOf, r)
+		}
+	}
+	return rerankWindow{
+		pool:     subsetSearchResult(result, poolPositions),
+		scored:   subsetSearchResult(result, reps),
+		scoredOf: scoredOf,
+		unique:   unique,
+	}
+}
+
+func identityPositions(n int) []int {
+	positions := make([]int, n)
+	for i := range positions {
+		positions[i] = i
+	}
+	return positions
+}
+
+// subsetSearchResult keeps the given IDs positions with their original Chunks
+// maps: the scorers read engine scores (_score) from Chunks, not Field.
+func subsetSearchResult(result *RetrievalSearchResult, positions []int) *RetrievalSearchResult {
+	subset := *result
+	subset.IDs = make([]string, 0, len(positions))
+	subset.Chunks = make([]map[string]interface{}, 0, len(positions))
+	subset.Field = make(map[string]map[string]interface{}, len(positions))
+	if result.Highlight != nil {
+		subset.Highlight = make(map[string]string)
+	}
+	for _, i := range positions {
+		id := result.IDs[i]
+		subset.IDs = append(subset.IDs, id)
+		if i < len(result.Chunks) {
+			subset.Chunks = append(subset.Chunks, result.Chunks[i])
+		}
+		if chunk, ok := result.Field[id]; ok {
+			subset.Field[id] = chunk
+		}
+		if hl, ok := result.Highlight[id]; ok {
+			subset.Highlight[id] = hl
+		}
+	}
+	subset.Total = int64(len(subset.IDs))
+	return &subset
+}
+
+// Copies inherit the representative's rank features too; per-document
+// metadata boosts are still added per copy afterwards.
+func expandScores(scores []float64, scoredOf []int) []float64 {
+	expanded := make([]float64, len(scoredOf))
+	for p, r := range scoredOf {
+		if r < len(scores) {
+			expanded[p] = scores[r]
+		}
+	}
+	return expanded
 }
 
 // stringField returns chunk[key] when it is a string, otherwise "".
