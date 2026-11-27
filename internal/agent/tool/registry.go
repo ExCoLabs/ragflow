@@ -452,7 +452,7 @@ func buildRetrievalTool(params map[string]any) (einotool.BaseTool, error) {
 			"keywords_similarity_weight", "use_kg", "rerank_id", "empty_response",
 			"toc_enhance", "meta_data_filter", "retrieval_from", "memory_ids",
 			"kb_vars", "cross_languages", "function_name", "description", "meta",
-			"inputs", "outputs", "user_id", "filter_args":
+			"inputs", "outputs", "user_id", "filter_args", "compact_result":
 		default:
 			return nil, fmt.Errorf("agent tool: retrieval tool does not accept node-level param %s", key)
 		}
@@ -550,6 +550,13 @@ func buildRetrievalTool(params map[string]any) (einotool.BaseTool, error) {
 			return nil, fmt.Errorf("agent tool: retrieval tool requires retrieval_from to be dataset or memory")
 		}
 		defaults.RetrievalFrom = retrievalFrom
+	}
+	if value, ok := params["compact_result"]; ok {
+		compact, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("agent tool: retrieval tool requires boolean node-level param compact_result")
+		}
+		defaults.CompactResult = compact
 	}
 	if value, ok := params["filter_args"]; ok && value != nil {
 		cfg, err := parseFilterArgs(value)
