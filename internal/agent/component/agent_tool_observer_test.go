@@ -254,15 +254,33 @@ func TestAgent_ToolErrorsStayFatalByDefault(t *testing.T) {
 	}
 }
 
-// Only what the MCP server itself reported as a tool error is handed to the
-// model; any other tool failure still fails the run.
-func TestAgent_ToolErrorsToModelLeavesOtherFailuresFatal(t *testing.T) {
+// Any other tool failure, e.g. the query embedding request losing its
+// connection, also reaches the model; only a run whose context is done stops.
+func TestAgent_ToolErrorsToModelCoversTransportFailures(t *testing.T) {
 	mdl := coordinatorScript()
 	mdl.root[0] = toolCallRound(toolCall("c1", "is_query", `{}`))
-	boom := errors.New("connection refused")
+	boom := errors.New("GetVector failed: unexpected EOF")
 	useScriptedLoop(t, mdl, &scriptedTool{name: "is_query", run: func(context.Context, string) (string, error) { return "", boom }})
-	if _, err := NewAgentComponent(coordinatorParam(true, false)).Invoke(t.Context(), nil, map[string]any{"user_prompt": "question"}); !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the transport failure", err)
+	out, err := NewAgentComponent(coordinatorParam(true, false)).Invoke(t.Context(), nil, map[string]any{"user_prompt": "question"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if out["content"] != "coordinator answer" {
+		t.Fatalf("content = %v", out["content"])
+	}
+	if got := toolResults(mdl.rootInputs[1])["c1"]; !strings.Contains(got, "TOOL ERROR: is_query failed: GetVector failed: unexpected EOF") {
+		t.Errorf("transport error as tool result = %q", got)
+	}
+
+	mdl = coordinatorScript()
+	mdl.root[0] = toolCallRound(toolCall("c1", "is_query", `{}`))
+	ctx, cancel := context.WithCancel(t.Context())
+	useScriptedLoop(t, mdl, &scriptedTool{name: "is_query", run: func(context.Context, string) (string, error) {
+		cancel()
+		return "", context.Canceled
+	}})
+	if _, err := NewAgentComponent(coordinatorParam(true, false)).Invoke(ctx, nil, map[string]any{"user_prompt": "question"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cancellation", err)
 	}
 }
 
